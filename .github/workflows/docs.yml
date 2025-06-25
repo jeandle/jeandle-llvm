@@ -60,12 +60,12 @@ jobs:
       # a local checkout beforehand.
       - name: Fetch LLVM sources (Push)
         if: ${{ github.event_name == 'push' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           fetch-depth: 1
       - name: Get subprojects that have doc changes
         id: docs-changed-subprojects
-        uses: tj-actions/changed-files@v39
+        uses: tj-actions/changed-files@v46
         with:
           files_yaml: |
             llvm:
@@ -96,11 +96,11 @@ jobs:
               - 'flang/include/flang/Optimizer/Dialect/FIROps.td'
       - name: Fetch LLVM sources (PR)
         if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           fetch-depth: 1
       - name: Setup Python env
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'

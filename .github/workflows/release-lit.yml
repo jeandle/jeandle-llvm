@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout LLVM
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@09d2acae674a48949e3602304ab46fd20ae0c42f # v4.1.1
         with:
           ref: "llvmorg-${{ inputs.release-version }}"
 
