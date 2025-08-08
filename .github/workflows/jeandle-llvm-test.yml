@@ -11,19 +11,30 @@ jobs:
     name: "jeandle-llvm test"
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - name: 'checkout the source code'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 1
+
       - name: build and test
         run : |
           mkdir build
           cd build
-          cmake -G "Unix Makefiles" -DLLVM_TARGETS_TO_BUILD=X86 -DCMAKE_BUILD_TYPE=Release ../llvm
-          make check-llvm -j$(nproc)
+          cmake -G "Unix Makefiles" -DLLVM_TARGETS_TO_BUILD=X86 -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_DYLIB_COMPONENTS=all ../llvm
+          make check-llvm -j $[$(nproc)/2]
 
   clang-format:
     name: "clang-format check"
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - name: 'checkout the source code'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 1
       - name: clang-format
         run : |
           git remote add jeandle-main https://github.com/jeandle/jeandle-llvm.git
