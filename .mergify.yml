@@ -4,6 +4,11 @@ merge_protections:
       - base = main
     success_conditions:
       - or:
-          - approved-reviews-by = @Cruise20
-          - approved-reviews-by = @casparcwang
-          - approved-reviews-by = @taofengliu
+          - approved-reviews-by = @Maintainer
+
+  - name: Pull request title format.
+    if:
+      - base = main
+    success_conditions:
+      - "title ~=
+        ^(fix|feat|docs|style|refactor|perf|test|build|ci|chore|revert):"
