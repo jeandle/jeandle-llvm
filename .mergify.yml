@@ -1,0 +1,9 @@
+merge_protections:
+  - name: Require a review from a maintainer.
+    if:
+      - base = main
+    success_conditions:
+      - or:
+          - approved-reviews-by = @Cruise20
+          - approved-reviews-by = @casparcwang
+          - approved-reviews-by = @taofengliu
