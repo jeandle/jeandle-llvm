@@ -919,6 +919,10 @@ bool ShrinkWrap::runOnMachineFunction(MachineFunction &MF) {
   if (skipFunction(MF.getFunction()) || MF.empty() || !isShrinkWrapEnabled(MF))
     return false;
 
+  // Insert prologue/epilogue for Hotspot VM in entry/return blocks.
+  if (MF.getFunction().getCallingConv() == CallingConv::Hotspot_JIT)
+    return false;
+
   LLVM_DEBUG(dbgs() << "**** Analysing " << MF.getName() << '\n');
 
   init(MF);
