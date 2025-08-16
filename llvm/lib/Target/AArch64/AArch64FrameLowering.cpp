@@ -3675,6 +3675,15 @@ void AArch64FrameLowering::determineCalleeSaves(MachineFunction &MF,
   MachineFrameInfo &MFI = MF.getFrameInfo();
   const MCPhysReg *CSRegs = MF.getRegInfo().getCalleeSavedRegs();
 
+  // Hotspot always save LR & FP for stack unwinding
+  if (MF.getFunction().getCallingConv() == CallingConv::Hotspot_JIT) {
+    if (!SavedRegs.test(AArch64::FP))
+      SavedRegs.set(AArch64::FP);
+
+    if (!SavedRegs.test(AArch64::LR))
+      SavedRegs.set(AArch64::LR);
+  }
+
   unsigned BasePointerReg = RegInfo->hasBasePointer(MF)
                                 ? RegInfo->getBaseRegister()
                                 : (unsigned)AArch64::NoRegister;

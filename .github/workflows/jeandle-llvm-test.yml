@@ -1,15 +1,30 @@
 name: "jeandle-llvm check"
 
 on:
-  pull_request_target:
-    branches:
-      - 'main'
+  push:
+    branches-ignore:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
 
   test:
     name: "jeandle-llvm test"
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runs-on }}
+
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            target: X86
+            runs-on: ubuntu-22.04
+          - arch: aarch64
+            target: AArch64
+            runs-on: ubuntu-22.04-arm
+
     steps:
       - name: 'checkout the source code'
         uses: actions/checkout@v4
@@ -22,7 +37,7 @@ jobs:
         run : |
           mkdir build
           cd build
-          cmake -G "Unix Makefiles" -DLLVM_TARGETS_TO_BUILD=X86 -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_DYLIB_COMPONENTS=all ../llvm
+          cmake -G "Unix Makefiles" -DLLVM_TARGETS_TO_BUILD=${{ matrix.target }} -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_DYLIB_COMPONENTS=all ../llvm
           make check-llvm -j $[$(nproc)/2]
 
   clang-format:
