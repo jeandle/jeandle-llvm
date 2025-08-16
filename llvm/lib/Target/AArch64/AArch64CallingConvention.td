@@ -553,6 +553,40 @@ def CC_AArch64_Preserve_None : CallingConv<[
   CCDelegateTo<CC_AArch64_AAPCS>
 ]>;
 
+//===----------------------------------------------------------------------===//
+// ARM64 Calling Convention for OpenJDK HotSpot
+//===----------------------------------------------------------------------===//
+
+// This calling convention is specific to the OpenJDK HotSpot JIT Compiler.
+// The only documentation is the OpenJDK source code, specifically the C header
+// file:
+//
+//    https://github.com/jeandle/jeandle-jdk/blob/main/src/hotspot/cpu/aarch64/assembler_aarch64.hpp
+//
+// which defines the registers for the Java calling convention.
+//
+//  |--------------------------------------------------------------------|
+//  | X0       X1       X2      X3      X4      X5      X6      X7       |
+//  |--------------------------------------------------------------------|
+//  | c_rarg0  c_rarg1  c_rarg2 c_rarg3 c_rarg4 c_rarg5 c_rarg6 c_rarg7  |
+//  |--------------------------------------------------------------------|
+//  | j_rarg7  j_rarg0  j_rarg1 j_rarg2 j_rarg3 j_rarg4 j_rarg5 j_rarg6  |
+//  |--------------------------------------------------------------------|
+//
+
+let Entry = 1 in
+def CC_AArch64_Hotspot : CallingConv<[
+  CCIfType<[i32], CCAssignToReg<[W1, W2, W3, W4, W5, W6, W7, W0]>>,
+  CCIfType<[i64], CCAssignToReg<[X1, X2, X3, X4, X5, X6, X7, X0]>>,
+
+  // Java floating args are passed as per C
+  CCIfType<[f32], CCAssignToReg<[S0, S1, S2, S3, S4, S5, S6, S7]>>,
+  CCIfType<[f64], CCAssignToReg<[D0, D1, D2, D3, D4, D5, D6, D7]>>,
+
+  // Delegate to AAPCS for now
+  CCDelegateTo<CC_AArch64_AAPCS>
+]>;
+
 // The order of the callee-saves in this file is important, because the
 // FrameLowering code will use this order to determine the layout the
 // callee-save area in the stack frame. As can be observed below, Darwin
@@ -690,6 +724,12 @@ def CSR_AArch64_StackProbe_Windows
     : CalleeSavedRegs<(add (sequence "X%u", 0, 15),
                            (sequence "X%u", 18, 28), FP, SP,
                            (sequence "Q%u", 0, 31))>;
+
+// HotSpot C1/C2 compiler don't use any callee save registers.
+//   X0-X7,X10-X26 volatile (caller save)
+//   X27-X32 system (no save, no allocate)
+//   X8-X9 non-allocatable (so we can use them as scratch regs)
+def CSR_AArch64_Hotspot : CalleeSavedRegs<(add LR, FP)>;
 
 // Darwin variants of AAPCS.
 // Darwin puts the frame-record at the top of the callee-save area.
