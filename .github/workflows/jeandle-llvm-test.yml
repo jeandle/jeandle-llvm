@@ -1,12 +1,12 @@
 name: "jeandle-llvm check"
 
 on:
-  push:
-    branches-ignore:
-      - main
+  pull_request_target:
+    branches:
+      - 'main'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.head_ref }}
   cancel-in-progress: true
 
 jobs:
