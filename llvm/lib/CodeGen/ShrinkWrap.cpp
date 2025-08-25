@@ -1,7 +1,5 @@
 //===- ShrinkWrap.cpp - Compute safe point for prolog/epilog insertion ----===//
 //
-// Copyright (c) 2025, the Jeandle-LLVM Authors. All Rights Reserved.
-//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -75,7 +73,6 @@
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/Attributes.h"
-#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Function.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -921,10 +918,6 @@ bool ShrinkWrap::performShrinkWrapping(
 bool ShrinkWrap::runOnMachineFunction(MachineFunction &MF) {
   if (skipFunction(MF.getFunction()) || MF.empty() || !isShrinkWrapEnabled(MF))
     return false;
-
-  if (MF.getFunction().getCallingConv() == CallingConv::Hotspot_JIT) {
-    return false;
-  }
 
   LLVM_DEBUG(dbgs() << "**** Analysing " << MF.getName() << '\n');
 

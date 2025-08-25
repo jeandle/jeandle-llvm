@@ -546,9 +546,6 @@ def CC_X86_64_C : CallingConv<[
   // Pointers are always passed in full 64-bit registers.
   CCIfPtr<CCCustom<"CC_X86_64_Pointer">>,
 
-  CCIfCC<"CallingConv::Hotspot_JIT",
-    CCIfType<[i32], CCAssignToReg<[ESI, EDX, ECX, R8D, R9D, EDI]>>>,
-
   // The first 6 integer arguments are passed in integer registers.
   CCIfType<[i32], CCAssignToReg<[EDI, ESI, EDX, ECX, R8D, R9D]>>,
 
@@ -556,9 +553,6 @@ def CC_X86_64_C : CallingConv<[
   // not split across register and stack. Handle this with a custom function.
   CCIfType<[i64],
            CCIfConsecutiveRegs<CCCustom<"CC_X86_64_I128">>>,
-
-  CCIfCC<"CallingConv::Hotspot_JIT",
-    CCIfType<[i64], CCAssignToReg<[RSI, RDX, RCX, R8, R9, RDI]>>>,
 
   CCIfType<[i64], CCAssignToReg<[RDI, RSI, RDX, RCX, R8 , R9 ]>>,
 
@@ -1047,6 +1041,30 @@ def CC_X86_64_Preserve_None : CallingConv<[
   CCDelegateTo<CC_X86_64_C>
 ]>;
 
+// This calling convention is specific to the OpenJDK HotSpot JIT Compiler.
+// The only documentation is the OpenJDK source code, specifically the C header
+// file:
+//
+//    https://github.com/jeandle/jeandle-jdk/blob/main/src/hotspot/cpu/x86/assembler_x86.hpp
+//
+// which defines the registers for the Java calling convention.
+//
+//        |-------------------------------------------------------|
+//        | c_rarg0   c_rarg1  c_rarg2 c_rarg3 c_rarg4 c_rarg5    |
+//        |-------------------------------------------------------|
+//        | rdi       rsi      rdx     rcx     r8      r9         |
+//        |-------------------------------------------------------|
+//        | j_rarg5   j_rarg0  j_rarg1 j_rarg2 j_rarg3 j_rarg4    |
+//        |-------------------------------------------------------|
+//
+def CC_X86_64_Hotspot_JIT : CallingConv<[
+  CCIfType<[i32], CCAssignToReg<[ESI, EDX, ECX, R8D, R9D, EDI]>>,
+  CCIfType<[i64], CCAssignToReg<[RSI, RDX, RCX, R8, R9, RDI]>>,
+
+  // Otherwise it's the same as the regular C calling convention.
+  CCDelegateTo<CC_X86_64_C>
+]>;
+
 //===----------------------------------------------------------------------===//
 // X86 Root Argument Calling Conventions
 //===----------------------------------------------------------------------===//
@@ -1091,6 +1109,8 @@ def CC_X86_64 : CallingConv<[
 
   // Mingw64 and native Win64 use Win64 CC
   CCIfSubtarget<"isTargetWin64()", CCDelegateTo<CC_X86_Win64_C>>,
+
+  CCIfCC<"CallingConv::Hotspot_JIT", CCDelegateTo<CC_X86_64_Hotspot_JIT>>,
 
   // Otherwise, drop to normal X86-64 CC
   CCDelegateTo<CC_X86_64_C>
@@ -1218,6 +1238,4 @@ def CSR_SysV64_RegCall       : CalleeSavedRegs<(add CSR_SysV64_RegCall_NoSSE,
                                                (sequence "XMM%u", 8, 15))>;
 
 // For the Hotspot_JIT calling convention.
-def CSR_64_Hotspot_JIT : CalleeSavedRegs<(add)> {
-  let OtherPreserved = (add RBP);
-}
+def CSR_64_Hotspot_JIT : CalleeSavedRegs<(add RBP)>;

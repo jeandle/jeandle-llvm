@@ -1711,7 +1711,7 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
       !MF.shouldSplitStack()) {                // Regular stack
     uint64_t MinSize =
         X86FI->getCalleeSavedFrameSize() - X86FI->getTCReturnAddrDelta();
-    if (HasFP || Fn.getCallingConv() == CallingConv::Hotspot_JIT)
+    if (HasFP)
       MinSize += SlotSize;
     X86FI->setUsesRedZone(MinSize > 0 || StackSize > 0);
     StackSize = std::max(MinSize, StackSize > 128 ? StackSize - 128 : 0);
@@ -1762,21 +1762,7 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
     MBB.addLiveIn(Establisher);
   }
 
-  if (Fn.getCallingConv() == CallingConv::Hotspot_JIT) {
-    assert(!HasFP && "FP should be eliminated for Hotspot JIT");
-    assert(Is64Bit && "The Hotspot JIT CallingConv is only valid on x86-64.");
-
-    // Calculate required stack adjustment.
-    uint64_t FrameSize = StackSize - SlotSize;
-    NumBytes =
-        FrameSize - (X86FI->getCalleeSavedFrameSize() + TailCallArgReserveSize);
-
-    // For stack unwind in Hotspot VM.
-    BuildMI(MBB, MBBI, DL,
-            TII.get(getPUSHOpcode(MF.getSubtarget<X86Subtarget>())))
-        .addReg(X86::RBP, RegState::Kill)
-        .setMIFlag(MachineInstr::FrameSetup);
-  } else if (HasFP) {
+  if (HasFP) {
     assert(MF.getRegInfo().isReserved(MachineFramePtr) && "FP reserved");
 
     // Calculate required stack adjustment.
@@ -2454,8 +2440,7 @@ void X86FrameLowering::emitEpilogue(MachineFunction &MF,
   if (IsFunclet) {
     assert(HasFP && "EH funclets without FP not yet implemented");
     NumBytes = getWinEHFuncletFrameSize(MF);
-  } else if (HasFP ||
-             MF.getFunction().getCallingConv() == CallingConv::Hotspot_JIT) {
+  } else if (HasFP) {
     // Calculate required stack adjustment.
     uint64_t FrameSize = StackSize - SlotSize;
     NumBytes = FrameSize - CSSize - TailCallArgReserveSize;
@@ -2471,16 +2456,6 @@ void X86FrameLowering::emitEpilogue(MachineFunction &MF,
 
   // AfterPop is the position to insert .cfi_restore.
   MachineBasicBlock::iterator AfterPop = MBBI;
-
-  // For stack unwind in Hotspot VM.
-  if (MF.getFunction().getCallingConv() == CallingConv::Hotspot_JIT) {
-    assert(!HasFP && "FP should be eliminated for Hotspot JIT");
-    assert(Is64Bit && "The Hotspot JIT CallingConv is only valid on x86-64.");
-    BuildMI(MBB, MBBI, DL,
-            TII.get(getPOPOpcode(MF.getSubtarget<X86Subtarget>())), X86::RBP)
-        .setMIFlag(MachineInstr::FrameDestroy);
-  }
-
   if (HasFP) {
     if (X86FI->hasSwiftAsyncContext()) {
       // Discard the context.
@@ -2887,15 +2862,6 @@ bool X86FrameLowering::assignCalleeSavedSpillSlots(
     }
   }
 
-  if (MF.getFunction().getCallingConv() == CallingConv::Hotspot_JIT) {
-    assert(!hasFP(MF) && "FP should be eliminated for Hotspot JIT");
-
-    // emitPrologue always spills frame register the first thing for Hotspot
-    // JIT.
-    SpillSlotOffset -= SlotSize;
-    MFI.CreateFixedSpillStackObject(SlotSize, SpillSlotOffset);
-  }
-
   if (hasFP(MF)) {
     // emitPrologue always spills frame register the first thing.
     SpillSlotOffset -= SlotSize;
@@ -3218,6 +3184,10 @@ void X86FrameLowering::determineCalleeSaves(MachineFunction &MF,
     if (STI.isTarget64BitILP32())
       BasePtr = getX86SubSuperRegister(BasePtr, 64);
     SavedRegs.set(BasePtr);
+  }
+
+  if (MF.getFunction().getCallingConv() == CallingConv::Hotspot_JIT) {
+    SavedRegs.set(X86::RBP);
   }
 }
 

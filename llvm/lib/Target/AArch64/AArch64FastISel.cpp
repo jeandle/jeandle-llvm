@@ -338,7 +338,7 @@ CCAssignFn *AArch64FastISel::CCAssignFnForCall(CallingConv::ID CC) const {
   if (CC == CallingConv::GHC)
     return CC_AArch64_GHC;
   if (CC == CallingConv::Hotspot_JIT)
-    return CC_AArch64_Hotspot;
+    return CC_AArch64_Hotspot_JIT;
   if (CC == CallingConv::CFGuard_Check)
     return CC_AArch64_Win64_CFGuard_Check;
   if (Subtarget->isTargetDarwin())

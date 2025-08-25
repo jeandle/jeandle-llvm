@@ -142,7 +142,7 @@ AArch64RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   if (MF->getInfo<AArch64FunctionInfo>()->isSVECC())
     return CSR_AArch64_SVE_AAPCS_SaveList;
   if (MF->getFunction().getCallingConv() == CallingConv::Hotspot_JIT)
-    return CSR_AArch64_Hotspot_SaveList;
+    return CSR_AArch64_Hotspot_JIT_SaveList;
   return CSR_AArch64_AAPCS_SaveList;
 }
 
@@ -327,7 +327,7 @@ AArch64RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
     return SCS ? CSR_AArch64_RT_AllRegs_SCS_RegMask
                : CSR_AArch64_RT_AllRegs_RegMask;
   if (CC == CallingConv::Hotspot_JIT)
-    return CSR_AArch64_Hotspot_RegMask;
+    return CSR_AArch64_Hotspot_JIT_RegMask;
 
   return SCS ? CSR_AArch64_AAPCS_SCS_RegMask : CSR_AArch64_AAPCS_RegMask;
 }
@@ -673,7 +673,7 @@ bool AArch64RegisterInfo::isArgumentRegister(const MachineFunction &MF,
   case CallingConv::GHC:
     return HasReg(CC_AArch64_GHC_ArgRegs, Reg);
   case CallingConv::Hotspot_JIT:
-    return HasReg(CC_AArch64_Hotspot_ArgRegs, Reg);
+    return HasReg(CC_AArch64_Hotspot_JIT_ArgRegs, Reg);
   case CallingConv::PreserveNone:
     if (!MF.getFunction().isVarArg())
       return HasReg(CC_AArch64_Preserve_None_ArgRegs, Reg);

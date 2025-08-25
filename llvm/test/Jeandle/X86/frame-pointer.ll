@@ -1,16 +1,19 @@
 ; RUN: llc -O3 -mtriple=x86_64-linux-gnu < %s | FileCheck %s
 
 ; CHECK: pushq	%rbp
-; CHECK-NEXT:	subq	$32, %rsp
-; CHECK-NEXT: .cfi_def_cfa_offset 48
-; CHECK-NEXT: # kill: def $esi killed $esi def $rsi
-; CHECK-NEXT: testl	%esi, %esi
-; CHECK: movl	%esi, %eax
-; CHECK-NEXT: addq	$32, %rsp
-; CHECK-NEXT: .cfi_def_cfa_offset 8
-; CHECK-NEXT: popq	%rbp
-; CHECK-NEXT: .cfi_def_cfa_offset 0
-; CHECK-NEXT: retq
+; CHECK-NEXT:   .cfi_def_cfa_offset 16
+; CHECK-NEXT:   subq	$32, %rsp
+; CHECK-NEXT:   .cfi_def_cfa_offset 48
+; CHECK-NEXT:   .cfi_offset %rbp, -16
+
+; CHECK: addq	$32, %rsp
+; CHECK-NEXT: 	.cfi_def_cfa_offset 16
+; CHECK-NEXT: 	popq	%rbp
+; CHECK-NEXT: 	.cfi_def_cfa_offset 8
+; CHECK-NEXT: 	.cfi_restore %rbp
+; CHECK-NEXT: .LBB0_4:                                # %common.ret
+; CHECK-NEXT: 	movl	%esi, %eax
+; CHECK-NEXT: 	retq
 define hotspotcc i32 @"Main_testEpilogProlog_(I)I"(i32 %0) local_unnamed_addr #0 gc "hotspotgc" {
 entry:
   %1 = icmp sgt i32 %0, 0

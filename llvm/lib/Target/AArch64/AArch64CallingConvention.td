@@ -575,7 +575,7 @@ def CC_AArch64_Preserve_None : CallingConv<[
 //
 
 let Entry = 1 in
-def CC_AArch64_Hotspot : CallingConv<[
+def CC_AArch64_Hotspot_JIT : CallingConv<[
   CCIfType<[i32], CCAssignToReg<[W1, W2, W3, W4, W5, W6, W7, W0]>>,
   CCIfType<[i64], CCAssignToReg<[X1, X2, X3, X4, X5, X6, X7, X0]>>,
 
@@ -729,7 +729,7 @@ def CSR_AArch64_StackProbe_Windows
 //   X0-X7,X10-X26 volatile (caller save)
 //   X27-X32 system (no save, no allocate)
 //   X8-X9 non-allocatable (so we can use them as scratch regs)
-def CSR_AArch64_Hotspot : CalleeSavedRegs<(add LR, FP)>;
+def CSR_AArch64_Hotspot_JIT : CalleeSavedRegs<(add LR, FP)>;
 
 // Darwin variants of AAPCS.
 // Darwin puts the frame-record at the top of the callee-save area.

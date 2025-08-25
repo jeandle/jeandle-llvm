@@ -7801,7 +7801,7 @@ CCAssignFn *AArch64TargetLowering::CCAssignFnForCall(CallingConv::ID CC,
   case CallingConv::ARM64EC_Thunk_Native:
     return CC_AArch64_Arm64EC_Thunk_Native;
   case CallingConv::Hotspot_JIT:
-    return CC_AArch64_Hotspot;
+    return CC_AArch64_Hotspot_JIT;
   }
 }
 
