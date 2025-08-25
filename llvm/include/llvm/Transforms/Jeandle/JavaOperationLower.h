@@ -18,6 +18,14 @@ namespace llvm {
 class JavaOperationLower : public PassInfoMixin<JavaOperationLower> {
 public:
   JavaOperationLower(int Phase) : Phase(Phase) {}
+
+  void printPipeline(raw_ostream &OS,
+                     function_ref<StringRef(StringRef)> MapClassName2PassName) {
+    static_cast<PassInfoMixin<JavaOperationLower> *>(this)->printPipeline(
+        OS, MapClassName2PassName);
+    OS << "<phase=" << Phase << '>';
+  }
+
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
 
 private:

@@ -10,11 +10,12 @@
 
 #include "llvm/Jeandle/Pipeline.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
+#include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Scalar/RewriteStatepointsForGC.h"
 
 namespace llvm::jeandle {
 
-Pipeline::Pipeline(OptimizationLevel Level) {
+Pipeline::Pipeline(OptimizationLevel level) {
   // Create the new pass manager builder.
   // Take a look at the PassBuilder constructor parameters for more
   // customization, e.g. specifying a TargetMachine or various debugging
@@ -28,9 +29,15 @@ Pipeline::Pipeline(OptimizationLevel Level) {
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
-  // This one corresponds to a typical -O3 optimization pipeline
+  buildJeandlePipeline(PM, PB, level);
+}
+
+void Pipeline::buildJeandlePipeline(ModulePassManager &PM, PassBuilder &PB,
+                                    OptimizationLevel level) {
   PM.addPass(JavaOperationLower(0));
-  PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(Level)));
+  PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(level)));
+  PM.addPass(JavaOperationLower(1));
+  PM.addPass(createModuleToFunctionPassAdaptor(TLSPointerRewrite()));
   PM.addPass(RewriteStatepointsForGC());
 }
 

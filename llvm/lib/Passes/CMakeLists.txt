@@ -27,6 +27,7 @@ add_llvm_component_library(LLVMPasses
   IPO
   InstCombine
   IRPrinter
+  Jeandle
   ObjCARC
   Scalar
   Support

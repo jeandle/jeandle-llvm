@@ -21,6 +21,9 @@ class Pipeline {
 public:
   Pipeline(OptimizationLevel Level);
 
+  static void buildJeandlePipeline(ModulePassManager &PM, PassBuilder &PB,
+                                   OptimizationLevel Level);
+
   void run(Module &M);
 
 private:

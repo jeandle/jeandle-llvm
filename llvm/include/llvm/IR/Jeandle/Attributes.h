@@ -13,18 +13,20 @@
 
 #include "llvm/IR/Attributes.h"
 
-namespace llvm::jeandle::attr {
+namespace llvm::jeandle {
 
-constexpr const char *UseCompressedOops = "use-compressed-oops";
+class Attribute {
+public:
+  static constexpr const char *UseCompressedOops = "use-compressed-oops";
 
-constexpr const char *JavaMethod = "java-method";
+  static constexpr const char *StatepointID = "statepoint-id";
 
-constexpr const char *StatepointID = "statepoint-id";
+  static constexpr const char *StatepointNumPatchBytes =
+      "statepoint-num-patch-bytes";
 
-constexpr const char *StatepointNumPatchBytes = "statepoint-num-patch-bytes";
+  static constexpr const char *LowerPhase = "lower-phase";
+};
 
-constexpr const char *LowerPhase = "lower-phase";
-
-} // namespace llvm::jeandle::attr
+} // namespace llvm::jeandle
 
 #endif // JEANDLE_ATTRIBUTE_H

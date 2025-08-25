@@ -54,7 +54,6 @@ MODULE_PASS("annotation2metadata", Annotation2MetadataPass())
 MODULE_PASS("assign-guid", AssignGUIDPass())
 MODULE_PASS("attributor", AttributorPass())
 MODULE_PASS("attributor-light", AttributorLightPass())
-MODULE_PASS("java-operation-lower0", JavaOperationLower(0))
 MODULE_PASS("called-value-propagation", CalledValuePropagationPass())
 MODULE_PASS("canonicalize-aliases", CanonicalizeAliasesPass())
 MODULE_PASS("check-debugify", NewPMCheckDebugifyPass())
@@ -212,6 +211,14 @@ MODULE_PASS_WITH_PARAMS(
 MODULE_PASS_WITH_PARAMS(
     "ipsccp", "IPSCCPPass", [](IPSCCPOptions Opts) { return IPSCCPPass(Opts); },
     parseIPSCCPOptions, "no-func-spec;func-spec")
+MODULE_PASS_WITH_PARAMS(
+    "java-operation-lower", "JavaOperationLower",
+    [](int Phase) { return JavaOperationLower(Phase); },
+    parseJavaOperationLowerOptions, "phase=0")
+MODULE_PASS_WITH_PARAMS(
+    "java-operation-lower", "JavaOperationLower",
+    [](int Phase) { return JavaOperationLower(Phase); },
+    parseJavaOperationLowerOptions, "phase=1")
 MODULE_PASS_WITH_PARAMS(
     "loop-extract", "LoopExtractorPass",
     [](bool Single) {
@@ -479,6 +486,7 @@ FUNCTION_PASS("slsr", StraightLineStrengthReducePass())
 FUNCTION_PASS("stack-protector", StackProtectorPass(TM))
 FUNCTION_PASS("strip-gc-relocates", StripGCRelocates())
 FUNCTION_PASS("tailcallelim", TailCallElimPass())
+FUNCTION_PASS("tls-pointer-rewrite", TLSPointerRewrite())
 FUNCTION_PASS("transform-warning", WarnMissedTransformationsPass())
 FUNCTION_PASS("trigger-crash-function", TriggerCrashFunctionPass())
 FUNCTION_PASS("trigger-verifier-error", TriggerVerifierErrorPass())

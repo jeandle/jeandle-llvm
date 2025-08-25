@@ -8,8 +8,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/IR/Jeandle/GCStrategy.h"
 #include "llvm/IR/GCStrategy.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Jeandle/GCStrategy.h"
+#include "llvm/IR/Jeandle/Metadata.h"
 
 namespace {
 
@@ -22,6 +24,13 @@ public:
     // gc.root lowering code doesn't run.
     NeededSafePoints = false;
     UsesMetadata = false;
+  }
+
+  std::optional<bool> isGCManagedPointer(const llvm::Type *Ty) const override {
+    // Method is only valid on pointer typed values.
+    const llvm::PointerType *PT = llvm::cast<llvm::PointerType>(Ty);
+    return (llvm::jeandle::AddrSpace::JavaHeapAddrSpace ==
+            PT->getAddressSpace());
   }
 };
 

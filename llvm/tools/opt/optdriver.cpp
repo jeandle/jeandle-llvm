@@ -285,6 +285,9 @@ static cl::opt<bool> TryUseNewDbgInfoFormat(
     cl::desc("Enable debuginfo iterator positions, if they're built in"),
     cl::init(false), cl::Hidden);
 
+static cl::opt<bool> RunJeandle("jeandle",
+                                cl::desc("Run Jeandle pass pipeline"));
+
 extern cl::opt<bool> UseNewDbgInfoFormat;
 
 //===----------------------------------------------------------------------===//
@@ -721,6 +724,8 @@ extern "C" int optMain(
       Pipeline = "default<Os>";
     if (OptLevelOz)
       Pipeline = "default<Oz>";
+    if (RunJeandle)
+      Pipeline = "jeandle<O3>";
     OutputKind OK = OK_NoOutput;
     if (!NoOutput)
       OK = OutputAssembly

@@ -151,6 +151,7 @@
 #include "llvm/IR/SafepointIRVerifier.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IRPrinter/IRPrintingPasses.h"
+#include "llvm/Jeandle/Pipeline.h"
 #include "llvm/Passes/OptimizationLevel.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -228,6 +229,7 @@
 #include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
 #include "llvm/Transforms/Instrumentation/TypeSanitizer.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
+#include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/ObjCARC.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
 #include "llvm/Transforms/Scalar/AlignmentFromAssumptions.h"
@@ -350,8 +352,8 @@
 
 using namespace llvm;
 
-static const Regex DefaultAliasRegex(
-    "^(default|thinlto-pre-link|thinlto|lto-pre-link|lto)<(O[0123sz])>$");
+static const Regex DefaultAliasRegex("^(default|thinlto-pre-link|thinlto|lto-"
+                                     "pre-link|lto|jeandle)<(O[0123sz])>$");
 
 namespace llvm {
 cl::opt<bool> PrintPipelinePasses(
@@ -1406,13 +1408,26 @@ parseBoundsCheckingOptions(StringRef Params) {
   return Options;
 }
 
+Expected<int> parseJavaOperationLowerOptions(StringRef Params) {
+  int Result;
+  if (!Params.consume_front("phase=") || Params.getAsInteger(0, Result)) {
+    return make_error<StringError>(
+        formatv("invalid argument to JavaOperationLower pass "
+                "parameter: '{0}' ",
+                Params)
+            .str(),
+        inconvertibleErrorCode());
+  }
+  return Result;
+}
+
 } // namespace
 
 /// Tests whether a pass name starts with a valid prefix for a default pipeline
 /// alias.
 static bool startsWithDefaultPipelineAliasPrefix(StringRef Name) {
   return Name.starts_with("default") || Name.starts_with("thinlto") ||
-         Name.starts_with("lto");
+         Name.starts_with("lto") || Name.starts_with("jeandle");
 }
 
 /// Tests whether registered callbacks will accept a given pass name.
@@ -1724,6 +1739,8 @@ Error PassBuilder::parseModulePass(ModulePassManager &MPM,
         MPM.addPass(buildThinLTOPreLinkDefaultPipeline(L));
       else
         MPM.addPass(buildLTOPreLinkDefaultPipeline(L));
+    } else if (Matches[1] == "jeandle") {
+      jeandle::Pipeline::buildJeandlePipeline(MPM, *this, L);
     } else {
       assert(Matches[1] == "lto" && "Not one of the matched options!");
       MPM.addPass(buildLTODefaultPipeline(L, nullptr));
