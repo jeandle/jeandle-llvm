@@ -1,7 +1,5 @@
 //===- lib/MC/MCObjectStreamer.cpp - Object File MCStreamer Interface -----===//
 //
-// Copyright (c) 2025, the Jeandle-LLVM Authors. All Rights Reserved.
-//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -575,11 +573,6 @@ void MCObjectStreamer::emitCodeAlignment(Align Alignment,
                                          unsigned MaxBytesToEmit) {
   emitValueToAlignment(Alignment, 0, 1, MaxBytesToEmit);
   cast<MCAlignFragment>(getCurrentFragment())->setEmitNops(true, STI);
-}
-
-void MCObjectStreamer::emitHotspotPatchPoint(const MCSubtargetInfo *STI,
-                                             unsigned PatchBytes) {
-  insert(new MCHotspotPatchPointFragment(STI, PatchBytes));
 }
 
 void MCObjectStreamer::emitValueToOffset(const MCExpr *Offset,

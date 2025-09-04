@@ -1,7 +1,5 @@
 //===- lib/MC/MCStreamer.cpp - Streaming Machine Code Output --------------===//
 //
-// Copyright (c) 2025, the Jeandle-LLVM Authors. All Rights Reserved.
-//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -1280,8 +1278,6 @@ void MCStreamer::emitValueToAlignment(Align Alignment, int64_t Value,
                                       unsigned MaxBytesToEmit) {}
 void MCStreamer::emitCodeAlignment(Align Alignment, const MCSubtargetInfo *STI,
                                    unsigned MaxBytesToEmit) {}
-void MCStreamer::emitHotspotPatchPoint(const MCSubtargetInfo *STI,
-                                       unsigned PatchBytes) {}
 void MCStreamer::emitValueToOffset(const MCExpr *Offset, unsigned char Value,
                                    SMLoc Loc) {}
 void MCStreamer::emitBundleAlignMode(Align Alignment) {}

@@ -1,7 +1,5 @@
 //===- MCObjectStreamer.h - MCStreamer Object File Interface ----*- C++ -*-===//
 //
-// Copyright (c) 2025, the Jeandle-LLVM Authors. All Rights Reserved.
-//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -139,8 +137,6 @@ public:
                             unsigned MaxBytesToEmit = 0) override;
   void emitCodeAlignment(Align ByteAlignment, const MCSubtargetInfo *STI,
                          unsigned MaxBytesToEmit = 0) override;
-  void emitHotspotPatchPoint(const MCSubtargetInfo *STI,
-                             unsigned PatchBytes) override;
   void emitValueToOffset(const MCExpr *Offset, unsigned char Value,
                          SMLoc Loc) override;
   void emitDwarfLocDirective(unsigned FileNo, unsigned Line, unsigned Column,

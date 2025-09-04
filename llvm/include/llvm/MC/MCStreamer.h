@@ -1,7 +1,5 @@
 //===- MCStreamer.h - High-level Streaming Machine Code Output --*- C++ -*-===//
 //
-// Copyright (c) 2025, the Jeandle-LLVM Authors. All Rights Reserved.
-//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -861,9 +859,6 @@ public:
   /// emitted.
   virtual void emitCodeAlignment(Align Alignment, const MCSubtargetInfo *STI,
                                  unsigned MaxBytesToEmit = 0);
-
-  virtual void emitHotspotPatchPoint(const MCSubtargetInfo *STI,
-                                     unsigned PatchBytes);
 
   /// Emit some number of copies of \p Value until the byte offset \p
   /// Offset is reached.

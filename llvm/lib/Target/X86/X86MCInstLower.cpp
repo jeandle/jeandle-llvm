@@ -798,9 +798,10 @@ void X86AsmPrinter::LowerSTATEPOINT(const MachineInstr &MI,
   StatepointOpers SOpers(&MI);
   if (unsigned PatchBytes = SOpers.getNumPatchBytes()) {
     if (SOpers.getCallingConv() == CallingConv::Hotspot_JIT) {
-      assert(PatchBytes >= MCHotspotPatchPointFragment::CallSize &&
-             "At least a call instruction in patch point");
-      OutStreamer->emitHotspotPatchPoint(Subtarget, PatchBytes);
+      // Make the end of the nops to be 4 byte aligned. This is required to make call site patching multi-thread safe.
+      OutStreamer->emitCodeAlignment(Align(4), &getSubtargetInfo());
+      emitX86Nops(*OutStreamer, 4 - (PatchBytes % 4), Subtarget);
+      emitX86Nops(*OutStreamer, PatchBytes, Subtarget);
     } else {
       emitX86Nops(*OutStreamer, PatchBytes, Subtarget);
     }

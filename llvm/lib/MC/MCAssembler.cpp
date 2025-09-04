@@ -1,7 +1,5 @@
 //===- lib/MC/MCAssembler.cpp - Assembler Backend Implementation ----------===//
 //
-// Copyright (c) 2025, the Jeandle-LLVM Authors. All Rights Reserved.
-//
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -335,14 +333,6 @@ uint64_t MCAssembler::computeFragmentSize(const MCFragment &F) const {
     return cast<MCCVDefRangeFragment>(F).getContents().size();
   case MCFragment::FT_PseudoProbe:
     return cast<MCPseudoProbeAddrFragment>(F).getContents().size();
-
-  case MCFragment::FT_HotspotPatchPoint: {
-    const MCHotspotPatchPointFragment &HF =
-        cast<MCHotspotPatchPointFragment>(F);
-    unsigned Offset = getFragmentOffset(HF);
-    return HF.getSize(Offset);
-  }
-
   case MCFragment::FT_Dummy:
     llvm_unreachable("Should not have been added");
   }
@@ -812,13 +802,6 @@ static void writeFragment(raw_ostream &OS, const MCAssembler &Asm,
   case MCFragment::FT_PseudoProbe: {
     const MCPseudoProbeAddrFragment &PF = cast<MCPseudoProbeAddrFragment>(F);
     OS << PF.getContents();
-    break;
-  }
-  case MCFragment::FT_HotspotPatchPoint: {
-    const MCHotspotPatchPointFragment &HF =
-        cast<MCHotspotPatchPointFragment>(F);
-    unsigned Offset = Asm.getFragmentOffset(HF);
-    HF.emit(Asm.getBackend(), OS, Offset);
     break;
   }
   case MCFragment::FT_Dummy:

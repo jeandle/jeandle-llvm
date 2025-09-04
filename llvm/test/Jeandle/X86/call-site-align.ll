@@ -1,8 +1,10 @@
-; RUN: llc -O0 -mtriple=x86_64-linux-gnu -filetype=obj -o - %s | llvm-objdump -d - | FileCheck %s
+; RUN: llc -O0 -mtriple=x86_64-linux-gnu -o - %s | FileCheck %s
 
 define hotspotcc i32 @"Main_caller_()I"() local_unnamed_addr #0 gc "hotspotgc" {
-; CHECK: 10: 0f 1f 00 nopl (%rax)
-; CHECK-NEXT: 13: 0f 1f 44 00 00 nopl (%rax,%rax)
+; CHECK: # implicit-def: $rax
+; CHECK:	.p2align	2
+; CHECK:	nopl	(%rax)
+; CHECK:	nopl	8(%rax,%rax)
 entry:
   %statepoint_token = tail call hotspotcc token (i64, i32, ptr, i32, i32, ...) @llvm.experimental.gc.statepoint.p0(i64 0, i32 5, ptr elementtype(i32 (i32, i32, i32)) @"Main_callee_(III)I", i32 3, i32 0, i32 1, i32 2, i32 3, i32 0, i32 0)
   %0 = call i32 @llvm.experimental.gc.result.i32(token %statepoint_token)
