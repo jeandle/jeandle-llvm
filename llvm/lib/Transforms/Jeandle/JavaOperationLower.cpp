@@ -50,7 +50,8 @@ runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
 
     assert(!F.isPresplitCoroutine() &&
            "A presplit coroutine function should not be a JavaOp");
-    assert(!F.isDeclaration() && "A function declaration should not be a JavaOp");
+    assert(!F.isDeclaration() &&
+           "A function declaration should not be a JavaOp");
     assert(isInlineViable(F).isSuccess() &&
            "Function should be viable for inlining");
 
@@ -64,8 +65,8 @@ runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
     for (CallBase *CB : Calls) {
       Function *Caller = CB->getCaller();
       InlineFunctionInfo IFI(GetAssumptionCache, &PSI, nullptr, nullptr);
-      InlineResult Res =
-          InlineFunction(*CB, IFI, /*MergeAttributes=*/true, &GetAAR(F), /*InsertLifetime=*/true);
+      InlineResult Res = InlineFunction(*CB, IFI, /*MergeAttributes=*/true,
+                                        &GetAAR(F), /*InsertLifetime=*/true);
       if (!Res.isSuccess()) {
         LLVM_DEBUG(dbgs() << "failed to inline: " << Caller->getName()
                           << " in lower phase: " << Phase << "\n");
