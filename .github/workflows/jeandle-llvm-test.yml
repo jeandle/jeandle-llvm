@@ -56,3 +56,9 @@ jobs:
           git fetch --depth=1 jeandle-main
           sudo apt-get install -y clang-format
           git clang-format jeandle-main/main
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Format check failed!"
+            exit 1
+          else
+            exit 0
+          fi
