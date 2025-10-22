@@ -11,6 +11,7 @@
 #include "llvm/Jeandle/Pipeline.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
+#include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
 #include "llvm/Transforms/Scalar/RewriteStatepointsForGC.h"
 
 namespace llvm::jeandle {
@@ -35,6 +36,8 @@ Pipeline::Pipeline(OptimizationLevel level) {
 void Pipeline::buildJeandlePipeline(ModulePassManager &PM, PassBuilder &PB,
                                     OptimizationLevel level) {
   PM.addPass(JavaOperationLower(0));
+  // TODO: Insert gc barriers after default pipline.
+  PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(level)));
   PM.addPass(JavaOperationLower(1));
   PM.addPass(createModuleToFunctionPassAdaptor(TLSPointerRewrite()));
