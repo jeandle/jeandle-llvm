@@ -63,11 +63,9 @@ static bool removeFunctionFromLLVMUsed(Module &M, Function &F) {
   auto *NewArrayTy = ArrayType::get(InitArray->getType()->getElementType(),
                                     NewElements.size());
 
-  auto *NewUsedArray = new GlobalVariable(M, NewArrayTy, false,
-                                          GlobalValue::AppendingLinkage,
-                                          ConstantArray::get(NewArrayTy,
-                                                             NewElements),
-                                          "llvm.used");
+  auto *NewUsedArray = new GlobalVariable(
+      M, NewArrayTy, false, GlobalValue::AppendingLinkage,
+      ConstantArray::get(NewArrayTy, NewElements), "llvm.used");
   NewUsedArray->setSection(UsedArray->getSection());
 
   return true;
