@@ -8,15 +8,15 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
 
 using namespace llvm;
 
@@ -45,8 +45,10 @@ bool isJavaHeapStore(Instruction *I) {
   PointerType *StoredValueTy = dyn_cast<PointerType>(StoredValue->getType());
   PointerType *StoreAddressTy = dyn_cast<PointerType>(StoreAddress->getType());
 
-  if (StoredValueTy->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace ||
-      StoreAddressTy->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace) {
+  if (StoredValueTy->getAddressSpace() !=
+          jeandle::AddrSpace::JavaHeapAddrSpace ||
+      StoreAddressTy->getAddressSpace() !=
+          jeandle::AddrSpace::JavaHeapAddrSpace) {
     return false;
   }
 
@@ -55,7 +57,8 @@ bool isJavaHeapStore(Instruction *I) {
 
 } // end anonymous namespace
 
-PreservedAnalyses InsertGCBarriers::run(Function &F, FunctionAnalysisManager &FAM) {
+PreservedAnalyses InsertGCBarriers::run(Function &F,
+                                        FunctionAnalysisManager &FAM) {
   bool Changed = false;
 
   Module *M = F.getParent();
@@ -77,9 +80,9 @@ PreservedAnalyses InsertGCBarriers::run(Function &F, FunctionAnalysisManager &FA
 
     Value *DerivedPointer = SI->getPointerOperand();
     Type *PointerTy = DerivedPointer->getType();
-    Value *BasePointer = Builder.CreateIntrinsic(Intrinsic::experimental_gc_get_pointer_base,
-                                                      {PointerTy, PointerTy}, {DerivedPointer},
-                                                      {} /* FMFSource */, "base.pointer");
+    Value *BasePointer = Builder.CreateIntrinsic(
+        Intrinsic::experimental_gc_get_pointer_base, {PointerTy, PointerTy},
+        {DerivedPointer}, {} /* FMFSource */, "base.pointer");
     CallInst *call = Builder.CreateCall(CardTableBarrierFunc, BasePointer);
     call->setCallingConv(CallingConv::Hotspot_JIT);
     Changed = true;

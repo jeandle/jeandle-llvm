@@ -21,6 +21,6 @@ public:
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM);
 };
 
-}
+} // namespace llvm
 
 #endif // LLVM_INSERT_GC_BARRIERS_H
