@@ -70,6 +70,9 @@ FunctionPass *createX86FixupVectorConstants();
 /// recalculations.
 FunctionPass *createX86OptimizeLEAs();
 
+/// This pass optimizes loads of specially-marked global variables.
+FunctionPass *createX86JeandleOptLoadGlobalPass();
+
 /// Return a pass that transforms setcc + movzx pairs into xor + setcc.
 FunctionPass *createX86FixupSetCC();
 
@@ -198,6 +201,7 @@ void initializeX86LowerAMXIntrinsicsLegacyPassPass(PassRegistry &);
 void initializeX86LowerAMXTypeLegacyPassPass(PassRegistry &);
 void initializeX86LowerTileCopyPass(PassRegistry &);
 void initializeX86OptimizeLEAPassPass(PassRegistry &);
+void initializeX86JeandleOptLoadGlobalPass(PassRegistry &);
 void initializeX86PartialReductionPass(PassRegistry &);
 void initializeX86PreTileConfigPass(PassRegistry &);
 void initializeX86ReturnThunksPass(PassRegistry &);

@@ -242,6 +242,7 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeAArch64Target() {
   initializeAArch64ConditionOptimizerPass(*PR);
   initializeAArch64DeadRegisterDefinitionsPass(*PR);
   initializeAArch64ExpandPseudoPass(*PR);
+  initializeAArch64JeandleOptLoadGlobalPass(*PR);
   initializeAArch64LoadStoreOptPass(*PR);
   initializeAArch64MIPeepholeOptPass(*PR);
   initializeAArch64SIMDInstrOptPass(*PR);
@@ -895,6 +896,9 @@ void AArch64PassConfig::addPreEmitPass2() {
   // SVE bundles move prefixes with destructive operations. BLR_RVMARKER pseudo
   // instructions are lowered to bundles as well.
   addPass(createUnpackMachineBundles(nullptr));
+
+  // Final machine instruction optimization before AsmPrinter emission.
+  addPass(createAArch64JeandleOptLoadGlobalPass());
 }
 
 bool AArch64PassConfig::addRegAssignAndRewriteOptimized() {

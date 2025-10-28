@@ -77,6 +77,7 @@ extern "C" LLVM_C_ABI void LLVMInitializeX86Target() {
   initializeFixupBWInstPassPass(PR);
   initializeCompressEVEXPassPass(PR);
   initializeFixupLEAPassPass(PR);
+  initializeX86JeandleOptLoadGlobalPass(PR);
   initializeFPSPass(PR);
   initializeX86FixupSetCCPassPass(PR);
   initializeX86CallFrameOptimizationPass(PR);
@@ -666,6 +667,9 @@ void X86PassConfig::addPreEmitPass2() {
             (M->getFunction("objc_retainAutoreleasedReturnValue") ||
              M->getFunction("objc_unsafeClaimAutoreleasedReturnValue")));
   }));
+
+  // Final machine instruction optimization before AsmPrinter emission.
+  addPass(createX86JeandleOptLoadGlobalPass());
 }
 
 bool X86PassConfig::addPostFastRegAllocRewrite() {

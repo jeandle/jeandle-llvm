@@ -57,6 +57,8 @@ FunctionPass *createAArch64PostCoalescerPass();
 
 FunctionPass *createAArch64CleanupLocalDynamicTLSPass();
 
+FunctionPass *createAArch64JeandleOptLoadGlobalPass();
+
 FunctionPass *createAArch64CollectLOHPass();
 FunctionPass *createSMEABIPass();
 FunctionPass *createSMEPeepholeOptPass();
@@ -88,6 +90,7 @@ void initializeAArch64ConditionalComparesPass(PassRegistry &);
 void initializeAArch64DAGToDAGISelLegacyPass(PassRegistry &);
 void initializeAArch64DeadRegisterDefinitionsPass(PassRegistry&);
 void initializeAArch64ExpandPseudoPass(PassRegistry &);
+void initializeAArch64JeandleOptLoadGlobalPass(PassRegistry &);
 void initializeAArch64LoadStoreOptPass(PassRegistry&);
 void initializeAArch64LowerHomogeneousPrologEpilogPass(PassRegistry &);
 void initializeAArch64MIPeepholeOptPass(PassRegistry &);
