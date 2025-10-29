@@ -1881,6 +1881,11 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
 
     // Attach exceptional gc relocates to the landingpad.
     Instruction *ExceptionalToken = UnwindBlock->getLandingPadInst();
+    if (ExceptionalToken->getType() != Type::getTokenTy(ExceptionalToken->getContext())) {
+      assert(ExceptionalToken->user_empty() && "Unsupported landingpad type when using statepoint!");
+      ExceptionalToken->mutateType(Type::getTokenTy(ExceptionalToken->getContext()));
+    }
+
     Result.UnwindToken = ExceptionalToken;
 
     CreateGCRelocates(LiveVariables, BasePtrs, ExceptionalToken, Builder, GC);
