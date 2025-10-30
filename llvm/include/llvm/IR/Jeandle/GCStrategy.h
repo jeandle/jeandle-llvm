@@ -17,7 +17,7 @@ namespace llvm::jeandle {
 
 constexpr const char *JeandleGC = "hotspotgc";
 
-static bool isJeandleGC(StringRef Name) { return Name == JeandleGC; }
+bool isJeandleGC(StringRef Name);
 
 void linkAllJeandleGCs();
 
