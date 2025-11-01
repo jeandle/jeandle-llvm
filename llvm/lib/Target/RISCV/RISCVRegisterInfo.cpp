@@ -70,6 +70,9 @@ RISCVRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
                                   : CSR_Interrupt_SaveList;
   }
 
+  if (MF->getFunction().getCallingConv() == CallingConv::Hotspot_JIT)
+    return CSR_RISCV_Hotspot_JIT_SaveList;
+
   bool HasVectorCSR =
       MF->getFunction().getCallingConv() == CallingConv::RISCV_VectorCall &&
       Subtarget.hasVInstructions();
@@ -111,6 +114,18 @@ BitVector RISCVRegisterInfo::getReservedRegs(const MachineFunction &MF) const {
     // Mark all the registers defined as constant in TableGen as reserved.
     if (isConstantPhysReg(Reg))
       markSuperRegs(Reserved, Reg);
+  }
+
+  if (MF.getFunction().getCallingConv() == CallingConv::Hotspot_JIT) {
+    // rheapbase
+    if (MF.getFunction().hasFnAttribute("use-compressed-oops")) {
+      markSuperRegs(Reserved, RISCV::X27);
+    }
+    // rthread
+    markSuperRegs(Reserved, RISCV::X4);
+    // scratch register
+    markSuperRegs(Reserved, RISCV::X5);
+    markSuperRegs(Reserved, RISCV::X6);
   }
 
   // Use markSuperRegs to ensure any register aliases are also reserved
@@ -730,6 +745,10 @@ RISCVRegisterInfo::getCallPreservedMask(const MachineFunction & MF,
 
   if (CC == CallingConv::GHC)
     return CSR_NoRegs_RegMask;
+
+  if (CC == CallingConv::Hotspot_JIT)
+    return CSR_RISCV_Hotspot_JIT_RegMask;
+
   switch (Subtarget.getTargetABI()) {
   default:
     llvm_unreachable("Unrecognized ABI");
