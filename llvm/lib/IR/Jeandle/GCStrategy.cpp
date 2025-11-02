@@ -38,8 +38,9 @@ public:
 
 namespace llvm::jeandle {
 
-static llvm::GCRegistry::Add<HotspotGC> A(llvm::jeandle::JeandleGC,
-                                          "For Jeandle GC.");
+static llvm::GCRegistry::Add<HotspotGC> A(JeandleGC, "For Jeandle GC.");
+
+bool isJeandleGC(StringRef Name) { return Name == JeandleGC; }
 
 void linkAllJeandleGCs() {}
 

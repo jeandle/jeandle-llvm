@@ -11,9 +11,13 @@
 #ifndef JEANDLE_GCSTRATEGY_H
 #define JEANDLE_GCSTRATEGY_H
 
+#include "llvm/ADT/StringRef.h"
+
 namespace llvm::jeandle {
 
 constexpr const char *JeandleGC = "hotspotgc";
+
+bool isJeandleGC(StringRef Name);
 
 void linkAllJeandleGCs();
 

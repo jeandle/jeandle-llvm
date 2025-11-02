@@ -2,6 +2,7 @@ name: "jeandle-llvm check"
 
 on:
   pull_request_target:
+    types: [ opened, synchronize, reopened, labeled, unlabeled ]
     branches:
       - 'main'
 
@@ -10,20 +11,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-
   test:
     name: "jeandle-llvm test"
-    runs-on: ${{ matrix.runs-on }}
-
-    strategy:
-      matrix:
-        include:
-          - arch: x64
-            target: X86
-            runs-on: ubuntu-22.04
-          - arch: aarch64
-            target: AArch64
-            runs-on: ubuntu-22.04-arm
+    runs-on: ubuntu-22.04
 
     steps:
       - name: 'checkout the source code'
@@ -34,10 +24,20 @@ jobs:
           fetch-depth: 1
 
       - name: build and test
+        env:
+          HAS_AARCH64: ${{ contains(github.event.pull_request.labels.*.name, 'AArch64') }}
+          HAS_RISCV: ${{ contains(github.event.pull_request.labels.*.name, 'RISC-V') }}
         run : |
+          targets="X86"
+          if [ "$HAS_AARCH64" = "true" ]; then
+            targets+=";AArch64"
+          fi
+          if [ "$HAS_RISCV" = "true" ]; then
+            targets+=";RISCV"
+          fi
           mkdir build
           cd build
-          cmake -G "Unix Makefiles" -DLLVM_TARGETS_TO_BUILD=${{ matrix.target }} -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_DYLIB_COMPONENTS=all ../llvm
+          cmake -G "Unix Makefiles" -DLLVM_TARGETS_TO_BUILD=$targets -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_DYLIB_COMPONENTS=all ../llvm
           make check-llvm -j $[$(nproc)/2]
 
   clang-format:

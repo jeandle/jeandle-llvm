@@ -46,6 +46,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Jeandle/GCStrategy.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Metadata.h"
@@ -1881,6 +1882,15 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
 
     // Attach exceptional gc relocates to the landingpad.
     Instruction *ExceptionalToken = UnwindBlock->getLandingPadInst();
+    if (jeandle::isJeandleGC(Call->getCaller()->getGC()) &&
+        ExceptionalToken->getType() !=
+            Type::getTokenTy(ExceptionalToken->getContext())) {
+      assert(ExceptionalToken->user_empty() &&
+             "Unsupported landingpad type for Jeandle when using statepoint!");
+      ExceptionalToken->mutateType(
+          Type::getTokenTy(ExceptionalToken->getContext()));
+    }
+
     Result.UnwindToken = ExceptionalToken;
 
     CreateGCRelocates(LiveVariables, BasePtrs, ExceptionalToken, Builder, GC);
