@@ -63,9 +63,8 @@ PreservedAnalyses InsertGCBarriers::run(Function &F,
 
   Module *M = F.getParent();
   Function *CardTableBarrierFunc = M->getFunction("jeandle.card_table_barrier");
-  if (CardTableBarrierFunc == nullptr) {
-    return PreservedAnalyses::all();
-  }
+  assert(CardTableBarrierFunc != nullptr &&
+         "jeandle.card_table_barrier must exist");
 
   LLVM_DEBUG(dbgs() << "Inserting GC barriers in " << F.getName() << "\n");
   SmallVector<StoreInst *> JavaHeapStores;

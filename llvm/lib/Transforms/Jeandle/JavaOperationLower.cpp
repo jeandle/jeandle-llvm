@@ -53,6 +53,7 @@ static bool removeFunctionFromLLVMUsed(Module &M, Function &F) {
   if (!found)
     return false;
 
+  StringRef OldSection = UsedArray->getSection();
   UsedArray->eraseFromParent();
 
   // Erase the empty llvm.used directly.
@@ -66,7 +67,7 @@ static bool removeFunctionFromLLVMUsed(Module &M, Function &F) {
   auto *NewUsedArray = new GlobalVariable(
       M, NewArrayTy, false, GlobalValue::AppendingLinkage,
       ConstantArray::get(NewArrayTy, NewElements), "llvm.used");
-  NewUsedArray->setSection(UsedArray->getSection());
+  NewUsedArray->setSection(OldSection);
 
   return true;
 }
