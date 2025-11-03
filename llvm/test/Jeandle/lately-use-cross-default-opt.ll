@@ -17,7 +17,7 @@ entry:
   %0 = ptrtoint ptr addrspace(1) %addr to i64
   %1 = lshr i64 %0, 9
   %2 = getelementptr inbounds i8, ptr inttoptr (i64 139709660639232 to ptr), i64 %1
-  store i32 0, ptr %2, align 4
+  store atomic i8 0, ptr %2 unordered, align 1
   ret void
 }
 
@@ -30,3 +30,5 @@ entry:                                        ; preds = %entry
 }
 
 attributes #0 = { noinline "lower-phase"="1" }
+
+!java_compiled_method = !{}
