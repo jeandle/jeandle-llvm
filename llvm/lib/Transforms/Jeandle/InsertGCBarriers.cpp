@@ -59,6 +59,12 @@ PreservedAnalyses InsertGCBarriers::run(Function &F,
   bool Changed = false;
 
   Module *M = F.getParent();
+
+  // Only java compiled method need gc barriers.
+  if (!M->getNamedMetadata(jeandle::Metadata::JavaCompiledMethod)) {
+    return PreservedAnalyses::all();
+  }
+
   Function *CardTableBarrierFunc = M->getFunction("jeandle.card_table_barrier");
   assert(CardTableBarrierFunc != nullptr &&
          "jeandle.card_table_barrier must exist");

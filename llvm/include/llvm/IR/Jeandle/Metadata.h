@@ -18,6 +18,8 @@ public:
   static constexpr const char *CurrentThread = "current_thread";
 
   static constexpr const char *StackPointer = "stack_pointer";
+
+  static constexpr const char *JavaCompiledMethod = "java_compiled_method";
 };
 
 enum AddrSpace : unsigned {
