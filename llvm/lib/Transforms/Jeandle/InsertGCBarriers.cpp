@@ -30,10 +30,6 @@ bool isJavaHeapStore(Instruction *I) {
     return false;
   }
 
-  if (!SI->isAtomic()) {
-    return false;
-  }
-
   Value *StoredValue = SI->getValueOperand();
   Value *StoreAddress = SI->getPointerOperand();
 
@@ -52,6 +48,7 @@ bool isJavaHeapStore(Instruction *I) {
     return false;
   }
 
+  assert(SI->isAtomic() && "atomic store in java heap expected");
   return true;
 }
 

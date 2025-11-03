@@ -2,6 +2,7 @@
 ; RUN: opt -S --passes=-S -passes="java-operation-lower<phase=0>,default<O3>,insert-gc-barriers,java-operation-lower<phase=1>" %s 2>&1 | FileCheck -check-prefix=CHECK-ERASE %s
 
 ; CHECK-USE: @llvm.used = appending global
+; CHECK-USE: define hotspotcc void @card_table_barrier
 ; CHECK-USE: store atomic ptr addrspace(1) %src, ptr addrspace(1) %derived.pointer
 ; CHECK-USE-NEXT: %base.pointer = call ptr addrspace(1) @llvm.experimental.gc.get.pointer.base.p1.p1(ptr addrspace(1) %derived.pointer)
 ; CHECK-USE-NEXT: call hotspotcc void @jeandle.card_table_barrier(ptr addrspace(1) %base.pointer)
