@@ -32,8 +32,10 @@ static bool removeFunctionFromLLVMUsed(Module &M, Function &F) {
     return false;
 
   ConstantArray *InitArray = cast<ConstantArray>(UsedArray->getInitializer());
-  if (!InitArray)
+  if (!InitArray) {
+    UsedArray->eraseFromParent();
     return false;
+  }
 
   std::vector<Constant *> NewElements;
   bool found = false;

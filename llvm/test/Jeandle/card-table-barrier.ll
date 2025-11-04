@@ -17,7 +17,7 @@ entry:
   ret void
 }
 
-define hotspotcc void @card_table_barrier(ptr addrspace(1) %dst, ptr addrspace(1) %src) gc "hotspotgc" {
+define hotspotcc void @test_card_table_barrier(ptr addrspace(1) %dst, ptr addrspace(1) %src) gc "hotspotgc" {
 entry:                                        ; preds = %entry
   %derived.pointer = getelementptr inbounds i8, ptr addrspace(1) %dst, i64 24
   store atomic ptr addrspace(1) %src, ptr addrspace(1) %derived.pointer unordered, align 8
@@ -27,4 +27,4 @@ entry:                                        ; preds = %entry
 
 attributes #0 = { noinline "lower-phase"="1" }
 
-!java_compiled_method = !{}
+!java_method_compilation = !{}

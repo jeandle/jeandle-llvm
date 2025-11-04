@@ -19,7 +19,8 @@ public:
 
   static constexpr const char *StackPointer = "stack_pointer";
 
-  static constexpr const char *JavaCompiledMethod = "java_compiled_method";
+  static constexpr const char *JavaMethodCompilation =
+      "java_method_compilation";
 };
 
 enum AddrSpace : unsigned {

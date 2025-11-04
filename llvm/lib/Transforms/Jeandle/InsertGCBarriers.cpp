@@ -9,7 +9,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
@@ -48,7 +50,7 @@ bool isJavaHeapStore(Instruction *I) {
     return false;
   }
 
-  assert(SI->isAtomic() && "atomic store in java heap expected");
+  assert(SI->isAtomic() && "store in java heap is expected to be atomic");
   return true;
 }
 
@@ -60,8 +62,8 @@ PreservedAnalyses InsertGCBarriers::run(Function &F,
 
   Module *M = F.getParent();
 
-  // Only java compiled method need gc barriers.
-  if (!M->getNamedMetadata(jeandle::Metadata::JavaCompiledMethod)) {
+  // Only java method compilations need gc barriers.
+  if (!M->getNamedMetadata(jeandle::Metadata::JavaMethodCompilation)) {
     return PreservedAnalyses::all();
   }
 
@@ -96,5 +98,8 @@ PreservedAnalyses InsertGCBarriers::run(Function &F,
 
   PreservedAnalyses PA;
   PA.preserveSet<CFGAnalyses>();
+  PA.preserve<LoopAnalysis>();
+  PA.preserve<DominatorTreeAnalysis>();
+
   return PA;
 }
