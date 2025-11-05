@@ -99,7 +99,6 @@ PreservedAnalyses InsertGCBarriers::run(Function &F,
   PreservedAnalyses PA;
   PA.preserveSet<CFGAnalyses>();
   PA.preserve<LoopAnalysis>();
-  PA.preserve<DominatorTreeAnalysis>();
 
   return PA;
 }
