@@ -10,6 +10,7 @@
 
 #include "llvm/Jeandle/Pipeline.h"
 #include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
+#include "llvm/Transforms/Jeandle/InsertStackProbes.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Scalar/RewriteStatepointsForGC.h"
@@ -40,6 +41,7 @@ void Pipeline::buildJeandlePipeline(ModulePassManager &PM, PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
   PM.addPass(JavaOperationLower(1));
   PM.addPass(createModuleToFunctionPassAdaptor(TLSPointerRewrite()));
+  PM.addPass(InsertStackProbes());
   PM.addPass(RewriteStatepointsForGC());
 }
 
