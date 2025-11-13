@@ -119,13 +119,13 @@ BitVector RISCVRegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   if (MF.getFunction().getCallingConv() == CallingConv::Hotspot_JIT) {
     // rheapbase
     if (MF.getFunction().hasFnAttribute("use-compressed-oops")) {
-      markSuperRegs(Reserved, RISCV::X27);
+      markSuperRegs(Reserved, RISCV::X27_H);
     }
     // rthread
-    markSuperRegs(Reserved, RISCV::X4);
+    markSuperRegs(Reserved, RISCV::X23_H);
     // scratch register
-    markSuperRegs(Reserved, RISCV::X5);
-    markSuperRegs(Reserved, RISCV::X6);
+    markSuperRegs(Reserved, RISCV::X5_H);
+    markSuperRegs(Reserved, RISCV::X6_H);
   }
 
   // Use markSuperRegs to ensure any register aliases are also reserved
