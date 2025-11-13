@@ -26,6 +26,53 @@ using namespace llvm;
 
 namespace {
 
+static bool removeFunctionFromLLVMUsed(Module &M, Function &F) {
+  GlobalVariable *UsedArray = M.getGlobalVariable("llvm.used");
+  if (!UsedArray)
+    return false;
+
+  ConstantArray *InitArray = cast<ConstantArray>(UsedArray->getInitializer());
+  if (!InitArray) {
+    UsedArray->eraseFromParent();
+    return false;
+  }
+
+  std::vector<Constant *> NewElements;
+  bool found = false;
+
+  // Find all elements to be preserved.
+  for (unsigned i = 0; i < InitArray->getNumOperands(); i++) {
+    Constant *Element = InitArray->getOperand(i);
+    if (Function *Func = dyn_cast<Function>(Element)) {
+      if (Func == &F) {
+        found = true;
+        continue;
+      }
+    }
+    NewElements.push_back(Element);
+  }
+
+  if (!found)
+    return false;
+
+  UsedArray->eraseFromParent();
+
+  // Erase the empty llvm.used directly.
+  if (NewElements.empty())
+    return true;
+
+  // Create a new llvm.used with the preserved elements.
+  auto *NewArrayTy = ArrayType::get(InitArray->getType()->getElementType(),
+                                    NewElements.size());
+
+  auto *NewUsedArray = new GlobalVariable(
+      M, NewArrayTy, false, GlobalValue::AppendingLinkage,
+      ConstantArray::get(NewArrayTy, NewElements), "llvm.used");
+  NewUsedArray->setSection("llvm.metadata");
+
+  return true;
+}
+
 static bool
 runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
         function_ref<AAResults &(Function &)> GetAAR, ProfileSummaryInfo &PSI,
@@ -54,6 +101,11 @@ runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
            "A function declaration should not be a JavaOp");
     assert(isInlineViable(F).isSuccess() &&
            "Function should be viable for inlining");
+
+    if (removeFunctionFromLLVMUsed(M, F)) {
+      LLVM_DEBUG(dbgs() << "remove function:" << F.getName() << "from llvm.used"
+                        << " in lower phase: " << Phase << "\n");
+    }
 
     Calls.clear();
     for (User *U : F.users())
