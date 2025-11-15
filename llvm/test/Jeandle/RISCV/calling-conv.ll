@@ -50,9 +50,11 @@ define hotspotcc void @test_reserved_regs() {
 ; CHECK-NOT: ld t0
 ; CHECK-NOT: ld t1
 ; CHECK-NOT: ld tp
+; CHECK-NOT: ld s7
 ; CHECK-NOT: sd t0
 ; CHECK-NOT: sd t1
 ; CHECK-NOT: sd tp
+; CHECK-NOT: sd s7
   %val = load volatile [30 x i64], ptr @var
   store volatile [30 x i64] %val, ptr @var
   ret void
@@ -64,10 +66,12 @@ define hotspotcc void @test_compressed_oops() "use-compressed-oops" {
 ; CHECK-NOT: ld t1
 ; CHECK-NOT: ld tp
 ; CHECK-NOT: ld s11
+; CHECK-NOT: ld s7
 ; CHECK-NOT: sd t0
 ; CHECK-NOT: sd t1
 ; CHECK-NOT: sd tp
 ; CHECK-NOT: sd s11
+; CHECK-NOT: sd s7
   %val = load volatile [30 x i64], ptr @var
   store volatile [30 x i64] %val, ptr @var
   ret void
