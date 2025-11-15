@@ -1419,6 +1419,11 @@ void RISCVFrameLowering::determineCalleeSaves(MachineFunction &MF,
     SavedRegs.set(RAReg);
     SavedRegs.set(FPReg);
   }
+  // Hotspot always saves RA & FP for stack unwinding
+  if (MF.getFunction().getCallingConv() == CallingConv::Hotspot_JIT) {
+    SavedRegs.set(RAReg);
+    SavedRegs.set(FPReg);
+  }
   // Mark BP as used if function has dedicated base pointer.
   if (hasBP(MF))
     SavedRegs.set(RISCVABI::getBPReg());

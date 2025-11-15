@@ -18,6 +18,9 @@ def CSR_ILP32E_LP64E : CalleeSavedRegs<(add X1, X8, X9)>;
 def CSR_ILP32_LP64
     : CalleeSavedRegs<(add CSR_ILP32E_LP64E, (sequence "X%u", 18, 27))>;
 
+def CSR_RISCV_Hotspot_JIT
+    : CalleeSavedRegs<(add X1, X8)>;
+
 def CSR_ILP32F_LP64F
     : CalleeSavedRegs<(add CSR_ILP32_LP64,
                        F8_F, F9_F, (sequence "F%u_F", 18, 27))>;

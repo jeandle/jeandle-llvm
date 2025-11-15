@@ -294,6 +294,7 @@ add_llvm_component_library(LLVMSupport
   RWMutex.cpp
   Signals.cpp
   Threading.cpp
+  VMError.cpp
   Valgrind.cpp
   Watchdog.cpp
 

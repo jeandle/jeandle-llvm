@@ -793,3 +793,39 @@ bool llvm::CC_RISCV_GHC(unsigned ValNo, MVT ValVT, MVT LocVT,
   report_fatal_error("No registers left in GHC calling convention");
   return true;
 }
+
+// This calling convention is specific to the OpenJDK HotSpot JIT Compiler.
+// Please read the following links for more information:
+//
+//    https://github.com/jeandle/jeandle-jdk/blob/main/src/hotspot/cpu/riscv/assembler_riscv.hpp
+//    https://github.com/jeandle/jeandle-jdk/blob/main/src/hotspot/cpu/riscv/riscv.ad
+//
+// |------------------------------------------------------------------------|
+// | c_rarg0  c_rarg1  c_rarg2  c_rarg3  c_rarg4  c_rarg5  c_rarg6  c_rarg7 |
+// |------------------------------------------------------------------------|
+// | x10      x11      x12      x13      x14      x15      x16      x17     |
+// |------------------------------------------------------------------------|
+// | j_rarg7  j_rarg0  j_rarg1  j_rarg2  j_rarg3  j_rarg4  j_rarg5  j_rarg6 |
+// |------------------------------------------------------------------------|
+bool llvm::CC_RISCV_Hotspot_JIT(unsigned ValNo, MVT ValVT, MVT LocVT,
+                                CCValAssign::LocInfo LocInfo,
+                                ISD::ArgFlagsTy ArgFlags, CCState &State,
+                                bool IsFixed, bool IsRet, Type *OrigTy) {
+
+  static const MCPhysReg RegList[] = {RISCV::X11, RISCV::X12, RISCV::X13,
+                                      RISCV::X14, RISCV::X15, RISCV::X16,
+                                      RISCV::X17, RISCV::X10};
+
+  if (LocVT == MVT::i32 || LocVT == MVT::i64) {
+    if (MCRegister Reg = State.AllocateReg(RegList)) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return false;
+    }
+  }
+
+  if (!CC_RISCV(ValNo, ValVT, LocVT, LocInfo, ArgFlags, State, IsFixed, IsRet,
+                OrigTy))
+    return false;
+
+  return true; // CC didn't match.
+}

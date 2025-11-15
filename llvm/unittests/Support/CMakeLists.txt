@@ -98,6 +98,7 @@ add_llvm_unittest(SupportTests
   UTCTimeTest.cpp
   VersionTupleTest.cpp
   VirtualFileSystemTest.cpp
+  VMErrorTest.cpp
   WithColorTest.cpp
   YAMLIOTest.cpp
   YAMLParserTest.cpp
