@@ -15,6 +15,7 @@
 
 #include "DebugOptions.h"
 
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/CommandLine.h"
@@ -26,6 +27,7 @@
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/raw_ostream.h"
@@ -270,6 +272,44 @@ static bool printMarkupStackTrace(StringRef Argv0, void **StackTrace, int Depth,
   for (int I = 0; I < Depth; I++)
     OS << format("{{{bt:%d:%#016x}}}\n", I, StackTrace[I]);
   return true;
+}
+
+static void GenerateHsErrLog(void *) {
+  // Check if an override file path is provided via environment variable
+  const char *EnvPath = getenv("LLVM_HS_ERR_FILE");
+
+  SmallString<128> Path;
+  unsigned Pid = sys::Process::getProcessId();
+
+  if (EnvPath) {
+    Path = EnvPath;
+  } else {
+    // Generate filename: hs_err_pid<PID>.log
+    raw_svector_ostream PathOS(Path);
+    PathOS << "hs_err_pid" << Pid << ".log";
+  }
+
+  std::error_code EC;
+  raw_fd_ostream LogOS(Path, EC, sys::fs::OF_Text);
+
+  if (EC) {
+    errs() << "Error opening " << Path << ": " << EC.message() << "\n";
+    return;
+  }
+
+  LogOS << "#\n";
+  LogOS
+      << "# A fatal error has been detected by the LLVM Runtime Environment:\n";
+  LogOS << "#\n";
+  LogOS << "#  Internal Error (Process ID: " << Pid << ")\n";
+  LogOS << "#\n";
+  LogOS << "\n";
+
+  LogOS << "Stack:\n";
+  sys::PrintStackTrace(LogOS);
+
+  LogOS.close();
+  errs() << "HS_ERR log written to " << Path << "\n";
 }
 
 // Include the platform-specific parts of this class.

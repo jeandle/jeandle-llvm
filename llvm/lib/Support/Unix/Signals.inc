@@ -883,6 +883,7 @@ void llvm::sys::PrintStackTraceOnErrorSignal(StringRef Argv0,
   ::Argv0 = Argv0;
 
   AddSignalHandler(PrintStackTraceSignalHandler, nullptr);
+  AddSignalHandler(GenerateHsErrLog, nullptr);
 
 #if defined(__APPLE__) && ENABLE_CRASH_OVERRIDES
   // Environment variable to disable any kind of crash dialog.

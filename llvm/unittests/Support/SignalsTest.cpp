@@ -14,6 +14,7 @@
 #include "llvm/Support/Signals.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Config/config.h"
+#include "llvm/Support/FileSystem.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
@@ -62,3 +63,36 @@ TEST(SignalsTest, SymbolizerMarkupDisabled) {
 }
 
 #endif // defined(HAVE_BACKTRACE) && ...
+
+TEST(SignalsTest, GeneratesHsErrLog) {
+#if defined(GTEST_HAS_DEATH_TEST) && defined(LLVM_ON_UNIX)
+  // Determine a unique file name for the log test
+  SmallString<128> TestFile;
+  int FD;
+  std::error_code EC =
+      sys::fs::createTemporaryFile("hs_err_test", "log", FD, TestFile);
+  ASSERT_FALSE(EC);
+  sys::fs::remove(TestFile); // verify creation by the signal handler
+
+  // We need to set the environment variable for the child process.
+  // ASSERT_DEATH runs in a child, but we can't easily pass env vars solely to
+  // it without setting in parent (which might affect others). However, GTest
+  // runs sequentially usually.
+
+  setenv("LLVM_HS_ERR_FILE", TestFile.c_str(), 1);
+  auto Exit = make_scope_exit([]() { unsetenv("LLVM_HS_ERR_FILE"); });
+
+  ASSERT_DEATH(
+      {
+        sys::PrintStackTraceOnErrorSignal("SignalsTest");
+        abort();
+      },
+      "");
+  bool Exists = sys::fs::exists(TestFile);
+  EXPECT_TRUE(Exists);
+
+  if (Exists) {
+    sys::fs::remove(TestFile);
+  }
+#endif
+}
