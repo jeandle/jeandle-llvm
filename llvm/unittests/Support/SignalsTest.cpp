@@ -80,14 +80,12 @@ TEST(SignalsTest, GeneratesHsErrLog) {
   // runs sequentially usually.
 
   setenv("LLVM_HS_ERR_FILE", TestFile.c_str(), 1);
+  auto Exit = make_scope_exit([]() { unsetenv("LLVM_HS_ERR_FILE"); });
 
   ASSERT_DEATH({
     sys::PrintStackTraceOnErrorSignal("SignalsTest");
     abort();
   }, "");
-
-  unsetenv("LLVM_HS_ERR_FILE");
-
   bool Exists = sys::fs::exists(TestFile);
   EXPECT_TRUE(Exists);
 
