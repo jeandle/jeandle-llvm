@@ -76,16 +76,18 @@ TEST(SignalsTest, GeneratesHsErrLog) {
 
   // We need to set the environment variable for the child process.
   // ASSERT_DEATH runs in a child, but we can't easily pass env vars solely to
-  // it without setting in parent (which might affect others). however, GTest
+  // it without setting in parent (which might affect others). However, GTest
   // runs sequentially usually.
 
   setenv("LLVM_HS_ERR_FILE", TestFile.c_str(), 1);
   auto Exit = make_scope_exit([]() { unsetenv("LLVM_HS_ERR_FILE"); });
 
-  ASSERT_DEATH({
-    sys::PrintStackTraceOnErrorSignal("SignalsTest");
-    abort();
-  }, "");
+  ASSERT_DEATH(
+      {
+        sys::PrintStackTraceOnErrorSignal("SignalsTest");
+        abort();
+      },
+      "");
   bool Exists = sys::fs::exists(TestFile);
   EXPECT_TRUE(Exists);
 

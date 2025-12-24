@@ -274,16 +274,13 @@ static bool printMarkupStackTrace(StringRef Argv0, void **StackTrace, int Depth,
   return true;
 }
 
-
-static void GenerateHsErrLog(void *Cookie) {
-  (void)Cookie; // Silence unused parameter warning
-
+static void GenerateHsErrLog(void *) {
   // Check if an override file path is provided via environment variable
   const char *EnvPath = getenv("LLVM_HS_ERR_FILE");
-  
+
   SmallString<128> Path;
   unsigned Pid = sys::Process::getProcessId();
-  
+
   if (EnvPath) {
     Path = EnvPath;
   } else {
@@ -301,7 +298,8 @@ static void GenerateHsErrLog(void *Cookie) {
   }
 
   LogOS << "#\n";
-  LogOS << "# A fatal error has been detected by the LLVM Runtime Environment:\n";
+  LogOS
+      << "# A fatal error has been detected by the LLVM Runtime Environment:\n";
   LogOS << "#\n";
   LogOS << "#  Internal Error (Process ID: " << Pid << ")\n";
   LogOS << "#\n";
