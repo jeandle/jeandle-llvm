@@ -479,6 +479,12 @@ enabled sub-projects. Nearly all of these variable names begin with
   Enables code assertions. Defaults to ON if and only if ``CMAKE_BUILD_TYPE``
   is *Debug*.
 
+**LLVM_ASSERTS_REPORT_FATAL_ERROR**:BOOL
+  Routes failed assertions in LLVM C++ libraries (built via ``add_llvm_library``)
+  through ``llvm::report_fatal_error`` (and installed fatal error handlers).
+  Only takes effect in builds where assertions are enabled. C sources are not
+  redirected. Defaults to OFF.
+
 **LLVM_ENABLE_BINDINGS**:BOOL
   If disabled, do not try to build the OCaml bindings.
 

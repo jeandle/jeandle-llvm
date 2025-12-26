@@ -644,6 +644,10 @@ else()
   option(LLVM_ENABLE_ASSERTIONS "Enable assertions" ON)
 endif()
 
+option(LLVM_ASSERTS_REPORT_FATAL_ERROR
+       "Route LLVM assertions through report_fatal_error (debug/asserts builds only)"
+       OFF)
+
 option(LLVM_ENABLE_EXPENSIVE_CHECKS "Enable expensive checks" OFF)
 
 # While adding scalable vector support to LLVM, we temporarily want to

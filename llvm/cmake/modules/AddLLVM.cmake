@@ -995,6 +995,23 @@ macro(add_llvm_library name)
   else()
     set_target_properties(${name} PROPERTIES FOLDER "${subproject_title}/Libraries")
   endif()
+
+  if(LLVM_ASSERTS_REPORT_FATAL_ERROR)
+    target_compile_definitions(${name} PRIVATE LLVM_ASSERTS_REPORT_FATAL_ERROR LLVM_BUILDING_LLVM)
+    if(MSVC)
+      target_compile_options(${name} PRIVATE
+        $<$<COMPILE_LANGUAGE:C>:/FI${LLVM_MAIN_INCLUDE_DIR}/llvm/Support/AssertOverride.h>
+        $<$<COMPILE_LANGUAGE:CXX>:/FI${LLVM_MAIN_INCLUDE_DIR}/llvm/Support/AssertOverride.h>
+      )
+    else()
+      target_compile_options(${name} PRIVATE
+        $<$<COMPILE_LANGUAGE:C>:-include>
+        $<$<COMPILE_LANGUAGE:C>:${LLVM_MAIN_INCLUDE_DIR}/llvm/Support/AssertOverride.h>
+        $<$<COMPILE_LANGUAGE:CXX>:-include>
+        $<$<COMPILE_LANGUAGE:CXX>:${LLVM_MAIN_INCLUDE_DIR}/llvm/Support/AssertOverride.h>
+      )
+    endif()
+  endif()
 endmacro(add_llvm_library name)
 
 macro(generate_llvm_objects name)
