@@ -41,6 +41,7 @@ bool isJavaHeapStore(Instruction *I) {
   }
 
   PointerType *StoredValueTy = dyn_cast<PointerType>(StoredValue->getType());
+
   PointerType *StoreAddressTy = dyn_cast<PointerType>(StoreAddress->getType());
 
   if (StoredValueTy->getAddressSpace() !=
