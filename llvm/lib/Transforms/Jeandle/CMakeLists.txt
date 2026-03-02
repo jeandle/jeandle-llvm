@@ -9,5 +9,4 @@ add_llvm_component_library(LLVMJeandleTransforms
 
   LINK_COMPONENTS
   Core
-  Analysis
   )
