@@ -32,8 +32,13 @@ namespace {
 
 /// Check if an instruction is a safepoint call
 bool isSafepointCall(CallInst *CI) {
-  if (!CI)
+  if (!CI || CI->isIndirectCall()) {
     return false;
+  }
+  
+  if (CI->getCalledFunction() == nullptr) {
+    return false;
+  }
 
   return CI->getCalledFunction()->getName() == "jeandle.safepoint_poll";
 }
