@@ -35,7 +35,7 @@ bool isSafepointCall(CallInst *CI) {
   if (!CI || CI->isIndirectCall()) {
     return false;
   }
-  
+
   if (CI->getCalledFunction() == nullptr) {
     return false;
   }
