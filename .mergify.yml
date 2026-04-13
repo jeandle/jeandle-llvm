@@ -9,5 +9,6 @@ merge_protections:
     if:
       - base = main
     success_conditions:
-      - "title ~=
-        ^(fix|feat|docs|style|refactor|enhance|test|build|ci|chore|revert):"
+      - "title ~= ^(fix|feat|docs|style|refactor|enhance|test|build|ci|chore|revert):"
+merge_protections_settings:
+  reporting_method: check-runs
