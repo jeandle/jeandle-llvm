@@ -1,6 +1,7 @@
 add_llvm_component_library(LLVMJeandleTransforms
   InsertGCBarriers.cpp
   JavaOperationLower.cpp
+  SafepointElimination.cpp
   TLSPointerRewrite.cpp
 
   ADDITIONAL_HEADER_DIRS

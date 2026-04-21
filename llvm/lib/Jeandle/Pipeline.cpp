@@ -11,7 +11,9 @@
 #include "llvm/Jeandle/Pipeline.h"
 #include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
+#include "llvm/Transforms/Jeandle/SafepointElimination.h"
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
+#include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/RewriteStatepointsForGC.h"
 
 namespace llvm::jeandle {
@@ -37,6 +39,13 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
                                                  OptimizationLevel level) {
   ModulePassManager PM;
   PM.addPass(JavaOperationLower(0));
+
+  // help to move loop invariant ir (like `jeandle.arraylength`) out of loop
+  PM.addPass(createModuleToFunctionPassAdaptor(EarlyCSEPass()));
+  // safepoint elimination optimization. It should be placed before loop
+  // optimization
+  PM.addPass(createModuleToFunctionPassAdaptor(SafepointElimination()));
+
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(level)));
   PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
   PM.addPass(JavaOperationLower(1));
