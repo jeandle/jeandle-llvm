@@ -160,10 +160,12 @@ add_llvm_component_library(LLVMAnalysis
   ValueLatticeUtils.cpp
   ValueTracking.cpp
   VectorUtils.cpp
+  Jeandle/PartialEscapeAnalysis.cpp
   ${GeneratedMLSources}
 
   ADDITIONAL_HEADER_DIRS
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/Analysis
+  ${LLVM_MAIN_INCLUDE_DIR}/llvm/Analysis/Jeandle
 
   DEPENDS
   analysis_gen

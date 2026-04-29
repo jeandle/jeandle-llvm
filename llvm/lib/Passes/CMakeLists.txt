@@ -18,6 +18,7 @@ add_llvm_component_library(LLVMPasses
   AggressiveInstCombine
   Analysis
   JeandleTransforms
+  JeandlePEATransforms
   CFGuard
   CodeGen
   GlobalISel

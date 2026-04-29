@@ -11,3 +11,5 @@ add_llvm_component_library(LLVMJeandleTransforms
   Analysis
   Core
   )
+
+add_subdirectory(PEA)

@@ -1,6 +1,6 @@
-//===- TLSPointerRewrite.h - Add a TLS base for TLS pointers --------------===//
+//===- PEATransformer.h - PEA Transformer Pass ---------------------------===//
 //
-// Copyright (c) 2025, the Jeandle-LLVM Authors. All Rights Reserved.
+// Copyright (c) 2026, the Jeandle-LLVM Authors. All Rights Reserved.
 //
 // Part of the Jeandle-LLVM project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.
@@ -8,19 +8,19 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_TLS_POINTER_REWRITE_H
-#define LLVM_TLS_POINTER_REWRITE_H
+#ifndef LLVM_TRANSFORMS_JEANDLE_PEA_TRANSFORMER_H
+#define LLVM_TRANSFORMS_JEANDLE_PEA_TRANSFORMER_H
 
 #include "llvm/IR/PassManager.h"
 
 namespace llvm {
 
-class TLSPointerRewrite : public PassInfoMixin<TLSPointerRewrite> {
+class PEATransformerPass : public PassInfoMixin<PEATransformerPass> {
 public:
-  TLSPointerRewrite() {}
+  PEATransformerPass() {}
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM);
 };
 
 } // namespace llvm
 
-#endif // LLVM_TLS_POINTER_REWRITE_H
+#endif // LLVM_TRANSFORMS_JEANDLE_PEA_TRANSFORMER_H
