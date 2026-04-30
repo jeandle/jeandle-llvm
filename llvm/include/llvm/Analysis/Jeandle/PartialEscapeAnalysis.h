@@ -215,9 +215,6 @@ public:
 
   // uintptr_t getKlass() const { return Klass; }
   // void setKlass(uintptr_t K) { Klass = K; }
-
-  FieldNode *getField(uint32_t Offset) const;
-  bool hasField(uint32_t Offset) const;
 };
 
 //===----------------------------------------------------------------------===//
@@ -361,10 +358,10 @@ private:
 /// \class ProgramPointState
 /// \brief Flow-sensitive state snapshot at a specific program point.
 ///
-/// ProgramPointState captures the DYNAMIC state of allocations at a
-/// particular IR instruction. Unlike the static alias information in
-/// PointsToGraph, escape states can change across program points due
-/// to control flow and side effects.
+/// ProgramPointState captures the DYNAMIC state of allocations at block
+/// entries and particular IR instruction. Unlike the static alias 
+/// information in PointsToGraph, escape states can change across program 
+/// points due to control flow and side effects.
 ///
 /// Key Design Principle:
 /// ---------------------
@@ -373,15 +370,23 @@ private:
 ///
 /// State Components:
 /// -----------------
-/// 1. AllocStates: Escape state for each tracked allocation
+/// AllocationStates: DenseMap<AllocId, AllocationState>
+///
+/// Each AllocationState tracks complete information for one allocation:
+/// 1. EscapeState: Dynamic escape status
 ///    - Unknown:      Initial state, not yet analyzed
 ///    - NoEscape:     Allocation is confined, can be scalar-replaced
 ///    - GlobalEscape: Allocation escapes globally (stored to global field,
 ///                    returned, passed to unknown function, etc.)
 ///
-/// 2. LockCounts: Synchronized lock count for each allocation
-///    - Used for lock elimination optimization
+/// 2. LockCount: Synchronized lock count for lock elimination
 ///    - Tracks nested synchronized blocks on same object
+///    - Enables lock elimination when count reaches zero
+///
+/// 3. Fields: DenseMap<Offset, FieldInfo> for scalar replacement
+///    - Tracks field values (both pointer and primitive types)
+///    - Enables store-load forwarding for scalar replacement
+///    - Stores values needed for deoptimization materialization (lazy_object)
 ///
 /// Flow-Sensitive Example:
 /// -----------------------
@@ -409,9 +414,6 @@ public:
 
   Instruction *getInstruction() const { return Inst; }
 
-  AllocationState *getAllocState(uint32_t AllocId) {
-    return &AllocationStates[AllocId];
-  }
   const AllocationState *getAllocState(uint32_t AllocId) const {
     auto It = AllocationStates.find(AllocId);
     return It != AllocationStates.end() ? &It->second : nullptr;
@@ -454,8 +456,7 @@ private:
     AllocationStates[AllocId].setField(Offset, Val, Ty, IsOop);
   }
 
-  void mergeFrom(const ProgramPointState *Other,
-                 VirtualPhiMap &PhiMap, BasicBlock *MergeBB, BasicBlock *PredBB);
+  void mergeFrom(const ProgramPointState *Other, VirtualPhiMap &PhiMap, BasicBlock *MergeBB, BasicBlock *PredBB);
 };
 
 //===----------------------------------------------------------------------===//
@@ -603,7 +604,7 @@ private:
 /// PHI relationship without immediately creating IR. PHI nodes are created
 /// lazily during the transformation phase (by PEATransformer).
 ///
-/// - PendingPHIs: Map from (AllocId, Offset) to list of (PredBB, Value)
+/// - PendingPHIs: Each block's map from (AllocId, Offset) to list of (PredBB, Value)
 ///
 /// Materialization happens in optimization pass, not during analysis
 class VirtualPhiMap {
@@ -685,10 +686,12 @@ struct LazyObjectBundle {
 /// │   ├── FieldNodes            - All field accesses
 /// │   └── ValueToNode mapping   - IR Value → PEANode lookup
 /// │
-/// └── States (dynamic)          - Flow-sensitive escape states
-///     └── Map<Instruction*, ProgramPointState>
-///         ├── AllocStates        - Escape state per allocation
-///         └── LockCounts         - Lock count per allocation
+/// ├── States (dynamic)          - Flow-sensitive escape states
+/// │   └── Map<Instruction*, ProgramPointState>
+/// │       └── AllocationStates        - state per allocation
+/// │
+/// └── BlockStates               - escape states in basic block entries
+///     └── Map<BasicBlock*, ProgramPointState>
 /// ```
 ///
 /// Usage Patterns:
@@ -716,10 +719,13 @@ struct LazyObjectBundle {
 /// needs to be materialized, enabling the transformer pass to insert
 /// proper allocation and initialization code.
 class PEAResult {
+  // Graph - static points-to graph records alias information
   PointsToGraph Graph;
 
+  // States - dynamic state in key instruction that has effect on escape state
   DenseMap<Instruction *, std::unique_ptr<ProgramPointState>> States;
 
+  // BlockStates - block entry state
   DenseMap<BasicBlock *, std::unique_ptr<ProgramPointState>> BlockStates;
 
   VirtualPhiMap PhiMap;
@@ -784,21 +790,6 @@ inline FieldNode *PEANode::asField() {
   return static_cast<FieldNode *>(this);
 }
 
-inline FieldNode *AllocationNode::getField(uint32_t Offset) const {
-  for (PEANode *Edge : Edges) {
-    if (Edge->isField()) {
-      FieldNode *F = Edge->asField();
-      if (F->getOffset() == Offset)
-        return F;
-    }
-  }
-  return nullptr;
-}
-
-inline bool AllocationNode::hasField(uint32_t Offset) const {
-  return getField(Offset) != nullptr;
-}
-
 } // namespace llvm::jeandle
 
 //===----------------------------------------------------------------------===//
@@ -822,7 +813,7 @@ private:
     jeandle::ProgramPointState *State;
     jeandle::PEAResult *Result;
 
-  public:
+   public:
     PEAVisitor() : State(nullptr), Result(nullptr) {}
 
     void setState(jeandle::ProgramPointState *S) { State = S; }
@@ -865,12 +856,6 @@ private:
 
   /// Get RPO order blocks in a loop, only include blocks exactly in this loop and subloops' header blocks
   SmallVector<BasicBlock *> getLoopBlocksInRPO(Loop *L, LoopInfo &LI, const SmallVector<BasicBlock *> &FullRPO);
-
-  void markEscaped(Value *V, jeandle::ProgramPointState *State,
-                    jeandle::PEAResult &Result);
-
-  bool isTrackedAddress(Value *Addr, jeandle::ProgramPointState *State,
-                         jeandle::PEAResult &Result);
 };
 
 } // namespace llvm

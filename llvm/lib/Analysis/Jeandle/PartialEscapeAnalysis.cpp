@@ -505,10 +505,18 @@ static SmallVector<AllocationNode *> getHolderAllocations(FieldNode *Field, Poin
 }
 
 static uint32_t computeGEPOffset(GetElementPtrInst *GEP) {
-  if (GEP->getSourceElementType()->isIntegerTy(8) && GEP->getNumOperands() == 2) {
-    if (auto *C = dyn_cast<ConstantInt>(GEP->getOperand(1)))
-      return C->getZExtValue();
-  }
+  if (GEP->getNumOperands() != 2)
+    return 0;
+
+  Type *SourceType = GEP->getSourceElementType();
+  uint32_t ElemSize = SourceType->getScalarSizeInBits() / 8;
+
+  if (ElemSize == 0)
+    return 0;
+
+  if (auto *C = dyn_cast<ConstantInt>(GEP->getOperand(1)))
+    return C->getZExtValue() * ElemSize;
+
   return 0;
 }
 
@@ -874,26 +882,4 @@ void PartialEscapeAnalysis::PEAVisitor::visitSelectInst(SelectInst &I) {
   PointerNode *PtrNode = Result->Graph.createPointer(&I, TrueNode);
   if (TrueNode != FalseNode)
     Result->Graph.addEdge(PtrNode, FalseNode);
-}
-
-//===----------------------------------------------------------------------===//
-// Is Tracked Address
-//===----------------------------------------------------------------------===//
-
-bool PartialEscapeAnalysis::isTrackedAddress(Value *Addr, ProgramPointState *State,
-                                              PEAResult &Result) {
-  return Result.Graph.hasNodeForValue(Addr);
-}
-
-//===----------------------------------------------------------------------===//
-// Mark Escaped
-//===----------------------------------------------------------------------===//
-
-void PartialEscapeAnalysis::markEscaped(Value *V, ProgramPointState *State,
-                                         PEAResult &Result) {
-  if (!Result.Graph.hasNodeForValue(V)) return;
-
-  PEANode *Node = Result.Graph.getNodeForValue(V);
-  for (AllocationNode *Alloc : Result.Graph.pointsTo(Node))
-    State->setEscapeState(Alloc->getId(), EscapeState::GlobalEscape);
 }
