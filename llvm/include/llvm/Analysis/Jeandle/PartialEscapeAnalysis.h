@@ -41,6 +41,17 @@ class Loop;
 
 namespace llvm::jeandle {
 
+/// \class PEAConfig
+/// \brief Configuration for Partial Escape Analysis.
+///
+/// Configuration sources (priority from high to low):
+/// 1. JDK setter calls (via JeandleDoPartialEscapeAnalysis JVM flags)
+/// 2. LLVM command line parameters (jeandle-pea, jeandle-pea-max-array-length)
+/// 3. Default values (true for enabled, 32 for max array length)
+///
+/// Usage examples:
+/// - JDK: java -XX:-JeandleDoPartialEscapeAnalysis -XX:JeandlePEAMaxArrayLength=16 MyApp
+/// - LLVM standalone: opt -jeandle-pea=false -jeandle-pea-max-array-length=64 input.ll
 class PEAConfig {
   static bool Enabled;
   static uint32_t MaxArrayLength;
@@ -88,16 +99,16 @@ struct LazyObjectBundle;
 /// - PointerNode:    Represents a pointer variable or alias
 /// - FieldNode:      Represents a field access (GEP in LLVM IR)
 ///
-/// Node Relationships (Edges):
-/// ---------------------------
-/// Each PEANode maintains two directional edge lists:
+/// Node Relationships:
+/// -------------------
+/// Each PEANode maintains two directional node lists:
 ///
-/// - _Edges: Outgoing edges - "what this node points to"
-/// - _Uses:  Incoming edges - "what points to this node"
+/// - _Targets: Target nodes - "what this node points to" (outgoing)
+/// - _Sources: Source nodes - "what points to this node" (incoming)
 ///
-/// Edge semantics vary by node type:
+/// Node relationship semantics vary by node type:
 ///
-/// | From           | To             | Edge Type    | Meaning                       | Example                | Representation |
+/// | From           | To             | Relation     | Meaning                       | Example                | Representation |
 /// |----------------|----------------|--------------|-------------------------------|------------------------|----------------|
 /// | PointerNode    | AllocationNode | PointsTo     | Pointer points to allocation  | p = new T()            | p -P> T        |
 /// | PointerNode    | PointerNode    | Deferred     | Pointer copies another pointer| p = q                  | p -D> q        |
@@ -106,19 +117,19 @@ struct LazyObjectBundle;
 /// | FieldNode      | PointerNode    | Deferred     | Field stores pointer ref      | p.f = q                | f -D> q        |
 /// | AllocationNode | FieldNode      | Field        | Allocation owns this field    | p = new T(); p.f       | T -F> f        |
 ///
-/// Base Edge Marking:
+/// Base Node Marking:
 /// ------------------
 /// When a PointerNode serves as the base of a FieldNode (e.g., `p.f`),
-/// the PointerNode's _Uses contains a tagged pointer to mark this as
-/// a "base use" rather than a normal PointsTo edge.
+/// the PointerNode's Sources contains a tagged pointer to mark this as
+/// a "base source" rather than a normal PointsTo relation.
 ///
-/// | From           | To             | Edge Type    | Meaning                       | Example                | Representation |
+/// | From           | To             | Relation     | Meaning                       | Example                | Representation |
 /// |----------------|----------------|--------------|-------------------------------|------------------------|----------------|
 /// | FieldNode      | PointerNode    | Base         | Field bases at pointer ref    | p.f                    | f -B> p        |
 ///
 /// The tagging uses the lowest bit of the pointer address:
-/// - Normal pointer (bit 0 = 0): Regular PointsTo/Deferred edge
-/// - Tagged pointer (bit 0 = 1): Base edge (PointerNode → FieldNode)
+/// - Normal pointer (bit 0 = 0): Regular PointsTo/Deferred relation
+/// - Tagged pointer (bit 0 = 1): Base relation (PointerNode → FieldNode)
 ///
 /// This technique exploits memory alignment (all valid addresses have
 /// bit 0 = 0) and is consistent with HotSpot C2's implementation.
@@ -138,23 +149,23 @@ protected:
   Value *IRValue = nullptr;
   uint32_t NodeId;
 
-  SmallVector<PEANode *, 4> Edges;
-  SmallVector<PEANode *, 4> Uses;
+  SmallVector<PEANode *, 4> Targets;
+  SmallVector<PEANode *, 4> Sources;
 
-  void addEdge(PEANode *N) {
-    if (!hasEdge(N))
-      Edges.push_back(N);
+  void addTarget(PEANode *N) {
+    if (!hasTarget(N))
+      Targets.push_back(N);
   }
 
-  void addUse(PEANode *N) {
-    if (!hasUse(N))
-      Uses.push_back(N);
+  void addSource(PEANode *N) {
+    if (!hasSource(N))
+      Sources.push_back(N);
   }
 
-  void addBaseUse(FieldNode *F) {
+  void addBaseSource(FieldNode *F) {
     PEANode *Tagged = (PEANode *)((uintptr_t)F | 1);
-    if (!hasUse(Tagged))
-      Uses.push_back(Tagged);
+    if (!hasSource(Tagged))
+      Sources.push_back(Tagged);
   }
 
   friend class PointsToGraph;
@@ -176,11 +187,11 @@ public:
   PointerNode *asPointer();
   FieldNode *asField();
 
-  const SmallVector<PEANode *, 4> &getEdges() const { return Edges; }
-  const SmallVector<PEANode *, 4> &getUses() const { return Uses; }
+  const SmallVector<PEANode *, 4> &getTargets() const { return Targets; }
+  const SmallVector<PEANode *, 4> &getSources() const { return Sources; }
 
-  bool hasEdge(PEANode *N) const { return llvm::is_contained(Edges, N); }
-  bool hasUse(PEANode *N) const { return llvm::is_contained(Uses, N); }
+  bool hasTarget(PEANode *N) const { return llvm::is_contained(Targets, N); }
+  bool hasSource(PEANode *N) const { return llvm::is_contained(Sources, N); }
 
   static bool isBaseUse(PEANode *N) {
     return ((uintptr_t)N & 1);
@@ -248,7 +259,7 @@ public:
   PointerNode(Value *V, uint32_t Id)
       : PEANode(PEANodeType::Pointer, V, Id) {}
 
-  const SmallVector<PEANode*, 4>& getTargets() const { return Edges; }
+  const SmallVector<PEANode*, 4>& getTargets() const { return Targets; }
 };
 
 //===----------------------------------------------------------------------===//

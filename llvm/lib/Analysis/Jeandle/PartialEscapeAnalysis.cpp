@@ -15,7 +15,9 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Jeandle/JeandleUtil.h"
 #include "llvm/IR/Jeandle/Metadata.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -24,8 +26,19 @@
 using namespace llvm;
 using namespace jeandle;
 
-bool PEAConfig::Enabled = true;
-uint32_t PEAConfig::MaxArrayLength = 32;
+// Command line options for Partial Escape Analysis
+static cl::opt<bool> EnablePEA(
+    "jeandle-pea",
+    cl::desc("Enable partial escape analysis optimization"),
+    cl::init(true));
+
+static cl::opt<uint32_t> PEAMaxArrayLength(
+    "jeandle-pea-max-array-length",
+    cl::desc("Maximum array length for PEA to process (0=dynamic, <=32=optimizable, >32=large)"),
+    cl::init(32));
+
+bool PEAConfig::Enabled = EnablePEA;
+uint32_t PEAConfig::MaxArrayLength = PEAMaxArrayLength;
 
 //===----------------------------------------------------------------------===//
 // PointsToGraph Implementation
@@ -142,27 +155,27 @@ void PointsToGraph::addBase(PEANode *From, FieldNode *To) {
   } else if (From->isPointer()) {
     if (To->hasBase(From)) return;
     To->addBase(From);
-    From->addBaseUse(To);
+    From->addBaseSource(To);
   }
 }
 
 void PointsToGraph::addEdge(PEANode *From, PEANode *To) {
-  if (!From || !To || From->hasEdge(To))
+  if (!From || !To || From->hasTarget(To))
     return;
-  From->addEdge(To);
-  To->addUse(From);
+  From->addTarget(To);
+  To->addSource(From);
 }
 
 void PointsToGraph::removeEdge(PEANode *From, PEANode *To) {
   if (!From || !To) return;
 
-  auto EdgeIt = llvm::find(From->Edges, To);
-  if (EdgeIt != From->Edges.end())
-    From->Edges.erase(EdgeIt);
+  auto TargetIt = llvm::find(From->Targets, To);
+  if (TargetIt != From->Targets.end())
+    From->Targets.erase(TargetIt);
 
-  auto UseIt = llvm::find(To->Uses, From);
-  if (UseIt != To->Uses.end())
-    To->Uses.erase(UseIt);
+  auto SourceIt = llvm::find(To->Sources, From);
+  if (SourceIt != To->Sources.end())
+    To->Sources.erase(SourceIt);
 }
 
 SmallVector<AllocationNode *> PointsToGraph::pointsTo(PEANode *Node) {
@@ -173,8 +186,8 @@ SmallVector<AllocationNode *> PointsToGraph::pointsTo(PEANode *Node) {
   }
 
   bool HasDeferred = false;
-  for (PEANode *Edge : Node->getEdges()) {
-    if (!Edge->isAllocation()) {
+  for (PEANode *Target : Node->getTargets()) {
+    if (!Target->isAllocation()) {
       HasDeferred = true;
       break;
     }
@@ -182,21 +195,21 @@ SmallVector<AllocationNode *> PointsToGraph::pointsTo(PEANode *Node) {
 
   if (!HasDeferred) {
     SmallVector<AllocationNode *> Allocs;
-    for (PEANode *Edge : Node->getEdges()) {
-      Allocs.push_back(Edge->asAllocation());
+    for (PEANode *Target : Node->getTargets()) {
+      Allocs.push_back(Target->asAllocation());
     }
     return Allocs;
   }
 
   SmallVector<AllocationNode *> Allocs;
-  SmallVector<PEANode *> DeferredEdges;
+  SmallVector<PEANode *> DeferredTargets;
 
-  for (PEANode *Edge : Node->getEdges()) {
-    if (Edge->isAllocation()) {
-      Allocs.push_back(Edge->asAllocation());
+  for (PEANode *Target : Node->getTargets()) {
+    if (Target->isAllocation()) {
+      Allocs.push_back(Target->asAllocation());
     } else {
-      DeferredEdges.push_back(Edge);
-      for (AllocationNode *Alloc : pointsTo(Edge)) {
+      DeferredTargets.push_back(Target);
+      for (AllocationNode *Alloc : pointsTo(Target)) {
         if (!llvm::is_contained(Allocs, Alloc))
           Allocs.push_back(Alloc);
       }
@@ -204,11 +217,11 @@ SmallVector<AllocationNode *> PointsToGraph::pointsTo(PEANode *Node) {
   }
 
   for (AllocationNode *Alloc : Allocs) {
-    if (!Node->hasEdge(Alloc))
+    if (!Node->hasTarget(Alloc))
       addEdge(Node, Alloc);
   }
 
-  for (PEANode *Deferred : DeferredEdges) {
+  for (PEANode *Deferred : DeferredTargets) {
     removeEdge(Node, Deferred);
   }
 
@@ -490,9 +503,9 @@ bool ProgramPointState::operator==(const ProgramPointState &Other) const {
 static SmallVector<AllocationNode *> getHolderAllocations(FieldNode *Field, PointsToGraph &Graph) {
   SmallVector<AllocationNode *> HolderAllocs;
 
-  for (PEANode *Use : Field->getUses()) {
-    assert(Use->isAllocation());
-    HolderAllocs.push_back(Use->asAllocation());
+  for (PEANode *Source : Field->getSources()) {
+    assert(Source->isAllocation());
+    HolderAllocs.push_back(Source->asAllocation());
   }
 
   for (PEANode *Base : Field->getBases()) {
@@ -546,6 +559,7 @@ PEAResult PartialEscapeAnalysis::run(Function &F, FunctionAnalysisManager &FAM) 
   Result.Graph.setPhantomObj(Phantom);
 
   DenseMap<BasicBlock *, std::unique_ptr<ProgramPointState>> BlockOutStates;
+  BlockOutStates.reserve(F.size());
 
   auto &LI = FAM.getResult<LoopAnalysis>(F);
   SmallVector<BasicBlock *> RPOBlocks = getRPOOrder(F);
@@ -574,6 +588,7 @@ PEAResult PartialEscapeAnalysis::run(Function &F, FunctionAnalysisManager &FAM) 
 
 SmallVector<BasicBlock *> PartialEscapeAnalysis::getRPOOrder(Function &F) {
   SmallVector<BasicBlock *> Order;
+  Order.reserve(F.size());
   ReversePostOrderTraversal<const Function *> RPOT(&F);
   for (const BasicBlock *BB : RPOT)
     Order.push_back(const_cast<BasicBlock *>(BB));
