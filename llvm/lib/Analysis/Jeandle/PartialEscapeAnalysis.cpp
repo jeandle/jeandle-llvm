@@ -82,6 +82,12 @@ AllocationNode *PointsToGraph::createAllocation(CallBase *Call, bool IsArray) {
   return Node;
 }
 
+VirtualAllocationNode *PointsToGraph::createVirtualAllocation(PHINode *Phi) {
+  VirtualAllocationNode *Node = new VirtualAllocationNode(Phi, NextAllocId++);
+  Allocations.push_back(std::unique_ptr<AllocationNode>(Node));
+  return Node;
+}
+
 PointerNode *PointsToGraph::createPointer(Value *V, PEANode *Target) {
   assert(V);
   assert(Target && "PointerNode must have a target");
@@ -94,13 +100,21 @@ PointerNode *PointsToGraph::createPointer(Value *V, PEANode *Target) {
   return Node;
 }
 
-FieldNode *PointsToGraph::createField(GetElementPtrInst *GEP, PEANode *Base, uint32_t Offset) {
-  assert(GEP);
+void PointsToGraph::resetPhiPointerTarget(PointerNode *Ptr, VirtualAllocationNode *NewTarget) {
+  for (PEANode *oldTarget : Ptr->getTargets()) {
+    removeEdge(Ptr, oldTarget);
+  }
 
-  auto *Node = new FieldNode(GEP, NextFieldId++);
+  addEdge(Ptr, NewTarget);
+}
+
+FieldNode *PointsToGraph::createField(Value *V, PEANode *Base, uint32_t Offset) {
+  assert(V);
+
+  auto *Node = new FieldNode(V, NextFieldId++);
   addBase(Base, Node);
   Node->setOffset(Offset);
-  ValueToNode[GEP] = Node;
+  ValueToNode[V] = Node;
 
   Fields.push_back(std::unique_ptr<FieldNode>(Node));
   return Node;
@@ -444,30 +458,28 @@ bool AllocationState::operator==(const AllocationState &Other) const {
 //===----------------------------------------------------------------------===//
 // ProgramPointState Implementation
 //===----------------------------------------------------------------------===//
-
-void ProgramPointState::mergeFrom(const ProgramPointState *Other, VirtualPhiMap &PhiMap,
-                                  BasicBlock *MergeBB, BasicBlock *PredBB) {
+void ProgramPointState::mergeFrom(const ProgramPointState *Other,
+                                   VirtualPhiMap &PhiMap,
+                                   BasicBlock *MergeBB,
+                                   BasicBlock *PredBB) {
   if (!Other) return;
 
-  for (const auto &[AllocId, OtherAS] : Other->AllocationStates) {
-    if (hasAllocState(AllocId)) {
-      AllocationStates[AllocId].mergeFrom(OtherAS, AllocId, PhiMap, MergeBB, PredBB);
-    } else {
-      AllocationStates[AllocId] = AllocationState();
-      AllocationStates[AllocId].ES = OtherAS.ES;
-      AllocationStates[AllocId].LockCount = OtherAS.LockCount;
-      for (const auto &[Offset, FI] : OtherAS.getAllFields()) {
-        AllocationStates[AllocId].setField(Offset, nullptr, FI.FieldType, FI.IsOop);
-        PhiMap.addPendingPhi(MergeBB, AllocId, Offset, PredBB, FI.StoredValue);
-      }
+  // Remove allocations not in all predecessors (compute intersection)
+  SmallVector<uint32_t> toRemove;
+  for (const auto &[AllocId, AS] : AllocationStates) {
+    if (!Other->hasAllocState(AllocId)) {
+      toRemove.push_back(AllocId);
     }
   }
 
-  for (const auto &[AllocId, MyAS] : AllocationStates) {
-    if (!Other->hasAllocState(AllocId)) {
-      for (const auto &[Offset, FI] : MyAS.getAllFields()) {
-        PhiMap.addPendingPhi(MergeBB, AllocId, Offset, PredBB, nullptr);
-      }
+  for (uint32_t AllocId : toRemove) {
+    AllocationStates.erase(AllocId);
+  }
+
+  // Merge field states only for allocations in intersection
+  for (const auto &[AllocId, OtherAS] : Other->AllocationStates) {
+    if (hasAllocState(AllocId)) {
+      AllocationStates[AllocId].mergeFrom(OtherAS, AllocId, PhiMap, MergeBB, PredBB);
     }
   }
 }
@@ -499,6 +511,122 @@ bool ProgramPointState::operator==(const ProgramPointState &Other) const {
 //===----------------------------------------------------------------------===//
 // Helper Functions
 //===----------------------------------------------------------------------===//
+
+static uint32_t getObjectSize(AllocationNode *Alloc) {
+  if (Alloc->getIRValue()) {
+    CallInst *Call = dyn_cast<CallInst>(Alloc->getIRValue());
+    if (Call && Call->getCalledFunction()) {
+      StringRef Name = Call->getCalledFunction()->getName();
+      if (Name == "jeandle.new_instance" || Name == "jeandle.newarray") {
+        if (auto *SizeConst = dyn_cast<ConstantInt>(Call->getArgOperand(1))) {
+          return SizeConst->getZExtValue();
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+static bool hasEscapedAllocation(const SmallVector<AllocationNode*> &allocs,
+                                  ProgramPointState *State) {
+  for (AllocationNode *alloc : allocs) {
+    if (State->getEscapeState(alloc->getId()) == EscapeState::GlobalEscape)
+      return true;
+  }
+  return false;
+}
+
+static bool checkAllocationCompatibility(
+    const SmallVector<AllocationNode*> &allocs,
+    ProgramPointState *State,
+    const DenseMap<BasicBlock*, std::unique_ptr<ProgramPointState>> &BlockOutStates,
+    const PHINode &Phi,
+    PointsToGraph &Graph) {
+  
+  if (allocs.empty()) return true;
+
+  // Check EscapeState
+  for (AllocationNode *alloc : allocs) {
+    if (State->getEscapeState(alloc->getId()) != EscapeState::NoEscape)
+      return false;
+  }
+
+  // Check ObjectSize
+  uint32_t firstSize = getObjectSize(allocs[0]);
+  for (AllocationNode *alloc : allocs) {
+    if (getObjectSize(alloc) != firstSize)
+      return false;
+  }
+
+  int32_t firstLockCount = 0;
+  bool firstLockCountSet = false;
+
+  DenseMap<uint32_t, std::pair<Type*, bool>> fieldTypeInfo;
+  DenseMap<AllocationNode*, DenseSet<uint32_t>> allocFieldSets;
+
+  for (unsigned i = 0; i < Phi.getNumIncomingValues(); i++) {
+    BasicBlock *predBB = Phi.getIncomingBlock(i);
+    Value *incomingValue = Phi.getIncomingValue(i);
+
+    AllocationNode *sourceAlloc = nullptr;
+    if (Graph.hasNodeForValue(incomingValue)) {
+      PEANode *node = Graph.getNodeForValue(incomingValue);
+      for (AllocationNode *alloc : Graph.pointsTo(node)) {
+        if (llvm::is_contained(allocs, alloc)) {
+          sourceAlloc = alloc;
+          break;
+        }
+      }
+    }
+
+    if (!sourceAlloc) return false;
+
+    if (!BlockOutStates.contains(predBB)) return false;
+
+    ProgramPointState *predState = BlockOutStates.at(predBB).get();
+    if (!predState->hasAllocState(sourceAlloc->getId())) return false;
+
+    const AllocationState *allocState = predState->getAllocState(sourceAlloc->getId());
+
+    // Check LockCount
+    int32_t lockCount = predState->getLockCount(sourceAlloc->getId());
+    if (!firstLockCountSet) {
+      firstLockCount = lockCount;
+      firstLockCountSet = true;
+    } else if (lockCount != firstLockCount) {
+      return false;
+    }
+
+    DenseSet<uint32_t> &fieldSet = allocFieldSets[sourceAlloc];
+
+    // Check FieldType and FieldIsOop
+    for (const auto &[offset, fieldInfo] : allocState->getAllFields()) {
+      fieldSet.insert(offset);
+
+      if (!fieldTypeInfo.contains(offset)) {
+        fieldTypeInfo[offset] = {fieldInfo.FieldType, fieldInfo.IsOop};
+      } else {
+        auto [existingType, existingIsOop] = fieldTypeInfo[offset];
+        if (existingType != fieldInfo.FieldType || existingIsOop != fieldInfo.IsOop) {
+          return false;
+        }
+      }
+    }
+  }
+
+  // Check FieldSet
+  if (!allocFieldSets.empty()) {
+    DenseSet<uint32_t> referenceSet = allocFieldSets.begin()->second;
+
+    for (const auto &[alloc, fieldSet] : allocFieldSets) {
+      if (fieldSet != referenceSet) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
 
 static SmallVector<AllocationNode *> getHolderAllocations(FieldNode *Field, PointsToGraph &Graph) {
   SmallVector<AllocationNode *> HolderAllocs;
@@ -535,7 +663,7 @@ static uint32_t computeGEPOffset(GetElementPtrInst *GEP) {
 
 // Key instruction may change the AllocationState
 static bool isKeyInstruction(Instruction *I) {
-  return isa<CallInst>(I) || isa<StoreInst>(I) || isa<ReturnInst>(I);
+  return isa<CallInst>(I) || isa<StoreInst>(I) || isa<ReturnInst>(I) || isa<PHINode>(I);
 }
 
 static bool isValueInvalid(Value *V) {
@@ -554,11 +682,12 @@ AnalysisKey PartialEscapeAnalysis::Key;
 PEAResult PartialEscapeAnalysis::run(Function &F, FunctionAnalysisManager &FAM) {
   PEAResult Result;
   Visitor.setResult(&Result);
+  Visitor.setAnalysis(this);
 
   AllocationNode *Phantom = Result.Graph.createAllocation(nullptr, false);
   Result.Graph.setPhantomObj(Phantom);
 
-  DenseMap<BasicBlock *, std::unique_ptr<ProgramPointState>> BlockOutStates;
+  BlockOutStates.clear();
   BlockOutStates.reserve(F.size());
 
   auto &LI = FAM.getResult<LoopAnalysis>(F);
@@ -616,6 +745,27 @@ std::unique_ptr<ProgramPointState> PartialEscapeAnalysis::mergePredecessorStates
 
   for (size_t i = 1; i < PredStates.size(); i++) {
     Merged->mergeFrom(PredStates[i], Result.PhiMap, BB, PredBBs[i]);
+  }
+
+  for (const auto &[AllocId, AllocState] : Merged->AllocationStates) {
+    for (const auto &[Offset, FieldInfo] : AllocState.getAllFields()) {
+      auto *pendingInputs = Result.PhiMap.getPendingInputs(BB, AllocId, Offset);
+
+      if (pendingInputs && !pendingInputs->empty()) {
+        for (size_t i = 0; i < PredBBs.size(); i++) {
+          BasicBlock *predBB = PredBBs[i];
+          if (!pendingInputs->contains(predBB)) {
+            const AllocationState *predAllocState = PredStates[i]->getAllocState(AllocId);
+            if (predAllocState && predAllocState->hasField(Offset)) {
+              Value *predValue = predAllocState->getField(Offset)->StoredValue;
+              Result.PhiMap.addPendingPhi(BB, AllocId, Offset, predBB, predValue);
+            }
+          }
+        }
+
+        Merged->setField(AllocId, Offset, nullptr, FieldInfo.FieldType, FieldInfo.IsOop);
+      }
+    }
   }
 
   return Merged;
@@ -865,17 +1015,230 @@ void PartialEscapeAnalysis::PEAVisitor::visitReturnInst(ReturnInst &I) {
 void PartialEscapeAnalysis::PEAVisitor::visitPHINode(PHINode &I) {
   if (!containsJavaHeapPtrType(I.getType())) return;
 
-  SmallVector<PEANode *> Targets;
+  SmallVector<PointerNode*> pointerSources;
+  SmallVector<FieldNode*> fieldSources;
+  bool hasPhantom = false;
 
   for (Value *In : I.incoming_values()) {
-    PEANode *InNode = (Result->Graph.hasNodeForValue(In)) ? Result->Graph.getNodeForValue(In) : Result->Graph.getPhantomObj();
-    if (!llvm::is_contained(Targets, InNode))
-      Targets.push_back(InNode);
+    if (!Result->Graph.hasNodeForValue(In)) {
+      hasPhantom = true;
+      continue;
+    }
+
+    PEANode *Node = Result->Graph.getNodeForValue(In);
+    if (Node == Result->Graph.getPhantomObj()) {
+      hasPhantom = true;
+    } else if (Node->isPointer()) {
+      pointerSources.push_back(Node->asPointer());
+    } else if (Node->isField()) {
+      fieldSources.push_back(Node->asField());
+    } else {
+      assert(false && "Unexpected Phi incoming node type");
+    }
   }
 
-  PointerNode *PtrNode = Result->Graph.createPointer(&I, Targets[0]);
-  for (size_t i = 1; i < Targets.size(); i++)
-    Result->Graph.addEdge(PtrNode, Targets[i]);
+  if (fieldSources.empty()) {
+    handleObjectPointerPhi(I, pointerSources, hasPhantom);
+    return;
+  }
+
+  if (pointerSources.empty()) {
+    handleFieldPointerPhi(I, fieldSources, hasPhantom);
+    return;
+  }
+
+  handleMixedPhi(I, pointerSources, fieldSources);
+}
+
+void PartialEscapeAnalysis::PEAVisitor::handleObjectPointerPhi(PHINode &Phi, const SmallVector<PointerNode*> &pointerSources, bool hasPhantom) {
+  SmallVector<AllocationNode*> allocs;
+
+  for (PointerNode *ptr : pointerSources) {
+    for (AllocationNode *alloc : Result->Graph.pointsTo(ptr)) {
+      if (!Result->Graph.isPhantom(alloc) && !llvm::is_contained(allocs, alloc)) {
+        allocs.push_back(alloc);
+      }
+    }
+  }
+
+  PEANode *firstTarget = allocs.empty() ? Result->Graph.getPhantomObj() : allocs[0];
+  PointerNode *PhiPtrNode = Result->Graph.createPointer(&Phi, firstTarget);
+
+  for (size_t i = 1; i < allocs.size(); i++)
+    Result->Graph.addEdge(PhiPtrNode, allocs[i]);
+
+  if (hasPhantom)
+    Result->Graph.addEdge(PhiPtrNode, Result->Graph.getPhantomObj());
+
+  // Scenario 1: Same VirtualObject -- do nothing, alias has created, fields have been merged in mergeFrom
+  if (allocs.size() <= 1) return;
+
+  // Scenario 2: Has EscapeObject -- mark all incomings escaped
+  if (hasPhantom || hasEscapedAllocation(allocs, State)) {
+    markAllocationsAsEscaped(allocs, Phi);
+    return;
+  }
+
+  // Scenario 3: Different VirtualObject -- check allocation compatibility
+  if (checkAllocationCompatibility(allocs, State, Analysis->BlockOutStates, Phi, Result->Graph))
+    // 3-a: Compatible -- create a virtual allocation with phi field, the phinode points to that
+    createVirtualAllocationForObjectPhi(Phi, allocs, PhiPtrNode);
+  else
+    // 3-b: Not compatible -- conservatively escape
+    markAllocationsAsEscaped(allocs, Phi);
+}
+
+void PartialEscapeAnalysis::PEAVisitor::handleFieldPointerPhi(PHINode &Phi, const SmallVector<FieldNode*> &fieldSources, bool hasPhantom) {
+  // TODO: deal with field phinode merge
+  // Too many corner cases, left to be done. Conservatively escape now.
+  SmallVector<AllocationNode*> holderList;
+  for (FieldNode *field : fieldSources) {
+    for (AllocationNode *holder : getHolderAllocations(field, Result->Graph)) {
+      if (!llvm::is_contained(holderList, holder))
+        holderList.push_back(holder);
+    }
+  }
+
+  markAllocationsAsEscaped(holderList, Phi);
+}
+
+void PartialEscapeAnalysis::PEAVisitor::handleMixedPhi(
+    PHINode &Phi,
+    const SmallVector<PointerNode*> &pointerSources,
+    const SmallVector<FieldNode*> &fieldSources) {
+
+  SmallVector<AllocationNode*> allocList;
+
+  for (PointerNode *ptr : pointerSources) {
+    for (AllocationNode *alloc : Result->Graph.pointsTo(ptr)) {
+      if (!Result->Graph.isPhantom(alloc) && !llvm::is_contained(allocList, alloc))
+        allocList.push_back(alloc);
+    }
+  }
+
+  for (FieldNode *field : fieldSources) {
+    for (AllocationNode *holder : getHolderAllocations(field, Result->Graph)) {
+      if (!Result->Graph.isPhantom(holder) && !llvm::is_contained(allocList, holder))
+        allocList.push_back(holder);
+    }
+  }
+
+  markAllocationsAsEscaped(allocList, Phi);
+}
+
+void PartialEscapeAnalysis::PEAVisitor::markAllocationsAsEscaped(const SmallVector<AllocationNode*> &allocs, PHINode &Phi) {
+  BasicBlock *currentBB = Phi.getParent();
+
+  for (AllocationNode *alloc : allocs) {
+    uint32_t allocId = alloc->getId();
+
+    // PhiNode State
+    State->setEscapeState(allocId, EscapeState::GlobalEscape);
+
+    // BlockEntryState
+    if (Result && Result->hasBlockState(currentBB)) {
+      Result->getBlockState(currentBB)->setEscapeState(allocId, EscapeState::GlobalEscape);
+    }
+
+    // PredBB BlockOutState
+    for (unsigned i = 0; i < Phi.getNumIncomingValues(); i++) {
+      Value *incomingValue = Phi.getIncomingValue(i);
+      if (alloc->getIRValue() == incomingValue) {
+        BasicBlock *predBB = Phi.getIncomingBlock(i);
+        if (Analysis->BlockOutStates.contains(predBB)) {
+          Analysis->BlockOutStates.at(predBB)->setEscapeState(allocId, EscapeState::GlobalEscape);
+        }
+        break;
+      }
+    }
+  }
+}
+
+void PartialEscapeAnalysis::PEAVisitor::createVirtualAllocationForObjectPhi(
+    PHINode &Phi,
+    const SmallVector<AllocationNode*> &allocs,
+    PointerNode *PtrNode) {
+
+  VirtualAllocationNode *virtualAlloc = Result->Graph.createVirtualAllocation(&Phi);
+
+  Result->Graph.resetPhiPointerTarget(PtrNode, virtualAlloc);
+
+  uint32_t virtualAllocId = virtualAlloc->getId();
+  EscapeState es = EscapeState::NoEscape;
+
+  State->setEscapeState(virtualAllocId, es);
+
+  BasicBlock *currentBB = Phi.getParent();
+  if (Result->hasBlockState(currentBB)) {
+    Result->getBlockState(currentBB)->setEscapeState(virtualAllocId, es);
+  }
+
+  DenseSet<uint32_t> allOffsets;
+  DenseMap<uint32_t, std::pair<Type*, bool>> fieldTypeInfo;
+  DenseMap<std::pair<uint32_t, BasicBlock*>, Value*> pendingValues;
+
+  for (unsigned i = 0; i < Phi.getNumIncomingValues(); i++) {
+    BasicBlock *predBB = Phi.getIncomingBlock(i);
+    Value *incomingValue = Phi.getIncomingValue(i);
+
+    AllocationNode *sourceAlloc = nullptr;
+    if (Result->Graph.hasNodeForValue(incomingValue)) {
+      PEANode *node = Result->Graph.getNodeForValue(incomingValue);
+      for (AllocationNode *alloc : Result->Graph.pointsTo(node)) {
+        if (llvm::is_contained(allocs, alloc)) {
+          sourceAlloc = alloc;
+          break;
+        }
+      }
+    }
+
+    if (sourceAlloc && Analysis->BlockOutStates.contains(predBB)) {
+      ProgramPointState *predState = Analysis->BlockOutStates.at(predBB).get();
+      if (predState->hasAllocState(sourceAlloc->getId())) {
+        const AllocationState *predAllocState = predState->getAllocState(sourceAlloc->getId());
+        for (const auto &[offset, fieldInfo] : predAllocState->getAllFields()) {
+          allOffsets.insert(offset);
+          if (!fieldTypeInfo.contains(offset)) {
+            fieldTypeInfo[offset] = {fieldInfo.FieldType, fieldInfo.IsOop};
+          }
+          pendingValues[{offset, predBB}] = fieldInfo.StoredValue;
+        }
+      }
+    }
+  }
+
+  BasicBlock *mergeBB = Phi.getParent();
+
+  for (uint32_t offset : allOffsets) {
+    auto [fieldType, isOop] = fieldTypeInfo[offset];
+
+    Value *firstValue = nullptr;
+    bool allSame = true;
+
+    for (unsigned i = 0; i < Phi.getNumIncomingValues(); i++) {
+      BasicBlock *predBB = Phi.getIncomingBlock(i);
+      Value *predValue = pendingValues.lookup({offset, predBB});
+
+      if (i == 0) {
+        firstValue = predValue;
+      } else if (predValue != firstValue) {
+        allSame = false;
+        break;
+      }
+    }
+
+    if (allSame) {
+      State->setField(virtualAllocId, offset, firstValue, fieldType, isOop);
+    } else {
+      State->setField(virtualAllocId, offset, nullptr, fieldType, isOop);
+
+      for (unsigned i = 0; i < Phi.getNumIncomingValues(); i++) {
+        BasicBlock *predBB = Phi.getIncomingBlock(i);
+        Value *fieldValue = pendingValues.lookup({offset, predBB});
+        Result->PhiMap.addPendingPhi(mergeBB, virtualAllocId, offset, predBB, fieldValue);
+      }
+    }
+  }
 }
 
 void PartialEscapeAnalysis::PEAVisitor::visitSelectInst(SelectInst &I) {

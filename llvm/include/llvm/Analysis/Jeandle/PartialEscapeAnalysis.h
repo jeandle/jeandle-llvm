@@ -157,6 +157,10 @@ protected:
       Targets.push_back(N);
   }
 
+  void clearTargets() {
+    Targets.clear();
+  }
+
   void addSource(PEANode *N) {
     if (!hasSource(N))
       Sources.push_back(N);
@@ -221,6 +225,7 @@ public:
   virtual ~AllocationNode() = default;
 
   virtual bool isArrayAllocation() const { return false; }
+  virtual bool isVirtualAllocation() const { return false; }
 
   /// TODO(PEA-Deopt): Add Klass getter/setter
 
@@ -236,7 +241,7 @@ class ArrayAllocationNode : public AllocationNode {
   /// Only array allocations with a statically known size can be processed by Partial Escape Analysis.
   /// In order to limit the overhead introduced by Partial Escape Analysis, only arrays up to a
   /// configurable maximum size, which defaults to 32, are processed
-  
+
   // 0=dynamic, ≤32=optimizable, >32=large
   uint32_t Length = 0;
 
@@ -248,6 +253,49 @@ public:
   void setLength(uint32_t L) { Length = L; }
 
   bool isArrayAllocation() const override { return true; }
+};
+
+//===----------------------------------------------------------------------===//
+// VirtualAllocationNode - Represents a virtual allocation for PHI merging
+//===----------------------------------------------------------------------===//
+
+/// VirtualAllocationNode represents a "merged" allocation created when a PHI
+/// pointer points to multiple different allocations that are compatible.
+///
+/// Inspired by Graal's "merged VirtualObject" design:
+/// - When PHI pointer points to multiple allocations (obj1, obj2, ...)
+/// - If they are virtual and compatible (same size, lock state, etc.)
+/// - Create a VirtualAllocationNode to represent the merged object
+/// - Field values become PHI nodes: field_phi = phi [val1, val2, ...]
+///
+/// Key properties:
+/// - No corresponding IR allocation (nullptr IRValue)
+/// - Created during state merge for PHI pointer scenarios
+/// - SourcePhi: the PHI instruction that triggered this virtual allocation
+/// - Used for scalar replacement: fields replaced by PHI values
+///
+/// Example:
+/// ```
+/// bb1: obj1 = new A(); obj1.field = 42
+/// bb2: obj2 = new A(); obj2.field = 100
+/// merge: p = phi [obj1, obj2]
+///        val = p.field  // can be replaced by: val_phi = phi [42, 100]
+/// ```
+class VirtualAllocationNode : public AllocationNode {
+  PHINode *SourcePhi;
+
+ public:
+  VirtualAllocationNode(PHINode *Phi, uint32_t Id)
+      : AllocationNode(nullptr, Id), SourcePhi(Phi) {}
+
+  PHINode *getSourcePhi() const { return SourcePhi; }
+
+  bool isVirtualAllocation() const override { return true; }
+
+  static bool classof(const PEANode *N) {
+    return N->isAllocation() && 
+           cast<AllocationNode>(N)->isVirtualAllocation();
+  }
 };
 
 //===----------------------------------------------------------------------===//
@@ -594,10 +642,19 @@ private:
   /// - SelectInst (conditional selection)
   PointerNode *createPointer(Value *V, PEANode *Target);
 
-  /// Create a FieldNode representing a field access via GEP.
+  /// Create a FieldNode representing a field access.
   /// The following Insts will create a FieldNode:
   /// - GetElementPtrInst
-  FieldNode *createField(GetElementPtrInst *GEP, PEANode *Base, uint32_t Offset);
+  /// - PHI (for field pointer Phi)
+  FieldNode *createField(Value *V, PEANode *Base, uint32_t Offset);
+
+  /// Create a virtual AllocationNode for PHI pointer scenarios.
+  /// Virtual allocations represent merged objects when a PHI pointer points to
+  /// multiple different allocations that are compatible (same size, lock state, etc.)
+  VirtualAllocationNode *createVirtualAllocation(PHINode *Phi);
+
+  /// Reset a pointer's target to a new node (used for virtual allocation)
+  void resetPhiPointerTarget(PointerNode *Ptr, VirtualAllocationNode *NewTarget);
 
   void setPhantomObj(AllocationNode *Alloc) { PhantomObj = Alloc; }
 
@@ -823,12 +880,14 @@ private:
   class PEAVisitor : public InstVisitor<PEAVisitor> {
     jeandle::ProgramPointState *State;
     jeandle::PEAResult *Result;
+    PartialEscapeAnalysis *Analysis;
 
    public:
-    PEAVisitor() : State(nullptr), Result(nullptr) {}
+    PEAVisitor() : State(nullptr), Result(nullptr), Analysis(nullptr) {}
 
     void setState(jeandle::ProgramPointState *S) { State = S; }
     void setResult(jeandle::PEAResult *R) { Result = R; }
+    void setAnalysis(PartialEscapeAnalysis *A) { Analysis = A; }
 
     void visitCallBase(CallBase &I);
     void visitGetElementPtrInst(GetElementPtrInst &I);
@@ -838,9 +897,26 @@ private:
     void visitPHINode(PHINode &I);
     void visitSelectInst(SelectInst &I);
     void visitInstruction(Instruction &I) {}
+
+   private:
+    void handleObjectPointerPhi(PHINode &Phi,
+                                const SmallVector<jeandle::PointerNode*> &pointerSources,
+                                bool hasPhantom);
+    void handleFieldPointerPhi(PHINode &Phi,
+                               const SmallVector<jeandle::FieldNode*> &fieldSources,
+                               bool hasPhantom);
+    void handleMixedPhi(PHINode &Phi,
+                        const SmallVector<jeandle::PointerNode*> &pointerSources,
+                        const SmallVector<jeandle::FieldNode*> &fieldSources);
+    void markAllocationsAsEscaped(const SmallVector<jeandle::AllocationNode*> &allocs, PHINode &Phi);
+    void createVirtualAllocationForObjectPhi(PHINode &Phi,
+                                             const SmallVector<jeandle::AllocationNode*> &allocs,
+                                             jeandle::PointerNode *PtrNode);
   };
 
   PEAVisitor Visitor;
+
+  DenseMap<BasicBlock *, std::unique_ptr<jeandle::ProgramPointState>> BlockOutStates;
 
   void processInstruction(Instruction *I,
                           jeandle::ProgramPointState *State,
@@ -867,6 +943,17 @@ private:
 
   /// Get RPO order blocks in a loop, only include blocks exactly in this loop and subloops' header blocks
   SmallVector<BasicBlock *> getLoopBlocksInRPO(Loop *L, LoopInfo &LI, const SmallVector<BasicBlock *> &FullRPO);
+
+  /// Handle object pointer PHI with multiple targets
+  void handleObjectPointerPHI(PHINode *Phi,
+                              jeandle::PointerNode *PhiPtr,
+                              const SmallVector<jeandle::AllocationNode*> &Targets,
+                              jeandle::ProgramPointState *State,
+                              jeandle::PEAResult &Result);
+
+  /// Check compatibility of allocations for PHI merging
+  bool checkPHICompatibility(const SmallVector<jeandle::AllocationNode*> &Targets,
+                             jeandle::PEAResult &Result);
 };
 
 } // namespace llvm
