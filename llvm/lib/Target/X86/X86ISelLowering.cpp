@@ -28556,6 +28556,7 @@ Register X86TargetLowering::getRegisterByName(const char* RegName, LLT VT,
                      .Case("rsp", X86::RSP)
                      .Case("ebp", X86::EBP)
                      .Case("rbp", X86::RBP)
+                     .Case("r12", X86::R12)
                      .Case("r14", X86::R14)
                      .Case("r15", X86::R15)
                      .Default(0);

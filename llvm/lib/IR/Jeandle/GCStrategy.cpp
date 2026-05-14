@@ -30,6 +30,8 @@ public:
     // Method is only valid on pointer typed values.
     const llvm::PointerType *PT = llvm::cast<llvm::PointerType>(Ty);
     return (llvm::jeandle::AddrSpace::JavaHeapAddrSpace ==
+            PT->getAddressSpace() || 
+            llvm::jeandle::AddrSpace::NarrowOopAddrSpace ==
             PT->getAddressSpace());
   }
 };

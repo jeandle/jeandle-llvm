@@ -39,7 +39,7 @@ cl::opt<bool> llvm::NoKernelInfoEndLTO(
 TargetMachine::TargetMachine(const Target &T, StringRef DataLayoutString,
                              const Triple &TT, StringRef CPU, StringRef FS,
                              const TargetOptions &Options)
-    : TheTarget(T), DL(DataLayoutString), TargetTriple(TT),
+    : TheTarget(T), DL(jeandleExtendDataLayout(DataLayoutString)), TargetTriple(TT),
       TargetCPU(std::string(CPU)), TargetFS(std::string(FS)), AsmInfo(nullptr),
       MRI(nullptr), MII(nullptr), STI(nullptr), RequireStructuredCFG(false),
       O0WantsFastISel(false), Options(Options) {}
