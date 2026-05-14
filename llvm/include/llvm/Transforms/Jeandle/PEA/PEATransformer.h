@@ -11,9 +11,31 @@
 #ifndef LLVM_TRANSFORMS_JEANDLE_PEA_TRANSFORMER_H
 #define LLVM_TRANSFORMS_JEANDLE_PEA_TRANSFORMER_H
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/PassManager.h"
 
 namespace llvm {
+
+class Instruction;
+class DominatorTree;
+
+/// Compute minimal materialize points from all escape points.
+/// 
+/// Given all escape points (where allocation becomes GlobalEscape),
+/// use DominatorTree to filter out dominated points, returning
+/// the minimal set of points where allocation must be materialized.
+///
+/// Example:
+/// ```
+/// EscapePoints: [A, B, C]
+/// DT: A dominates B, B dominates C
+/// Result: [A]  // Only A needs materialization
+/// ```
+///
+/// TODO(PEA-Transform): Implement dominator-based filtering
+SmallVector<Instruction *> 
+computeMinimalMaterializePoints(const SmallVector<Instruction *> &EscapePoints,
+                                DominatorTree &DT);
 
 class PEATransformerPass : public PassInfoMixin<PEATransformerPass> {
 public:

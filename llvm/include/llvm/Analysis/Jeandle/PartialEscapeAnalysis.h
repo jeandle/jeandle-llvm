@@ -21,6 +21,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Instruction.h"
@@ -70,147 +71,46 @@ enum class EscapeState : uint8_t {
   GlobalEscape
 };
 
-enum class PEANodeType : uint8_t {
-  Allocation,       // Represents an allocation (object or array)
-  Pointer,          // Represents a pointer/alias
-  Field             // Represents a field access
-};
+/// AllocID - Unique identifier for an allocation object
+///
+/// ID=0 reprensents a special allocation node named PhantomObj.
+///
+/// Inspired by HotSpot C2's phantom_object, PhantomObj represents objects whose
+/// origin cannot be traced within the current function:
+/// - Global variables and static fields
+/// - Function parameters from external callers
+/// - Objects loaded from untracked addresses
+/// - Results of unknown function calls
+///
+/// PhantomObj is always considered GlobalEscape.
+using AllocID = uint32_t;
 
-class PEANode;
-class AllocationNode;
-class ArrayAllocationNode;
-class PointerNode;
-class FieldNode;
+class AllocationObject;
+class ArrayAllocationObject;
+class VirtualAllocationObject;
+class VirtualPhiNode;
 class AllocationState;
-class VirtualPhiMap;
+class PEAResult;
 struct LazyObjectBundle;
 
-//===----------------------------------------------------------------------===//
-// PEANode - Base class for all PEA nodes
-//===----------------------------------------------------------------------===//
-
-/// \class PEANode
-/// \brief Base class for all nodes in the Points-To Graph (PTG).
+/// \class AllocationObject
+/// \brief Base class representing an allocation site in the program.
 ///
-/// PEANode is the abstract base class for the three node types in the
-/// connection graph structure, inspired by HotSpot C2's escape analysis:
+/// AllocationObject represents a unique allocation that can be tracked by
+/// Partial Escape Analysis. Each allocation has a unique ID that is used
+/// to query its AllocationState across different program points.
 ///
-/// - AllocationNode: Represents an allocation site (object or array)
-/// - PointerNode:    Represents a pointer variable or alias
-/// - FieldNode:      Represents a field access (GEP in LLVM IR)
-///
-/// Node Relationships:
-/// -------------------
-/// Each PEANode maintains two directional node lists:
-///
-/// - _Targets: Target nodes - "what this node points to" (outgoing)
-/// - _Sources: Source nodes - "what points to this node" (incoming)
-///
-/// Node relationship semantics vary by node type:
-///
-/// | From           | To             | Relation     | Meaning                       | Example                | Representation |
-/// |----------------|----------------|--------------|-------------------------------|------------------------|----------------|
-/// | PointerNode    | AllocationNode | PointsTo     | Pointer points to allocation  | p = new T()            | p -P> T        |
-/// | PointerNode    | PointerNode    | Deferred     | Pointer copies another pointer| p = q                  | p -D> q        |
-/// | PointerNode    | FieldNode      | Deferred     | Pointer loaded from field     | p = q.f                | p -D> f        |
-/// | FieldNode      | AllocationNode | PointsTo     | Field stores allocation ref   | p.f = new T()          | f -P> T        |
-/// | FieldNode      | PointerNode    | Deferred     | Field stores pointer ref      | p.f = q                | f -D> q        |
-/// | AllocationNode | FieldNode      | Field        | Allocation owns this field    | p = new T(); p.f       | T -F> f        |
-///
-/// Base Node Marking:
-/// ------------------
-/// When a PointerNode serves as the base of a FieldNode (e.g., `p.f`),
-/// the PointerNode's Sources contains a tagged pointer to mark this as
-/// a "base source" rather than a normal PointsTo relation.
-///
-/// | From           | To             | Relation     | Meaning                       | Example                | Representation |
-/// |----------------|----------------|--------------|-------------------------------|------------------------|----------------|
-/// | FieldNode      | PointerNode    | Base         | Field bases at pointer ref    | p.f                    | f -B> p        |
-///
-/// The tagging uses the lowest bit of the pointer address:
-/// - Normal pointer (bit 0 = 0): Regular PointsTo/Deferred relation
-/// - Tagged pointer (bit 0 = 1): Base relation (PointerNode → FieldNode)
-///
-/// This technique exploits memory alignment (all valid addresses have
-/// bit 0 = 0) and is consistent with HotSpot C2's implementation.
-///
-/// SSA Property:
-/// -------------
-/// In LLVM IR with SSA form, each IR Value has a single definition.
-/// Therefore, the pointing relationships are STATIC and do not change
-/// across different program points. This allows alias information to
-/// be stored in the static PointsToGraph rather than flow-sensitive
-/// ProgramPointState.
-///
-/// Reference: HotSpot C2 escape.hpp, escape.cpp
-class PEANode {
-protected:
-  PEANodeType NodeType;
-  Value *IRValue = nullptr;
-  uint32_t NodeId;
+/// Key Properties:
+/// ---------------
+/// - Id: Unique identifier for state tracking
+/// - Source: The IR Value that created this allocation
+///   - nullptr for PhantomObj (ID=0)
+///   - CallInst for jeandle.new_instance/newarray (regular allocations)
+///   - PHINode for VirtualAllocationObject (PHI-merged allocations)
+class AllocationObject {
+  AllocID Id;
+  Value *Source;
 
-  SmallVector<PEANode *, 4> Targets;
-  SmallVector<PEANode *, 4> Sources;
-
-  void addTarget(PEANode *N) {
-    if (!hasTarget(N))
-      Targets.push_back(N);
-  }
-
-  void clearTargets() {
-    Targets.clear();
-  }
-
-  void addSource(PEANode *N) {
-    if (!hasSource(N))
-      Sources.push_back(N);
-  }
-
-  void addBaseSource(FieldNode *F) {
-    PEANode *Tagged = (PEANode *)((uintptr_t)F | 1);
-    if (!hasSource(Tagged))
-      Sources.push_back(Tagged);
-  }
-
-  friend class PointsToGraph;
-
-public:
-  PEANode(PEANodeType T, Value *V, uint32_t Id)
-      : NodeType(T), IRValue(V), NodeId(Id) {}
-  virtual ~PEANode() = default;
-
-  PEANodeType getType() const { return NodeType; }
-  Value *getIRValue() const { return IRValue; }
-  uint32_t getId() const { return NodeId; }
-
-  bool isAllocation() const { return NodeType == PEANodeType::Allocation; }
-  bool isPointer() const { return NodeType == PEANodeType::Pointer; }
-  bool isField() const { return NodeType == PEANodeType::Field; }
-
-  AllocationNode *asAllocation();
-  PointerNode *asPointer();
-  FieldNode *asField();
-
-  const SmallVector<PEANode *, 4> &getTargets() const { return Targets; }
-  const SmallVector<PEANode *, 4> &getSources() const { return Sources; }
-
-  bool hasTarget(PEANode *N) const { return llvm::is_contained(Targets, N); }
-  bool hasSource(PEANode *N) const { return llvm::is_contained(Sources, N); }
-
-  static bool isBaseUse(PEANode *N) {
-    return ((uintptr_t)N & 1);
-  }
-
-  static FieldNode *getBaseUseNode(PEANode *N) {
-    return ((uintptr_t)N & 1) ? (FieldNode *)((uintptr_t)N & ~1) : nullptr;
-  }
-};
-
-//===----------------------------------------------------------------------===//
-// AllocationNode - Represents an allocation site (object)
-//===----------------------------------------------------------------------===//
-
-class AllocationNode : public PEANode {
   /// TODO(PEA-Deopt): Add Klass for deoptimization materialization
   /// - uintptr_t Klass = 0; (from jeandle.new_instance argument)
   /// - Used to reconstruct virtual object when deoptimization occurs
@@ -219,10 +119,11 @@ class AllocationNode : public PEANode {
   // uintptr_t Klass = 0;  // TODO: implement after type analysis is stable
 
 public:
-  AllocationNode(Value *V, uint32_t Id)
-      : PEANode(PEANodeType::Allocation, V, Id) {}
+  AllocationObject(AllocID Id, Value *V) : Id(Id), Source(V) {}
+  virtual ~AllocationObject() = default;
 
-  virtual ~AllocationNode() = default;
+  AllocID getId() const { return Id; }
+  Value *getSource() const { return Source; }
 
   virtual bool isArrayAllocation() const { return false; }
   virtual bool isVirtualAllocation() const { return false; }
@@ -231,48 +132,46 @@ public:
 
   // uintptr_t getKlass() const { return Klass; }
   // void setKlass(uintptr_t K) { Klass = K; }
+  static bool classof(const AllocationObject *) { return true; }
 };
 
-//===----------------------------------------------------------------------===//
-// ArrayAllocationNode - Represents an array allocation site
-//===----------------------------------------------------------------------===//
-
-class ArrayAllocationNode : public AllocationNode {
-  /// Only array allocations with a statically known size can be processed by Partial Escape Analysis.
-  /// In order to limit the overhead introduced by Partial Escape Analysis, only arrays up to a
-  /// configurable maximum size, which defaults to 32, are processed
-
-  // 0=dynamic, ≤32=optimizable, >32=large
+/// \class ArrayAllocationObject
+/// \brief Represents an array allocation.
+///
+/// Only array allocations with a statically known size can be processed by
+/// Partial Escape Analysis. In order to limit the overhead introduced by PEA,
+/// only arrays up to a configurable maximum size (default 32) are processed.
+///
+/// Length Categories:
+/// ------------------
+/// - 0: Dynamic length (unknown at compile time) - not tracked
+/// - ≤PAEConfig::MaxArrayLength: Optimizable length - tracked by PEA
+/// - >PAEConfig::MaxArrayLength: Large length - not tracked (too much overhead)
+class ArrayAllocationObject : public AllocationObject {
   uint32_t Length = 0;
 
 public:
-  ArrayAllocationNode(Value *V, uint32_t Id)
-      : AllocationNode(V, Id) {}
+  ArrayAllocationObject(AllocID Id, Value *V)
+      : AllocationObject(Id, V) {}
 
   uint32_t getLength() const { return Length; }
   void setLength(uint32_t L) { Length = L; }
 
   bool isArrayAllocation() const override { return true; }
+
+  static bool classof(const AllocationObject *AO) {
+    return AO->isArrayAllocation();
+  }
 };
 
-//===----------------------------------------------------------------------===//
-// VirtualAllocationNode - Represents a virtual allocation for PHI merging
-//===----------------------------------------------------------------------===//
-
-/// VirtualAllocationNode represents a "merged" allocation created when a PHI
-/// pointer points to multiple different allocations that are compatible.
+/// \class VirtualAllocationObject
+/// \brief Represents a "merged" allocation created when a PHI pointer points
+///        to multiple different allocations that are compatible.
 ///
-/// Inspired by Graal's "merged VirtualObject" design:
-/// - When PHI pointer points to multiple allocations (obj1, obj2, ...)
-/// - If they are virtual and compatible (same size, lock state, etc.)
-/// - Create a VirtualAllocationNode to represent the merged object
-/// - Field values become PHI nodes: field_phi = phi [val1, val2, ...]
-///
-/// Key properties:
-/// - No corresponding IR allocation (nullptr IRValue)
-/// - Created during state merge for PHI pointer scenarios
-/// - SourcePhi: the PHI instruction that triggered this virtual allocation
-/// - Used for scalar replacement: fields replaced by PHI values
+/// When PHI pointer points to multiple allocations (obj1, obj2, ...)
+/// If they are NoEscape and compatible (same size, lock state, etc.)
+/// Create a VirtualAllocationObject to represent the merged object
+/// Field values become PHI nodes: field_phi = phi [val1, val2, ...]
 ///
 /// Example:
 /// ```
@@ -281,67 +180,20 @@ public:
 /// merge: p = phi [obj1, obj2]
 ///        val = p.field  // can be replaced by: val_phi = phi [42, 100]
 /// ```
-class VirtualAllocationNode : public AllocationNode {
-  PHINode *SourcePhi;
+/// If not compatible, all merged allocations are marked GlobalEscape.
+class VirtualAllocationObject : public AllocationObject {
+public:
+  VirtualAllocationObject(AllocID Id, PHINode *Phi)
+      : AllocationObject(Id, Phi) {}
 
- public:
-  VirtualAllocationNode(PHINode *Phi, uint32_t Id)
-      : AllocationNode(nullptr, Id), SourcePhi(Phi) {}
-
-  PHINode *getSourcePhi() const { return SourcePhi; }
+  PHINode *getSourcePhi() const {
+    return cast<PHINode>(getSource());
+  }
 
   bool isVirtualAllocation() const override { return true; }
 
-  static bool classof(const PEANode *N) {
-    return N->isAllocation() && 
-           cast<AllocationNode>(N)->isVirtualAllocation();
-  }
-};
-
-//===----------------------------------------------------------------------===//
-// PointerNode - Represents a pointer/alias to allocations or fields
-//===----------------------------------------------------------------------===//
-
-class PointerNode : public PEANode {
-public:
-  PointerNode(Value *V, uint32_t Id)
-      : PEANode(PEANodeType::Pointer, V, Id) {}
-
-  const SmallVector<PEANode*, 4>& getTargets() const { return Targets; }
-};
-
-//===----------------------------------------------------------------------===//
-// FieldNode - Represents a field of an allocation
-//===----------------------------------------------------------------------===//
-
-class FieldNode : public PEANode {
-  uint32_t Offset = 0;
-  bool IsOop = false;
-
-  SmallVector<PEANode *, 4> Bases;
-
-  friend class PointsToGraph;
-
-public:
-  FieldNode(Value *V, uint32_t Id)
-      : PEANode(PEANodeType::Field, V, Id) {}
-
-  uint32_t getOffset() const { return Offset; }
-  bool isOop() const { return IsOop; }
-
-  size_t baseCount() const { return Bases.size(); }
-  PEANode *base(size_t i) const { return Bases[i]; }
-  const SmallVector<PEANode *, 4> &getBases() const { return Bases; }
-
-  bool hasBase(PEANode *B) const { return llvm::is_contained(Bases, B); }
-
-private:
-  void setOffset(uint32_t O) { Offset = O; }
-  void setOop(bool O) { IsOop = O; }
-
-  void addBase(PEANode *B) {
-    if (B && !hasBase(B))
-      Bases.push_back(B);
+  static bool classof(const AllocationObject *AO) {
+    return AO->isVirtualAllocation();
   }
 };
 
@@ -370,22 +222,39 @@ struct FieldInfo {
 /// - EscapeState: Dynamic escape status (Unknown/NoEscape/GlobalEscape)
 /// - LockCount: Synchronized lock count for lock elimination
 /// - Fields: All tracked field values (pointer + primitive)
+///
+/// State Components:
+/// -----------------
+/// 1. EscapeState - Dynamic escape status at current program point:
+///    - Unknown:      Initial state, not yet analyzed
+///    - NoEscape:     Allocation is confined, can be scalar-replaced
+///    - GlobalEscape: Allocation escapes globally (stored to global field,
+///                    returned, passed to unknown function, etc.)
+///
+/// 2. LockCount - Synchronized lock count for lock elimination:
+///    - Tracks nested synchronized blocks on same object
+///    - Enables lock elimination when count reaches zero
+///    - Merging states with different LockCount marks object as GlobalEscape
+///
+/// 3. Fields - DenseMap<Offset, FieldInfo> for scalar replacement:
+///    - Tracks field values (both pointer and primitive types)
+///    - Enables store-load forwarding for scalar replacement
+///    - Stores values needed for deoptimization materialization (lazy_object)
 class AllocationState {
-  static constexpr int32_t LOCK_COUNT_UNKNOWN = -1;
-
   EscapeState ES;
-  int32_t LockCount;
+  uint32_t LockCount;
 
   DenseMap<uint32_t, FieldInfo> Fields;
 
   friend class ProgramPointState;
   friend class PEAResult;
+  friend class PEAVisitor;
 
 public:
   AllocationState() : ES(EscapeState::Unknown), LockCount(0) {}
 
   EscapeState getEscapeState() const { return ES; }
-  int32_t getLockCount() const { return LockCount; }
+  uint32_t getLockCount() const { return LockCount; }
 
   bool hasField(uint32_t Offset) const { return Fields.contains(Offset); }
   const FieldInfo *getField(uint32_t Offset) const {
@@ -394,19 +263,89 @@ public:
   }
   const DenseMap<uint32_t, FieldInfo> &getAllFields() const { return Fields; }
 
-  bool operator==(const AllocationState &Other) const;
+bool operator==(const AllocationState &Other) const;
 
-  void mergeFrom(const AllocationState &Other, uint32_t AllocId,
-                 VirtualPhiMap &PhiMap, BasicBlock *MergeBB, BasicBlock *PredBB);
+void mergeFrom(const SmallVector<const AllocationState*> &PredStates,
+               const SmallVector<BasicBlock*> &PredBBs,
+               AllocID AllocId,
+               PEAResult &Result,
+               BasicBlock *MergeBB);
 
 private:
   void setEscapeState(EscapeState S) { ES = S; }
-  void setLockCount(int32_t C) { LockCount = C; }
-  void incLockCount() { if (LockCount >= 0) LockCount++; }
+  void setLockCount(uint32_t C) { LockCount = C; }
+  void incLockCount() { LockCount++; }
   void decLockCount() { if (LockCount > 0) LockCount--; }
 
   void setField(uint32_t Offset, Value *Val, Type *Ty, bool IsOop) {
     Fields[Offset] = FieldInfo(Val, Ty, IsOop);
+  }
+};
+
+/// \class AliasInfo
+/// \brief Represents a pointer with allocation ID and offset information.
+///
+/// AliasInfo captures the essential information about where a pointer points to:
+/// - Which allocation object (AllocID)
+/// - Offset within the object (for field access)
+/// - Whether offset is known (PHI merge may lose this information)
+///
+/// This enables handling:
+/// - Chained GEP: gep(gep(obj, 0), 4) -> {AllocId=obj, Offset=0+4=4}
+/// - PHI merge of GEPs: phi(gep1, gep2) -> {AllocId=obj, Offset=?, HasOffset=false}
+class AliasInfo {
+  AllocID AllocId;
+  uint32_t Offset;
+  bool HasOffset;
+
+public:
+  AliasInfo() : AllocId(0), Offset(0), HasOffset(false) {}
+
+  AliasInfo(AllocID Id, uint32_t Off) : AllocId(Id), Offset(Off), HasOffset(true) {}
+
+  static AliasInfo createUnknownOffset(AllocID Id) {
+    AliasInfo P;
+    P.AllocId = Id;
+    P.HasOffset = false;
+    return P;
+  }
+
+  AllocID getAllocId() const { return AllocId; }
+  uint32_t getOffset() const { return Offset; }
+  bool hasOffset() const { return HasOffset; }
+
+  /// Check if this is Phantom (unknown allocation)
+  bool isPhantom() const { return AllocId == 0; }
+
+  /// Add offset for chained GEP
+  AliasInfo addOffset(uint32_t Off) const {
+    if (!HasOffset) return *this;
+    return AliasInfo(AllocId, Offset + Off);
+  }
+
+  /// Merge two pointers
+  static AliasInfo merge(const AliasInfo &A, const AliasInfo &B) {
+    if (A.AllocId != B.AllocId) return AliasInfo();
+    if (A.HasOffset && B.HasOffset && A.Offset == B.Offset) {
+      return AliasInfo(A.AllocId, A.Offset);
+    }
+    return createUnknownOffset(A.AllocId);
+  }
+
+  /// Merge multiple pointers
+  static AliasInfo merge(ArrayRef<AliasInfo> Infos) {
+    if (Infos.empty()) return AliasInfo();
+
+    AliasInfo Result = Infos[0];
+    for (size_t i = 1; i < Infos.size(); i++) {
+      Result = merge(Result, Infos[i]);
+      if (Result.isPhantom()) break;
+    }
+    return Result;
+  }
+
+  bool operator==(const AliasInfo &Other) const {
+    return AllocId == Other.AllocId && Offset == Other.Offset && HasOffset == Other.HasOffset;
   }
 };
 
@@ -418,34 +357,21 @@ private:
 /// \brief Flow-sensitive state snapshot at a specific program point.
 ///
 /// ProgramPointState captures the DYNAMIC state of allocations at block
-/// entries and particular IR instruction. Unlike the static alias 
-/// information in PointsToGraph, escape states can change across program 
+/// entries and particular IR instructions. Unlike the static alias
+/// information in Alias map, escape states can change across program
 /// points due to control flow and side effects.
 ///
 /// Key Design Principle:
 /// ---------------------
-/// - Alias information (pointer → allocation) is STATIC (SSA property)
+/// - Alias information (Instruction → AllocID) is STATIC (SSA property)
 /// - Escape state is DYNAMIC (depends on control flow)
 ///
 /// State Components:
 /// -----------------
-/// AllocationStates: DenseMap<AllocId, AllocationState>
+/// AllocationStates: DenseMap<AllocID, AllocationState>
 ///
 /// Each AllocationState tracks complete information for one allocation:
-/// 1. EscapeState: Dynamic escape status
-///    - Unknown:      Initial state, not yet analyzed
-///    - NoEscape:     Allocation is confined, can be scalar-replaced
-///    - GlobalEscape: Allocation escapes globally (stored to global field,
-///                    returned, passed to unknown function, etc.)
-///
-/// 2. LockCount: Synchronized lock count for lock elimination
-///    - Tracks nested synchronized blocks on same object
-///    - Enables lock elimination when count reaches zero
-///
-/// 3. Fields: DenseMap<Offset, FieldInfo> for scalar replacement
-///    - Tracks field values (both pointer and primitive types)
-///    - Enables store-load forwarding for scalar replacement
-///    - Stores values needed for deoptimization materialization (lazy_object)
+/// EscapeState, LockCount and Fields.
 ///
 /// Flow-Sensitive Example:
 /// -----------------------
@@ -462,236 +388,130 @@ private:
 /// escape states. This enables materialization at escape points while
 /// keeping the allocation virtual on non-escaping paths.
 class ProgramPointState {
-  Instruction *Inst = nullptr;
-
-  DenseMap<uint32_t, AllocationState> AllocationStates;
+  DenseMap<AllocID, AllocationState> AllocationStates;
 
   friend class llvm::PartialEscapeAnalysis;
+  friend class PEAVisitor;
 
 public:
-  ProgramPointState(Instruction *I = nullptr) : Inst(I) {}
+  ProgramPointState() = default;
 
-  Instruction *getInstruction() const { return Inst; }
-
-  const AllocationState *getAllocState(uint32_t AllocId) const {
+  const AllocationState *getAllocState(AllocID AllocId) const {
     auto It = AllocationStates.find(AllocId);
     return It != AllocationStates.end() ? &It->second : nullptr;
   }
-  bool hasAllocState(uint32_t AllocId) const {
+  bool hasAllocState(AllocID AllocId) const {
     return AllocationStates.contains(AllocId);
   }
 
-  EscapeState getEscapeState(uint32_t AllocId) const {
+  EscapeState getEscapeState(AllocID AllocId) const {
     auto *AS = getAllocState(AllocId);
     return AS ? AS->getEscapeState() : EscapeState::Unknown;
   }
-  int32_t getLockCount(uint32_t AllocId) const {
+  int32_t getLockCount(AllocID AllocId) const {
     auto *AS = getAllocState(AllocId);
     return AS ? AS->getLockCount() : 0;
   }
 
   bool operator==(const ProgramPointState &Other) const;
-  ProgramPointState &operator=(const ProgramPointState &Other);
 
   std::unique_ptr<ProgramPointState> copy() const;
 
 private:
-  void setInstruction(Instruction *I) { Inst = I; }
-
-  void setEscapeState(uint32_t AllocId, EscapeState S) {
+  void setEscapeState(AllocID AllocId, EscapeState S) {
     AllocationStates[AllocId].setEscapeState(S);
   }
-  void setLockCount(uint32_t AllocId, int32_t Count) {
+  void setLockCount(AllocID AllocId, int32_t Count) {
     AllocationStates[AllocId].setLockCount(Count);
   }
-  void incLockCount(uint32_t AllocId) {
+  void incLockCount(AllocID AllocId) {
     AllocationStates[AllocId].incLockCount();
   }
-  void decLockCount(uint32_t AllocId) {
+  void decLockCount(AllocID AllocId) {
     AllocationStates[AllocId].decLockCount();
   }
 
-  void setField(uint32_t AllocId, uint32_t Offset, Value *Val, Type *Ty, bool IsOop) {
+  void setField(AllocID AllocId, uint32_t Offset, Value *Val, Type *Ty, bool IsOop) {
     AllocationStates[AllocId].setField(Offset, Val, Ty, IsOop);
   }
 
-  void mergeFrom(const ProgramPointState *Other, VirtualPhiMap &PhiMap, BasicBlock *MergeBB, BasicBlock *PredBB);
+  void mergeFrom(const SmallVector<ProgramPointState*> &PredStates,
+                 const SmallVector<BasicBlock*> &PredBBs,
+                 PEAResult &Result,
+                 BasicBlock *MergeBB);
 };
 
 //===----------------------------------------------------------------------===//
-// PointsToGraph - Static structure of allocations and pointers
+// VirtualPhiNode - Represents a PHI value for field merging
 //===----------------------------------------------------------------------===//
 
-/// \class PointsToGraph
-/// \brief Static connection graph representing alias and pointing relationships.
+/// \class VirtualPhiNode
+/// \brief Represents a virtual PHI node for field value merging.
 ///
-/// PointsToGraph is a STATIC data structure that describes all pointing
-/// relationships in a function. It is analogous to HotSpot C2's
-/// ConnectionGraph and Graal's VirtualState structure.
+/// VirtualPhiNode is created during state merge when field values differ
+/// across control flow paths. It represents the PHI relationship without
+/// immediately creating IR. Actual PHI nodes are created lazily during
+/// the transformation phase (by PEATransformer).
 ///
-/// Key Property:
-/// -------------
-/// The graph is STATIC because LLVM IR is in SSA form:
-/// - Each IR Value is defined exactly once
-/// - A pointer's target(s) are determined at definition and never change
-/// - Alias information does not vary across program points
-///
-/// This is different from escape states which are flow-sensitive.
-///
-/// Node Types:
-/// ----------
-/// - AllocationNode: Created for each allocation call (jeandle.new_instance,
-///                    jeandle.newarray)
-/// - PointerNode:    Created for pointer variables (PHI, BitCast, Load, etc.)
-/// - FieldNode:      Created for each unique GEP instruction
-///
-/// Deferred Edge Propagation:
-/// -------------------------
-/// Initially, many edges are Deferred (PointerNode → PointerNode/FieldNode).
-/// After building the graph, propagateReferences() iteratively propagates
-/// these to convert Deferred edges into PointsTo edges:
-///
-/// ```
-/// p1 = new A();     // Alloc1
-/// p2 = p1;          // Deferred: p2 → p1
-/// p3 = p2;          // Deferred: p3 → p2
-///
-/// After propagation:
-/// p1 → Alloc1       // PointsTo
-/// p2 → Alloc1       // PointsTo (propagated from p1)
-/// p3 → Alloc1       // PointsTo (propagated from p2)
-/// ```
-///
-/// Value-to-Node Mapping:
-/// ---------------------
-/// ValueToNode maps each IR Value to its corresponding PEANode:
-/// - Allocation call → AllocationNode
-/// - GEP instruction → FieldNode
-/// - PHI/BitCast/Load → PointerNode
-///
-/// This enables quick lookup during analysis and optimization phases.
-class PointsToGraph {
-  std::vector<std::unique_ptr<AllocationNode>> Allocations;
-  std::vector<std::unique_ptr<PointerNode>> Pointers;
-  std::vector<std::unique_ptr<FieldNode>> Fields;
+/// Key Properties:
+/// --------------
+/// - AllocId: The allocation object this PHI belongs to
+/// - Offset: The field offset that needs PHI
+/// - MergeBB: The merge block where PHI should be created
+/// - Inputs: Map from predecessor block to field value
+class VirtualPhiNode : public Value {
+  AllocID AllocId;
+  uint32_t Offset;
+  BasicBlock *MergeBB;
 
-  DenseMap<Value *, PEANode *> ValueToNode;
+  // PHI inputs: Map from predecessor block to field value
+  DenseMap<BasicBlock *, Value *> Inputs;
 
-  uint32_t NextAllocId = 0;
-  uint32_t NextPtrId = 0;
-  uint32_t NextFieldId = 0;
-
-  /// PhantomObj - A special allocation node representing all unknown/external objects.
-  ///
-  /// Inspired by HotSpot C2's phantom_object, PhantomObj represents objects whose
-  /// origin cannot be traced within the current function:
-  /// - Global variables and static fields
-  /// - Function parameters from external callers
-  /// - Objects loaded from untracked addresses
-  /// - Results of unknown function calls
-  ///
-  /// Any pointer loaded from an untracked address (e.g., global variable) is
-  /// treated as pointing to PhantomObj. PhantomObj is always considered GlobalEscape.
-  ///
-  /// FieldNodes can also be created with PhantomObj as their base, preserving
-  /// offset information for field accesses on unknown objects.
-  AllocationNode *PhantomObj = nullptr;
-
-  friend class llvm::PartialEscapeAnalysis;
+  friend class PEAResult;
 
 public:
-  AllocationNode *getAllocation(uint32_t Id) const;
-  AllocationNode *getAllocationForValue(Value *V) const;
-  PointerNode *getPointerForValue(Value *V) const;
-  FieldNode *getFieldForValue(Value *V) const;
-  PEANode *getNodeForValue(Value *V) const;
+  VirtualPhiNode(AllocID Id, uint32_t Off, BasicBlock *BB)
+      : Value(Type::getVoidTy(BB->getContext()), 0),
+        AllocId(Id), Offset(Off), MergeBB(BB) {}
 
-  bool hasAllocationForValue(Value *V) const { return getAllocationForValue(V) != nullptr; }
-  bool hasNodeForValue(Value *V) const { return ValueToNode.contains(V); }
+  AllocID getAllocId() const { return AllocId; }
+  uint32_t getOffset() const { return Offset; }
+  BasicBlock *getMergeBB() const { return MergeBB; }
 
-  AllocationNode *getPhantomObj() const { return PhantomObj; }
-  bool isPhantom(AllocationNode *Alloc) const { return Alloc == PhantomObj; }
+  /// Add an input value from a predecessor block
+  void addInput(BasicBlock *PredBB, Value *Val) {
+    Inputs[PredBB] = Val;
+  }
 
-  const std::vector<std::unique_ptr<AllocationNode>> &allocations() const { return Allocations; }
-  const std::vector<std::unique_ptr<PointerNode>> &pointers() const { return Pointers; }
-  const std::vector<std::unique_ptr<FieldNode>> &fields() const { return Fields; }
+  /// Check if has input from a specific predecessor
+  bool hasInput(BasicBlock *PredBB) const {
+    return Inputs.contains(PredBB);
+  }
 
-  size_t allocationCount() const { return Allocations.size(); }
-  bool empty() const { return Allocations.empty(); }
+  /// Get input value from a specific predecessor
+  Value *getInput(BasicBlock *PredBB) const {
+    auto It = Inputs.find(PredBB);
+    return It != Inputs.end() ? It->second : nullptr;
+  }
 
-  SmallVector<AllocationNode *> pointsTo(PEANode *Node);
+  /// Get all inputs
+  const DenseMap<BasicBlock *, Value *> &getInputs() const {
+    return Inputs;
+  }
 
-private:
-  void addBase(PEANode *From, FieldNode *To);
-  void addEdge(PEANode *From, PEANode *To);
-  void removeEdge(PEANode *From, PEANode *To);
+  /// Get number of inputs
+  size_t getNumInputs() const {
+    return Inputs.size();
+  }
 
-  /// Create an AllocationNode representing an allocation site or phantom object.
-  /// The following Insts will create an AllocationNode:
-  /// - PhantomObj (Alloc#0, globally escaped object such as static global field)
-  /// - call jeandle.new_instance (object allocation)
-  /// - call jeandle.newarray (array allocation)
-  AllocationNode *createAllocation(CallBase *Call, bool IsArray);
+  /// Check if this VirtualPhiNode belongs to a specific allocation and field
+  bool matches(AllocID Id, uint32_t Off) const {
+    return AllocId == Id && Offset == Off;
+  }
 
-  /// Create a PointerNode which points to Target.
-  /// The following Insts will create a PointerNode:
-  /// - CallInst (jeandle.new_instance/newarray returns)
-  /// - BitCastInst (type conversion)
-  /// - LoadInst (loading pointer value)
-  /// - PHINode (control flow merge)
-  /// - SelectInst (conditional selection)
-  PointerNode *createPointer(Value *V, PEANode *Target);
-
-  /// Create a FieldNode representing a field access.
-  /// The following Insts will create a FieldNode:
-  /// - GetElementPtrInst
-  /// - PHI (for field pointer Phi)
-  FieldNode *createField(Value *V, PEANode *Base, uint32_t Offset);
-
-  /// Create a virtual AllocationNode for PHI pointer scenarios.
-  /// Virtual allocations represent merged objects when a PHI pointer points to
-  /// multiple different allocations that are compatible (same size, lock state, etc.)
-  VirtualAllocationNode *createVirtualAllocation(PHINode *Phi);
-
-  /// Reset a pointer's target to a new node (used for virtual allocation)
-  void resetPhiPointerTarget(PointerNode *Ptr, VirtualAllocationNode *NewTarget);
-
-  void setPhantomObj(AllocationNode *Alloc) { PhantomObj = Alloc; }
-
-  void propagateReferences();
-};
-
-//===----------------------------------------------------------------------===//
-// VirtualPhiMap - Pending PHI nodes for field value merging
-//===----------------------------------------------------------------------===//
-
-/// \class VirtualPhiMap
-/// \brief Tracks pending PHI nodes for field value merging across control flow.
-///
-/// During state merge, when field values differ across paths, we record the
-/// PHI relationship without immediately creating IR. PHI nodes are created
-/// lazily during the transformation phase (by PEATransformer).
-///
-/// - PendingPHIs: Each block's map from (AllocId, Offset) to list of (PredBB, Value)
-///
-/// Materialization happens in optimization pass, not during analysis
-class VirtualPhiMap {
-  DenseMap<BasicBlock *,
-           DenseMap<std::pair<uint32_t, uint32_t>,
-                    DenseMap<BasicBlock *, Value *>>> PendingPHIs;
-
-public:
-  void addPendingPhi(BasicBlock *MergeBB, uint32_t AllocId, uint32_t Offset, BasicBlock *PredBB, Value *Val);
-
-  bool hasPendingPhi(BasicBlock *MergeBB, uint32_t AllocId, uint32_t Offset) const;
-
-  Value *getPendingValue(BasicBlock *MergeBB, uint32_t AllocId, uint32_t Offset, BasicBlock *PredBB) const;
-
-  const DenseMap<BasicBlock *, Value *> *
-  getPendingInputs(BasicBlock *MergeBB, uint32_t AllocId, uint32_t Offset) const;
-
-  void clear() { PendingPHIs.clear(); }
-  bool empty() const { return PendingPHIs.empty(); }
+  /// Create actual PHI IR node in MergeBB
+  /// This is called by PEATransformer during the transformation phase
+  PHINode *createPHIIR(Type *FieldType) const;
 };
 
 //===----------------------------------------------------------------------===//
@@ -712,16 +532,16 @@ public:
 /// NOTE: This is used by the optimization pass (PEATransformer), not directly
 /// by the analysis. The analysis only provides the data needed to build bundles.
 struct LazyObjectBundle {
-  uint32_t AllocId;
+  AllocID AllocId;
 
   struct FieldEntry {
     uint32_t Offset;
     Value *FieldValue;
     Type *FieldType;
     bool IsOop;
-    uint32_t ReferencedAllocId;
+    AllocID ReferencedAllocId;
 
-    FieldEntry(uint32_t O, Value *V, Type *T, bool IsO, uint32_t RefAlloc = 0)
+    FieldEntry(uint32_t O, Value *V, Type *T, bool IsO, AllocID RefAlloc = 0)
         : Offset(O), FieldValue(V), FieldType(T), IsOop(IsO), ReferencedAllocId(RefAlloc) {}
   };
 
@@ -737,7 +557,7 @@ struct LazyObjectBundle {
 /// \class PEAResult
 /// \brief Complete result of Partial Escape Analysis for a function.
 ///
-/// PEAResult combines the STATIC PointsToGraph with DYNAMIC ProgramPointStates
+/// PEAResult combines the STATIC Alias map with DYNAMIC ProgramPointStates
 /// to provide a complete analysis result. This separation enables:
 ///
 /// 1. Static alias queries without program point context
@@ -748,115 +568,168 @@ struct LazyObjectBundle {
 /// ---------------------
 /// ```
 /// PEAResult
-/// ├── PointsToGraph (static)    - Alias relationships, node structure
-/// │   ├── AllocationNodes       - All allocation sites
-/// │   ├── PointerNodes          - All pointer variables
-/// │   ├── FieldNodes            - All field accesses
-/// │   └── ValueToNode mapping   - IR Value → PEANode lookup
+/// ├── Alias (static)            - Alias relationships
+/// │   └── Map<Value*, AliasInfo>
+/// │       - Each pointer-producing value maps to its target allocation info
+/// │       - SSA property: alias determined at definition, never changes
 /// │
-/// ├── States (dynamic)          - Flow-sensitive escape states
+/// ├── Allocations               - All allocation objects
+/// │   └── vector<unique_ptr<AllocationObject>>
+/// │       - AllocationObject (ID=0: PhantomObj, ID>0: real/virtual)
+/// │       - ArrayAllocationObject (array allocations)
+/// │       - VirtualAllocationObject (PHI-merged allocations)
+/// │
+/// ├── InstStates (dynamic)      - Flow-sensitive escape states
 /// │   └── Map<Instruction*, ProgramPointState>
 /// │       └── AllocationStates        - state per allocation
 /// │
 /// └── BlockStates               - escape states in basic block entries
 ///     └── Map<BasicBlock*, ProgramPointState>
-/// ```
 ///
-/// Usage Patterns:
-/// --------------
-/// Query escape state at a program point:
+/// Find escape points:
 /// ```cpp
-/// if (Result.isNoEscapeAt(Inst, Alloc)) {
-///   // Can scalar-replace this allocation at this point
-/// }
+/// auto EscapePoints = Result.getEscapePoints(AllocId);
+/// // Use DominatorTree in Transformer Pass to compute minimal materialize points
 /// ```
 ///
-/// Find materialization points:
-/// ```cpp
-/// auto Points = Result.getMaterializePoints(AllocId);
-/// // These are the instructions where allocation must be materialized
-/// ```
-///
-/// Materialization Points:
-/// ----------------------
-/// A materialization point is where a virtual allocation becomes real:
-/// - Before escape: GlobalEscape state requires real allocation
-/// - At deoptimization: Virtual objects must be reconstructed
-///
-/// getMaterializePoints() returns all instructions where an allocation
-/// needs to be materialized, enabling the transformer pass to insert
-/// proper allocation and initialization code.
+/// Escape Points vs Materialize Points:
+/// -------------------------------------
+/// getEscapePoints() returns ALL escape points. Transformer Pass uses
+/// DominatorTree to filter dominated points, computing the minimal set
+/// of materialize points where real allocation is needed.
 class PEAResult {
-  // Graph - static points-to graph records alias information
-  PointsToGraph Graph;
+  // Alias - static alias map: Value -> AliasInfo
+  DenseMap<Value *, AliasInfo> Alias;
 
-  // States - dynamic state in key instruction that has effect on escape state
-  DenseMap<Instruction *, std::unique_ptr<ProgramPointState>> States;
+  // Allocations - all allocation objects, indexes are AllocIDs
+  std::vector<std::unique_ptr<AllocationObject>> Allocations;
+
+  // InstStates - dynamic state in key instruction that has effect on escape state
+  DenseMap<Instruction *, std::unique_ptr<ProgramPointState>> InstStates;
 
   // BlockStates - block entry state
   DenseMap<BasicBlock *, std::unique_ptr<ProgramPointState>> BlockStates;
 
-  VirtualPhiMap PhiMap;
-
 public:
   PEAResult() = default;
 
-  ProgramPointState *getState(Instruction *Inst) const;
-  bool hasState(Instruction *Inst) const { return States.contains(Inst); }
+  ProgramPointState *getInstState(Instruction *Inst) const;
+  bool hasState(Instruction *Inst) const { return InstStates.contains(Inst); }
 
   ProgramPointState *getBlockState(BasicBlock *BB) const;
   bool hasBlockState(BasicBlock *BB) const { return BlockStates.contains(BB); }
 
-  AllocationNode *getAllocation(uint32_t Id) const { return Graph.getAllocation(Id); }
-  AllocationNode *getAllocationForValue(Value *V) const { return Graph.getAllocationForValue(V); }
+  AllocationObject *getAllocationObject(AllocID Id) const;
 
-  EscapeState getEscapeStateAt(Instruction *I, uint32_t AllocId) const;
-  EscapeState getEscapeStateAt(Instruction *I, AllocationNode *Alloc) const;
+  /// Get AliasInfo info for a value
+  AliasInfo getAliasInfo(Value *V) const;
 
-  int32_t getLockCountAt(Instruction *I, uint32_t AllocId) const;
+  /// Check if value has alias
+  bool hasAlias(Value *V) const { return Alias.contains(V); }
 
-  SmallVector<Instruction *> getMaterializePoints(uint32_t AllocId) const;
-  SmallVector<Instruction *> getAllMaterializePoints() const;
-
-  bool isNoEscapeAt(Instruction *I, AllocationNode *Alloc) const {
-    return getEscapeStateAt(I, Alloc) == EscapeState::NoEscape;
+  /// Get AllocID for a value
+  AllocID getAllocId(Value *V) const {
+    auto It = Alias.find(V);
+    return It != Alias.end() ? It->second.getAllocId() : 0;
   }
 
-  const auto &allocations() const { return Graph.allocations(); }
+  const AllocationState *getAllocationStateAt(Instruction *I, AllocID AllocId) const;
 
-  SmallVector<AllocationNode *> getTrackedAllocations() const;
+  SmallVector<Instruction *> getEscapePoints(AllocID AllocId) const;
+  SmallVector<Instruction *> getAllEscapePoints() const;
 
-  Value *getFieldValueAt(Instruction *I, uint32_t AllocId, uint32_t Offset) const;
+  const auto &allocations() const { return Allocations; }
 
-  const AllocationState *getAllocationStateAt(Instruction *I, uint32_t AllocId) const;
+  SmallVector<AllocationObject *> getTrackedAllocations() const;
 
-  SmallVector<LazyObjectBundle, 4>
-  buildLazyObjectBundles(Instruction *DeoptPoint) const;
+  SmallVector<LazyObjectBundle, 4> buildLazyObjectBundles(Instruction *DeoptPoint) const;
 
-  const VirtualPhiMap &getPhiMap() const { return PhiMap; }
+  AllocationObject *getPhantomObj() const {
+    return Allocations.empty() ? nullptr : Allocations[0].get();
+  }
+
+  bool isPhantom(AllocationObject *Obj) const {
+    return Obj && Obj->getId() == 0;
+  }
+
+  bool isPhantom(AllocID Id) const {
+    return Id == 0;
+  }
 
 private:
-  ProgramPointState *createState(Instruction *Inst);
+  ProgramPointState *createInstState(Instruction *Inst);
 
   ProgramPointState *createBlockState(BasicBlock *BB);
 
+  VirtualPhiNode *createVirtualPhiNode(AllocID AllocId, uint32_t Offset, BasicBlock *MergeBB);
+
+  AllocationObject *createAllocationObject(Instruction *Source, bool IsArray);
+
+  AllocationObject *createVirtualAllocationObject(PHINode *Phi);
+
+  /// Create alias for a value
+  void createAlias(Value *V, AliasInfo P);
+
+  /// Convenience: create alias with known offset
+  void createAlias(Value *V, AllocID AllocId, uint32_t Offset) {
+    createAlias(V, AliasInfo(AllocId, Offset));
+  }
+
+  /// Convenience: create Phantom alias
+  void createPhantomAlias(Value *V) {
+    createAlias(V, AliasInfo());
+  }
+
   friend class llvm::PartialEscapeAnalysis;
+  friend class PEAVisitor;
+  friend class AllocationState;
 };
 
-inline AllocationNode *PEANode::asAllocation() {
-  assert(isAllocation());
-  return static_cast<AllocationNode *>(this);
-}
+//===----------------------------------------------------------------------===//
+// PEAVisitor - Instruction visitor for Partial Escape Analysis
+//===----------------------------------------------------------------------===//
 
-inline PointerNode *PEANode::asPointer() {
-  assert(isPointer());
-  return static_cast<PointerNode *>(this);
-}
+/// \class PEAVisitor
+/// \brief InstVisitor for processing IR instructions during PEA analysis.
+///
+/// PEAVisitor visits each instruction in the function and updates the
+/// escape state based on instruction semantics. It is created and used
+/// by PartialEscapeAnalysis during the analysis phase.
+///
+/// Key Responsibilities:
+/// ---------------------
+/// - Visit allocation calls (jeandle.new_instance, jeandle.newarray)
+/// - Visit field accesses (GEP, Store, Load)
+/// - Visit control flow merge (PHI, Select)
+/// - Visit escape operations (Return, unknown Call)
+/// - Visit synchronization (monitorenter/monitorexit)
+class PEAVisitor : public InstVisitor<PEAVisitor> {
+  ProgramPointState *State;
+  PEAResult *Result;
+  DenseMap<BasicBlock *, std::unique_ptr<ProgramPointState>> *BlockOutStates;
 
-inline FieldNode *PEANode::asField() {
-  assert(isField());
-  return static_cast<FieldNode *>(this);
-}
+public:
+  PEAVisitor() : State(nullptr), Result(nullptr), BlockOutStates(nullptr) {}
+
+  void setState(ProgramPointState *S) { State = S; }
+  void setResult(PEAResult *R) { Result = R; }
+  PEAResult *getResult() const { return Result; }
+  void setBlockOutStates(DenseMap<BasicBlock *, std::unique_ptr<ProgramPointState>> *BO) {
+    BlockOutStates = BO;
+  }
+
+  // Visit methods for each instruction type
+  void visitCallBase(CallBase &I);
+  void visitGetElementPtrInst(GetElementPtrInst &I);
+  void visitStoreInst(StoreInst &I);
+  void visitLoadInst(LoadInst &I);
+  void visitReturnInst(ReturnInst &I);
+  void visitPHINode(PHINode &I);
+  void visitSelectInst(SelectInst &I);
+  void visitInstruction(Instruction &I) {}
+
+  friend class PartialEscapeAnalysis;
+};
 
 } // namespace llvm::jeandle
 
@@ -877,54 +750,13 @@ public:
   LLVM_ABI Result run(Function &F, FunctionAnalysisManager &FAM);
 
 private:
-  class PEAVisitor : public InstVisitor<PEAVisitor> {
-    jeandle::ProgramPointState *State;
-    jeandle::PEAResult *Result;
-    PartialEscapeAnalysis *Analysis;
-
-   public:
-    PEAVisitor() : State(nullptr), Result(nullptr), Analysis(nullptr) {}
-
-    void setState(jeandle::ProgramPointState *S) { State = S; }
-    void setResult(jeandle::PEAResult *R) { Result = R; }
-    void setAnalysis(PartialEscapeAnalysis *A) { Analysis = A; }
-
-    void visitCallBase(CallBase &I);
-    void visitGetElementPtrInst(GetElementPtrInst &I);
-    void visitStoreInst(StoreInst &I);
-    void visitLoadInst(LoadInst &I);
-    void visitReturnInst(ReturnInst &I);
-    void visitPHINode(PHINode &I);
-    void visitSelectInst(SelectInst &I);
-    void visitInstruction(Instruction &I) {}
-
-   private:
-    void handleObjectPointerPhi(PHINode &Phi,
-                                const SmallVector<jeandle::PointerNode*> &pointerSources,
-                                bool hasPhantom);
-    void handleFieldPointerPhi(PHINode &Phi,
-                               const SmallVector<jeandle::FieldNode*> &fieldSources,
-                               bool hasPhantom);
-    void handleMixedPhi(PHINode &Phi,
-                        const SmallVector<jeandle::PointerNode*> &pointerSources,
-                        const SmallVector<jeandle::FieldNode*> &fieldSources);
-    void markAllocationsAsEscaped(const SmallVector<jeandle::AllocationNode*> &allocs, PHINode &Phi);
-    void createVirtualAllocationForObjectPhi(PHINode &Phi,
-                                             const SmallVector<jeandle::AllocationNode*> &allocs,
-                                             jeandle::PointerNode *PtrNode);
-  };
-
-  PEAVisitor Visitor;
-
-  DenseMap<BasicBlock *, std::unique_ptr<jeandle::ProgramPointState>> BlockOutStates;
+  jeandle::PEAVisitor Visitor;
 
   void processInstruction(Instruction *I,
-                          jeandle::ProgramPointState *State,
-                          jeandle::PEAResult &Result);
+                          jeandle::ProgramPointState *State);
 
   void processBlock(BasicBlock *BB,
-                    jeandle::ProgramPointState *State,
-                    jeandle::PEAResult &Result);
+                    jeandle::ProgramPointState *State);
 
   void processLoop(Loop *L,
                    DenseMap<BasicBlock *, std::unique_ptr<jeandle::ProgramPointState>> &BlockOutStates,
@@ -935,7 +767,7 @@ private:
   /// Get BasicBlocks RPO(reverse post order) in the Function
   SmallVector<BasicBlock *> getRPOOrder(Function &F);
 
-  /// Merge the BlockInState form predecessor states
+  /// Merge the BlockInState from predecessor states
   std::unique_ptr<jeandle::ProgramPointState> mergePredecessorStates(
       BasicBlock *BB,
       DenseMap<BasicBlock *, std::unique_ptr<jeandle::ProgramPointState>> &BlockOutStates,
@@ -943,17 +775,6 @@ private:
 
   /// Get RPO order blocks in a loop, only include blocks exactly in this loop and subloops' header blocks
   SmallVector<BasicBlock *> getLoopBlocksInRPO(Loop *L, LoopInfo &LI, const SmallVector<BasicBlock *> &FullRPO);
-
-  /// Handle object pointer PHI with multiple targets
-  void handleObjectPointerPHI(PHINode *Phi,
-                              jeandle::PointerNode *PhiPtr,
-                              const SmallVector<jeandle::AllocationNode*> &Targets,
-                              jeandle::ProgramPointState *State,
-                              jeandle::PEAResult &Result);
-
-  /// Check compatibility of allocations for PHI merging
-  bool checkPHICompatibility(const SmallVector<jeandle::AllocationNode*> &Targets,
-                             jeandle::PEAResult &Result);
 };
 
 } // namespace llvm

@@ -12,6 +12,7 @@
 #include "llvm/Transforms/Jeandle/PEA/PEATransformManager.h"
 #include "llvm/Transforms/Jeandle/PEA/PEAOptimizer.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeAnalysis.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Support/Debug.h"
 
@@ -19,6 +20,34 @@
 
 using namespace llvm;
 using namespace jeandle;
+
+//===----------------------------------------------------------------------===//
+// Helper Functions
+//===----------------------------------------------------------------------===//
+
+SmallVector<Instruction *> 
+computeMinimalMaterializePoints(const SmallVector<Instruction *> &EscapePoints,
+                                DominatorTree &DT) {
+  // TODO(PEA-Transform): Implement dominator-based filtering
+  // Current implementation: return all escape points (no filtering)
+  // 
+  // Correct implementation should:
+  // 1. For each escape point P
+  // 2. Check if P is dominated by any other escape point
+  // 3. If dominated, skip P (materialization will happen at dominating point)
+  // 4. Otherwise, add P to minimal materialize points
+  //
+  // Example:
+  //   EscapePoints: [A, B, C]
+  //   DT: A dominates B, B dominates C
+  //   Result: [A]  // Only A needs materialization
+  
+  return EscapePoints;
+}
+
+//===----------------------------------------------------------------------===//
+// PEATransformerPass
+//===----------------------------------------------------------------------===//
 
 PreservedAnalyses PEATransformerPass::run(Function &F, FunctionAnalysisManager &FAM) {
   if (!PEAConfig::isEnabled()) return PreservedAnalyses::none();
