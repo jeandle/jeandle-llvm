@@ -37,8 +37,14 @@ static cl::opt<uint32_t> PEAMaxArrayLength(
     cl::desc("Maximum array length for PEA to process (0=dynamic, <=32=optimizable, >32=large)"),
     cl::init(32));
 
+static cl::opt<uint32_t> PEAMaxLoopIteration(
+    "jeandle-pea-max-loop-iteration",
+    cl::desc("Maximum loop iteration times for PEA to process (default 20)"),
+    cl::init(20));
+
 bool PEAConfig::Enabled = EnablePEA;
 uint32_t PEAConfig::MaxArrayLength = PEAMaxArrayLength;
+uint32_t PEAConfig::MaxLoopIteration = PEAMaxLoopIteration;
 
 //===----------------------------------------------------------------------===//
 // PEAResult Implementation - Update/query aliases and states
@@ -184,7 +190,10 @@ PEAResult::buildLazyObjectBundles(Instruction *DeoptPoint) const {
 }
 
 VirtualPhiNode *PEAResult::createVirtualPhiNode(AllocID AllocId, uint32_t Offset, BasicBlock *MergeBB) {
-  return new VirtualPhiNode(AllocId, Offset, MergeBB);
+  auto VPhi = std::make_unique<VirtualPhiNode>(AllocId, Offset, MergeBB);
+  VirtualPhiNode *Ptr = VPhi.get();
+  VirtualPhiNodes.push_back(std::move(VPhi));
+  return Ptr;
 }
 
 //===----------------------------------------------------------------------===//
@@ -197,7 +206,12 @@ PHINode *VirtualPhiNode::createPHIIR(Type *FieldType) const {
   PHINode *Phi = PHINode::Create(FieldType, getNumInputs(), Name, BB->getFirstNonPHIOrDbg());
 
   for (const auto &[PredBB, Val] : Inputs) {
-    Phi->addIncoming(Val, PredBB);
+    if (std::holds_alternative<Value *>(Val)) {
+      Phi->addIncoming(std::get<Value *>(Val), PredBB);
+    } else {
+      auto *InnerVPhi = std::get<VirtualPhiNode *>(Val);
+      Phi->addIncoming(InnerVPhi->createPHIIR(FieldType), PredBB);
+    }
   }
 
   return Phi;
@@ -241,7 +255,7 @@ void AllocationState::mergeFrom(const SmallVector<const AllocationState*> &PredS
   // Step 4: Merge each field
   for (uint32_t Offset : AllOffsets) {
     // Collect all values for this offset from predecessors
-    SmallVector<Value*> Values;
+    SmallVector<StoredValueTy> Values;
     SmallVector<BasicBlock*> BBs;
     Type *FieldType = nullptr;
     bool IsOop = false;
@@ -258,14 +272,14 @@ void AllocationState::mergeFrom(const SmallVector<const AllocationState*> &PredS
           IsOop = FI->IsOop;
         }
       } else {
-        Values.push_back(nullptr);
+        Values.push_back(static_cast<Value *>(nullptr));
         BBs.push_back(PredBBs[i]);
         AllHaveField = false;
       }
     }
 
     // Check if all values are identical
-    Value *FirstValue = Values[0];
+    StoredValueTy FirstValue = Values[0];
     bool AllSame = true;
     for (size_t i = 1; i < Values.size(); i++) {
       if (Values[i] != FirstValue) {
@@ -297,9 +311,7 @@ bool AllocationState::operator==(const AllocationState &Other) const {
     auto It = Other.Fields.find(Offset);
     if (It == Other.Fields.end()) return false;
     const FieldInfo &OtherFI = It->second;
-    if (FI.StoredValue != OtherFI.StoredValue ||
-        FI.FieldType != OtherFI.FieldType ||
-        FI.IsOop != OtherFI.IsOop)
+    if (FI.FieldType != OtherFI.FieldType || FI.IsOop != OtherFI.IsOop)
       return false;
   }
 
@@ -418,10 +430,27 @@ static bool checkAllocationCompatibility(
     if (Alloc) allocs.push_back(Alloc);
   }
 
-  // Check 1: All allocations must be NoEscape
+  // Check 1: All allocations must be NoEscape in their predecessor states
   for (AllocationObject *alloc : allocs) {
-    if (State->getEscapeState(alloc->getId()) != EscapeState::NoEscape)
-      return false;
+    bool allNoEscape = true;
+    for (unsigned i = 0; i < Phi.getNumIncomingValues(); i++) {
+      Value *incomingValue = Phi.getIncomingValue(i);
+      if (Result.hasAlias(incomingValue) &&
+          Result.getAllocId(incomingValue) == alloc->getId()) {
+        BasicBlock *predBB = Phi.getIncomingBlock(i);
+        if (!BlockOutStates.contains(predBB)) {
+          allNoEscape = false;
+          break;
+        }
+        ProgramPointState *predState = BlockOutStates.at(predBB).get();
+        if (!predState->hasAllocState(alloc->getId()) ||
+            predState->getEscapeState(alloc->getId()) != EscapeState::NoEscape) {
+          allNoEscape = false;
+          break;
+        }
+      }
+    }
+    if (!allNoEscape) return false;
   }
 
   // Check 2: All allocations must have the same object size
@@ -636,7 +665,7 @@ void PartialEscapeAnalysis::processLoop(Loop *L,
 
   std::unique_ptr<ProgramPointState> EntryState = mergePredecessorStates(Header, BlockOutStates, Result);
 
-  while (true) {
+  for (int i = 0; i < PEAConfig::getMaxLoopIteration(); ++i) {
     for (BasicBlock *BB : LoopBlocks) {
       Loop *InnerL = LI.getLoopFor(BB);
 
@@ -657,7 +686,6 @@ void PartialEscapeAnalysis::processLoop(Loop *L,
     std::unique_ptr<ProgramPointState> NewEntryState = mergePredecessorStates(Header, BlockOutStates, Result);
 
     if (*EntryState == *NewEntryState) {
-      LLVM_DEBUG(dbgs() << "PEA: Loop converged\n");
       break;
     }
 
@@ -715,7 +743,6 @@ void PEAVisitor::visitCallBase(CallBase &I) {
     AllocationObject *Alloc = Result->createAllocationObject(&I, false);
     State->setEscapeState(Alloc->getId(), EscapeState::NoEscape);
     Result->createAlias(&I, Alloc->getId(), 0);
-    LLVM_DEBUG(dbgs() << "PEA: Allocation #" << Alloc->getId() << " at " << I << "\n");
     return;
   }
 
@@ -726,7 +753,6 @@ void PEAVisitor::visitCallBase(CallBase &I) {
       Length = C->getZExtValue();
 
     if (Length == 0 || Length > PEAConfig::getMaxArrayLength()) {
-      LLVM_DEBUG(dbgs() << "PEA: Skipping array allocation, length=" << Length << "\n");
       Result->createPhantomAlias(&I);
       return;
     }
@@ -737,7 +763,6 @@ void PEAVisitor::visitCallBase(CallBase &I) {
 
     State->setEscapeState(Alloc->getId(), EscapeState::NoEscape);
     Result->createAlias(&I, Alloc->getId(), 0);
-    LLVM_DEBUG(dbgs() << "PEA: Array allocation #" << Alloc->getId() << " at " << I << "\n");
     return;
   }
 
@@ -746,7 +771,6 @@ void PEAVisitor::visitCallBase(CallBase &I) {
     if (Result->hasAlias(LockObj)) {
       AllocID AllocId = Result->getAllocId(LockObj);
       State->incLockCount(AllocId);
-      LLVM_DEBUG(dbgs() << "PEA: MonitorEnter on #" << AllocId << "\n");
     }
     // MonitorEnter returns void, no Alias needed
     return;
@@ -757,7 +781,6 @@ void PEAVisitor::visitCallBase(CallBase &I) {
     if (Result->hasAlias(LockObj)) {
       AllocID AllocId = Result->getAllocId(LockObj);
       State->decLockCount(AllocId);
-      LLVM_DEBUG(dbgs() << "PEA: MonitorExit on #" << AllocId << "\n");
     }
     // MonitorExit returns void, no Alias needed
     return;
@@ -851,12 +874,28 @@ void PEAVisitor::visitLoadInst(LoadInst &I) {
   }
 
   const FieldInfo *FI = AS->getField(Offset);
-  Value *StoredVal = FI->StoredValue;
 
-  if (StoredVal && Result->hasAlias(StoredVal)) {
-    Result->createAlias(&I, Result->getAliasInfo(StoredVal));
+  if (std::holds_alternative<Value *>(FI->StoredValue)) {
+    Value *StoredVal = std::get<Value *>(FI->StoredValue);
+    if (StoredVal && Result->hasAlias(StoredVal)) {
+      Result->createAlias(&I, Result->getAliasInfo(StoredVal));
+    } else {
+      Result->createPhantomAlias(&I);
+    }
   } else {
-    Result->createPhantomAlias(&I);
+    VirtualPhiNode *VPhi = std::get<VirtualPhiNode *>(FI->StoredValue);
+    SmallVector<AliasInfo> InputAliases;
+    for (const auto &[PredBB, InputVal] : VPhi->getInputs()) {
+      if (std::holds_alternative<Value *>(InputVal)) {
+        Value *Val = std::get<Value *>(InputVal);
+        InputAliases.push_back(Val && Result->hasAlias(Val)
+                                   ? Result->getAliasInfo(Val)
+                                   : AliasInfo());
+      } else {
+        InputAliases.push_back(AliasInfo());
+      }
+    }
+    Result->createAlias(&I, AliasInfo::merge(InputAliases));
   }
 }
 
@@ -866,7 +905,6 @@ void PEAVisitor::visitReturnInst(ReturnInst &I) {
     if (Result->hasAlias(RetVal)) {
       AllocID AllocId = Result->getAllocId(RetVal);
       State->setEscapeState(AllocId, EscapeState::GlobalEscape);
-      LLVM_DEBUG(dbgs() << "PEA: Escape via return\n");
     }
   }
 }
@@ -950,9 +988,7 @@ void PEAVisitor::visitPHINode(PHINode &I) {
   if (incomingAllocIds.empty() || hasPhantom) {
     Result->createPhantomAlias(&I);
     for (AllocID AllocId : incomingAllocIds) {
-      if (State->hasAllocState(AllocId)) {
-        State->setEscapeState(AllocId, EscapeState::GlobalEscape);
-      }
+      State->AllocationStates[AllocId].setEscapeState(EscapeState::GlobalEscape);
     }
     markPredAllocationsEscaped();
     return;
@@ -969,9 +1005,7 @@ void PEAVisitor::visitPHINode(PHINode &I) {
   if (hasEscapedAllocation(incomingAllocIds, State)) {
     Result->createPhantomAlias(&I);
     for (AllocID AllocId : incomingAllocIds) {
-      if (State->hasAllocState(AllocId)) {
-        State->setEscapeState(AllocId, EscapeState::GlobalEscape);
-      }
+      State->AllocationStates[AllocId].setEscapeState(EscapeState::GlobalEscape);
     }
     markPredAllocationsEscaped();
     return;
@@ -1004,9 +1038,7 @@ void PEAVisitor::visitPHINode(PHINode &I) {
   } else {
     Result->createPhantomAlias(&I);
     for (AllocID AllocId : incomingAllocIds) {
-      if (State->hasAllocState(AllocId)) {
-        State->setEscapeState(AllocId, EscapeState::GlobalEscape);
-      }
+      State->AllocationStates[AllocId].setEscapeState(EscapeState::GlobalEscape);
     }
     markPredAllocationsEscaped();
   }
@@ -1029,4 +1061,180 @@ void PEAVisitor::visitSelectInst(SelectInst &I) {
 
   AliasInfo Merged = AliasInfo::merge(TruePtr, FalsePtr);
   Result->createAlias(&I, Merged);
+}
+
+//===----------------------------------------------------------------------===//
+// PEAResult::print Implementation
+//===----------------------------------------------------------------------===//
+
+void PEAResult::print(raw_ostream &OS) const {
+  OS << "Partial Escape Analysis Result\n";
+  OS << "================================\n\n";
+
+  DenseMap<AllocID, SmallVector<std::pair<Instruction*, EscapeState>>> TimelineMap;
+
+  Function *F = nullptr;
+  for (const auto &Alloc : Allocations) {
+    if (!isPhantom(Alloc.get()) && Alloc->getSource()) {
+      if (Instruction *I = dyn_cast<Instruction>(Alloc->getSource())) {
+        F = I->getParent()->getParent();
+        break;
+      }
+    }
+  }
+
+  if (F) {
+    ReversePostOrderTraversal<const Function *> RPOT(F);
+
+    for (const BasicBlock *BB : RPOT) {
+      for (const Instruction &I : *BB) {
+        auto StateIt = InstStates.find(const_cast<Instruction*>(&I));
+        if (StateIt == InstStates.end()) continue;
+
+        const ProgramPointState *State = StateIt->second.get();
+
+        for (const auto &[AllocId, AllocState] : State->getAllAllocationStates()) {
+          TimelineMap[AllocId].push_back({
+            const_cast<Instruction*>(&I),
+            AllocState.getEscapeState()
+          });
+        }
+      }
+    }
+  }
+
+  OS << "Allocations Summary:\n";
+  OS << "--------------------\n";
+
+  for (const auto &Alloc : Allocations) {
+    if (isPhantom(Alloc.get())) continue;
+
+    AllocID AllocId = Alloc->getId();
+
+    OS << "Allocation #" << AllocId << ": \n";
+
+    Value *V = Alloc->getSource();
+    if (V) {
+      OS << "  ";
+      V->print(OS);
+      OS << "\n";
+    }
+
+    if (Alloc->isArrayAllocation()) {
+      auto *ArrayAlloc = cast<ArrayAllocationObject>(Alloc.get());
+      OS << "  - Array length: " << ArrayAlloc->getLength() << "\n";
+    }
+
+    if (Alloc->isVirtualAllocation()) {
+      OS << "  - Virtual allocation (PHI merged)\n";
+    }
+
+    auto TimelineIt = TimelineMap.find(AllocId);
+    if (TimelineIt != TimelineMap.end()) {
+      OS << "  - EscapeState Timeline:\n";
+
+      bool HasGlobalEscape = false;
+      bool FirstPoint = true;
+
+      for (const auto &[Inst, ES] : TimelineIt->second) {
+        OS << "    * ";
+        Inst->print(OS);
+        OS << ": ";
+
+        switch (ES) {
+          case EscapeState::Unknown:
+            OS << "Unknown";
+            if (FirstPoint) OS << " (creation)";
+            break;
+          case EscapeState::NoEscape:
+            OS << "NoEscape";
+            if (FirstPoint) OS << " (creation)";
+            break;
+          case EscapeState::GlobalEscape:
+            OS << "GlobalEscape";
+            HasGlobalEscape = true;
+            break;
+        }
+
+        auto InstStateIt = InstStates.find(Inst);
+        if (InstStateIt != InstStates.end()) {
+          const AllocationState *AS = InstStateIt->second->getAllocState(AllocId);
+          if (AS && AS->getEscapeState() == EscapeState::NoEscape) {
+            const auto &Fields = AS->getAllFields();
+            if (!Fields.empty()) {
+              OS << " [fields: ";
+              bool FirstField = true;
+              for (const auto &[Offset, FI] : Fields) {
+                if (!FirstField) OS << ", ";
+                OS << "offset=" << Offset << "=";
+                if (std::holds_alternative<Value *>(FI.StoredValue)) {
+                  Value *Val = std::get<Value *>(FI.StoredValue);
+                  if (Val) {
+                    Val->print(OS);
+                  } else {
+                    OS << "null";
+                  }
+                } else {
+                  OS << "phi";
+                }
+                FirstField = false;
+              }
+              OS << "]";
+            }
+          }
+        }
+
+        OS << "\n";
+        FirstPoint = false;
+      }
+
+      if (HasGlobalEscape) {
+        auto EscapePoints = getEscapePoints(AllocId);
+        if (!EscapePoints.empty()) {
+          OS << "  - Escape points:\n";
+          for (Instruction *I : EscapePoints) {
+            OS << "    * ";
+            I->print(OS);
+            OS << "\n";
+          }
+        }
+      }
+    }
+
+    OS << "\n";
+  }
+
+  OS << "Alias Summary:\n";
+  OS << "---------------\n";
+  for (const auto &[V, AI] : Alias) {
+    if (AI.isPhantom()) continue;
+
+    OS << "  ";
+    V->print(OS);
+    OS << " -> Alloc#" << AI.getAllocId();
+    if (AI.hasOffset()) {
+      OS << " (offset=" << AI.getOffset() << ")";
+    } else {
+      OS << " (unknown offset)";
+    }
+    OS << "\n";
+  }
+
+  OS << "\nStatistics:\n";
+  OS << "-----------\n";
+  OS << "Total allocations: " << Allocations.size() - 1 << "\n";
+  OS << "Alias entries: " << Alias.size() << "\n";
+  OS << "Program points: " << InstStates.size() << "\n";
+  OS << "Block states: " << BlockStates.size() << "\n";
+  OS << "\n";
+}
+
+//===----------------------------------------------------------------------===//
+// PEAPrinterPass Implementation
+//===----------------------------------------------------------------------===//
+
+PreservedAnalyses PEAPrinterPass::run(Function &F, FunctionAnalysisManager &FAM) {
+  OS << "Partial Escape Analysis for function: " << F.getName() << "\n";
+  FAM.getResult<PartialEscapeAnalysis>(F).print(OS);
+  return PreservedAnalyses::all();
 }

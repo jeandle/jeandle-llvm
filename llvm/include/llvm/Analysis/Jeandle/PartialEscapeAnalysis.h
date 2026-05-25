@@ -32,6 +32,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <variant>
 
 namespace llvm {
 
@@ -56,6 +57,7 @@ namespace llvm::jeandle {
 class PEAConfig {
   static bool Enabled;
   static uint32_t MaxArrayLength;
+  static uint32_t MaxLoopIteration;
 
 public:
   static void setEnabled(bool Val) { Enabled = Val; }
@@ -63,6 +65,9 @@ public:
 
   static void setMaxArrayLength(uint32_t Val) { MaxArrayLength = Val; }
   static uint32_t getMaxArrayLength() { return MaxArrayLength; }
+
+  static void setMaxLoopIteration(uint32_t Val) { MaxLoopIteration = Val; }
+  static uint32_t getMaxLoopIteration() { return MaxLoopIteration; }
 };
 
 enum class EscapeState : uint8_t {
@@ -197,13 +202,17 @@ public:
   }
 };
 
+using StoredValueTy = std::variant<Value *, VirtualPhiNode *>;
+
 struct FieldInfo {
-  Value *StoredValue;
+  StoredValueTy StoredValue;
   Type *FieldType;
   bool IsOop;
 
-  FieldInfo() : StoredValue(nullptr), FieldType(nullptr), IsOop(false) {}
+  FieldInfo() : StoredValue(static_cast<Value *>(nullptr)), FieldType(nullptr), IsOop(false) {}
   FieldInfo(Value *V, Type *T, bool O) : StoredValue(V), FieldType(T), IsOop(O) {}
+  FieldInfo(VirtualPhiNode *VPhi, Type *T, bool O) : StoredValue(VPhi), FieldType(T), IsOop(O) {}
+  FieldInfo(StoredValueTy V, Type *T, bool O) : StoredValue(V), FieldType(T), IsOop(O) {}
 };
 
 //===----------------------------------------------------------------------===//
@@ -263,9 +272,9 @@ public:
   }
   const DenseMap<uint32_t, FieldInfo> &getAllFields() const { return Fields; }
 
-bool operator==(const AllocationState &Other) const;
+  bool operator==(const AllocationState &Other) const;
 
-void mergeFrom(const SmallVector<const AllocationState*> &PredStates,
+  void mergeFrom(const SmallVector<const AllocationState*> &PredStates,
                const SmallVector<BasicBlock*> &PredBBs,
                AllocID AllocId,
                PEAResult &Result,
@@ -404,6 +413,10 @@ public:
     return AllocationStates.contains(AllocId);
   }
 
+  const DenseMap<AllocID, AllocationState>& getAllAllocationStates() const {
+    return AllocationStates;
+  }
+
   EscapeState getEscapeState(AllocID AllocId) const {
     auto *AS = getAllocState(AllocId);
     return AS ? AS->getEscapeState() : EscapeState::Unknown;
@@ -459,47 +472,40 @@ private:
 /// - Offset: The field offset that needs PHI
 /// - MergeBB: The merge block where PHI should be created
 /// - Inputs: Map from predecessor block to field value
-class VirtualPhiNode : public Value {
+class VirtualPhiNode {
   AllocID AllocId;
   uint32_t Offset;
   BasicBlock *MergeBB;
 
-  // PHI inputs: Map from predecessor block to field value
-  DenseMap<BasicBlock *, Value *> Inputs;
+  DenseMap<BasicBlock *, StoredValueTy> Inputs;
 
   friend class PEAResult;
 
 public:
   VirtualPhiNode(AllocID Id, uint32_t Off, BasicBlock *BB)
-      : Value(Type::getVoidTy(BB->getContext()), 0),
-        AllocId(Id), Offset(Off), MergeBB(BB) {}
+      : AllocId(Id), Offset(Off), MergeBB(BB) {}
 
   AllocID getAllocId() const { return AllocId; }
   uint32_t getOffset() const { return Offset; }
   BasicBlock *getMergeBB() const { return MergeBB; }
 
-  /// Add an input value from a predecessor block
-  void addInput(BasicBlock *PredBB, Value *Val) {
+  void addInput(BasicBlock *PredBB, StoredValueTy Val) {
     Inputs[PredBB] = Val;
   }
 
-  /// Check if has input from a specific predecessor
   bool hasInput(BasicBlock *PredBB) const {
     return Inputs.contains(PredBB);
   }
 
-  /// Get input value from a specific predecessor
-  Value *getInput(BasicBlock *PredBB) const {
+  StoredValueTy getInput(BasicBlock *PredBB) const {
     auto It = Inputs.find(PredBB);
-    return It != Inputs.end() ? It->second : nullptr;
+    return It != Inputs.end() ? It->second : StoredValueTy(static_cast<Value *>(nullptr));
   }
 
-  /// Get all inputs
-  const DenseMap<BasicBlock *, Value *> &getInputs() const {
+  const DenseMap<BasicBlock *, StoredValueTy> &getInputs() const {
     return Inputs;
   }
 
-  /// Get number of inputs
   size_t getNumInputs() const {
     return Inputs.size();
   }
@@ -610,6 +616,8 @@ class PEAResult {
   // BlockStates - block entry state
   DenseMap<BasicBlock *, std::unique_ptr<ProgramPointState>> BlockStates;
 
+  std::vector<std::unique_ptr<VirtualPhiNode>> VirtualPhiNodes;
+
 public:
   PEAResult() = default;
 
@@ -655,6 +663,8 @@ public:
   bool isPhantom(AllocID Id) const {
     return Id == 0;
   }
+
+  void print(raw_ostream &OS) const;
 
 private:
   ProgramPointState *createInstState(Instruction *Inst);
@@ -734,10 +744,25 @@ public:
 } // namespace llvm::jeandle
 
 //===----------------------------------------------------------------------===//
-// PartialEscapeAnalysis - Function Analysis Pass
+// PEAPrinterPass - Printer Pass for PEA Results
 //===----------------------------------------------------------------------===//
 
 namespace llvm {
+
+class PEAPrinterPass : public PassInfoMixin<PEAPrinterPass> {
+  raw_ostream &OS;
+
+public:
+  explicit PEAPrinterPass(raw_ostream &OS) : OS(OS) {}
+
+  LLVM_ABI PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM);
+
+  static bool isRequired() { return true; }
+};
+
+//===----------------------------------------------------------------------===//
+// PartialEscapeAnalysis - Function Analysis Pass
+//===----------------------------------------------------------------------===//
 
 class PartialEscapeAnalysis : public AnalysisInfoMixin<PartialEscapeAnalysis> {
   friend AnalysisInfoMixin<PartialEscapeAnalysis>;
