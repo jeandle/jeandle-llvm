@@ -1,4 +1,4 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
+; RUN: opt -passes=safepoint-elimination -jeandle-sp-elim-32bit-range=true -S < %s | FileCheck %s
 
 declare hotspotcc void @jeandle.safepoint_poll()
 

@@ -1,4 +1,4 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
+; RUN: opt -passes=safepoint-elimination -jeandle-sp-elim-32bit-range=true -S < %s | FileCheck %s
 
 ; for (int i = 10; i < n; ++i) — non-zero IV start.
 ; Counter is i32 with nsw step, eligible for the i32-no-wrap fast path.

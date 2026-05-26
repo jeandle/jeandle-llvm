@@ -18,11 +18,15 @@
 /// when either:
 ///   (A) `SE.getConstantMaxBackedgeTakenCount(L)` is a concrete constant not
 ///       larger than `-jeandle-short-loop-max-iter`; or
-///   (B) the SCEV-known constant max backedge-taken count fits in 32 unsigned
-///       bits, mirroring GraalVM's `iterationRangeIsIn32Bit` rule, which
-///       covers the common `for (int i = 0; i < n; ++i)` case where the
-///       symbolic limit forces SCEV to settle on INT_MAX/UINT_MAX as the max
-///       backedge-taken count.
+///   (B) (opt-in via `-jeandle-sp-elim-32bit-range=true`) the SCEV-known
+///       constant max backedge-taken count fits in 32 unsigned bits,
+///       mirroring GraalVM's `iterationRangeIsIn32Bit` rule, which covers
+///       the common `for (int i = 0; i < n; ++i)` case where the symbolic
+///       limit forces SCEV to settle on INT_MAX/UINT_MAX as the max
+///       backedge-taken count. Rule (B) is *off by default* until the
+///       strip-mining transform (see below) lands — a 2^32-iteration i32
+///       loop with no outer safepoint can stall GC for seconds, so without
+///       a strip-mining fallback we keep the poll.
 ///
 /// Only safepoint polls that lie on every back-edge path are removed. A poll
 /// in a side-exit slow path (e.g. before an `uncommon_trap`) carries deopt
@@ -67,10 +71,14 @@ static cl::opt<bool> EnableSafepointElim(
              "counted loops are preserved). Useful for A/B comparison."));
 
 static cl::opt<bool> AllowRangeIn32Bit(
-    "jeandle-sp-elim-32bit-range", cl::init(true),
+    "jeandle-sp-elim-32bit-range", cl::init(false),
     cl::desc("Allow eliminating back-edge safepoints in counted loops whose "
              "SCEV-known constant max backedge-taken count fits in 32 unsigned "
-             "bits, mirroring GraalVM's iterationRangeIsIn32Bit rule."));
+             "bits, mirroring GraalVM's iterationRangeIsIn32Bit rule. Off by "
+             "default until the strip-mining transform lands: a 2^32-iter i32 "
+             "loop with no outer safepoint can stall GC by seconds. Once "
+             "strip mining is in, the long-i32 case will be routed there and "
+             "this flag will be repurposed."));
 
 namespace {
 

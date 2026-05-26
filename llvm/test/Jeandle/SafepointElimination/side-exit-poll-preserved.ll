@@ -1,4 +1,4 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
+; RUN: opt -passes=safepoint-elimination -jeandle-sp-elim-32bit-range=true -S < %s | FileCheck %s
 
 ; A counted loop where the front-end has placed two distinct safepoint polls:
 ;   * one on the back-edge path (loop.body → loop.latch)

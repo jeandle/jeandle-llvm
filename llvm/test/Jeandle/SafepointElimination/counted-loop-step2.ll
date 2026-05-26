@@ -1,4 +1,4 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
+; RUN: opt -passes=safepoint-elimination -jeandle-sp-elim-32bit-range=true -S < %s | FileCheck %s
 
 ; for (int i = 0; i < n; i += 2) — non-unit stride.
 ; Counter is i32 with nsw step, eligible for the i32-no-wrap fast path.
