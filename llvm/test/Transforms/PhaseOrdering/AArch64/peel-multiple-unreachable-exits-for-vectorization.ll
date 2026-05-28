@@ -54,10 +54,10 @@ define i64 @sum_2_at_with_int_conversion(ptr %A, ptr %B, i64 %N) {
 ; CHECK-NEXT:    [[TMP11:%.*]] = getelementptr i8, ptr [[TMP10]], i64 16
 ; CHECK-NEXT:    [[WIDE_LOAD15:%.*]] = load <2 x i64>, ptr [[TMP10]], align 8
 ; CHECK-NEXT:    [[WIDE_LOAD16:%.*]] = load <2 x i64>, ptr [[TMP11]], align 8
-; CHECK-NEXT:    [[TMP12:%.*]] = add <2 x i64> [[WIDE_LOAD]], [[VEC_PHI]]
-; CHECK-NEXT:    [[TMP13:%.*]] = add <2 x i64> [[WIDE_LOAD14]], [[VEC_PHI13]]
-; CHECK-NEXT:    [[TMP14]] = add <2 x i64> [[TMP12]], [[WIDE_LOAD15]]
-; CHECK-NEXT:    [[TMP15]] = add <2 x i64> [[TMP13]], [[WIDE_LOAD16]]
+; CHECK-NEXT:    [[TMP12:%.*]] = add <2 x i64> [[WIDE_LOAD15]], [[WIDE_LOAD]]
+; CHECK-NEXT:    [[TMP13:%.*]] = add <2 x i64> [[WIDE_LOAD16]], [[WIDE_LOAD14]]
+; CHECK-NEXT:    [[TMP14]] = add <2 x i64> [[TMP12]], [[VEC_PHI]]
+; CHECK-NEXT:    [[TMP15]] = add <2 x i64> [[TMP13]], [[VEC_PHI13]]
 ; CHECK-NEXT:    [[INDEX_NEXT]] = add nuw i64 [[INDEX]], 4
 ; CHECK-NEXT:    [[TMP16:%.*]] = icmp eq i64 [[INDEX_NEXT]], [[N_VEC]]
 ; CHECK-NEXT:    br i1 [[TMP16]], label [[MIDDLE_BLOCK:%.*]], label [[VECTOR_BODY]], !llvm.loop [[LOOP0:![0-9]+]]
@@ -77,8 +77,8 @@ define i64 @sum_2_at_with_int_conversion(ptr %A, ptr %B, i64 %N) {
 ; CHECK-NEXT:    [[LV_I:%.*]] = load i64, ptr [[GEP_IDX_I]], align 8
 ; CHECK-NEXT:    [[GEP_IDX_I8:%.*]] = getelementptr i64, ptr [[START_I1]], i64 [[IV]]
 ; CHECK-NEXT:    [[LV_I9:%.*]] = load i64, ptr [[GEP_IDX_I8]], align 8
-; CHECK-NEXT:    [[ADD:%.*]] = add i64 [[LV_I]], [[SUM]]
-; CHECK-NEXT:    [[SUM_NEXT]] = add i64 [[ADD]], [[LV_I9]]
+; CHECK-NEXT:    [[ADD:%.*]] = add i64 [[LV_I9]], [[LV_I]]
+; CHECK-NEXT:    [[SUM_NEXT]] = add i64 [[ADD]], [[SUM]]
 ; CHECK-NEXT:    [[IV_NEXT]] = add nuw i64 [[IV]], 1
 ; CHECK-NEXT:    [[EXITCOND_NOT:%.*]] = icmp eq i64 [[IV]], [[SMAX]]
 ; CHECK-NEXT:    br i1 [[EXITCOND_NOT]], label [[EXIT]], label [[LOOP]], !llvm.loop [[LOOP3:![0-9]+]]
@@ -173,12 +173,12 @@ define i64 @sum_3_at_with_int_conversion(ptr %A, ptr %B, ptr %C, i64 %N) {
 ; CHECK-NEXT:    [[TMP16:%.*]] = getelementptr i8, ptr [[TMP15]], i64 16
 ; CHECK-NEXT:    [[WIDE_LOAD29:%.*]] = load <2 x i64>, ptr [[TMP15]], align 8
 ; CHECK-NEXT:    [[WIDE_LOAD30:%.*]] = load <2 x i64>, ptr [[TMP16]], align 8
-; CHECK-NEXT:    [[TMP17:%.*]] = add <2 x i64> [[WIDE_LOAD]], [[VEC_PHI]]
-; CHECK-NEXT:    [[TMP18:%.*]] = add <2 x i64> [[WIDE_LOAD26]], [[VEC_PHI25]]
-; CHECK-NEXT:    [[TMP19:%.*]] = add <2 x i64> [[TMP17]], [[WIDE_LOAD27]]
-; CHECK-NEXT:    [[TMP20:%.*]] = add <2 x i64> [[TMP18]], [[WIDE_LOAD28]]
-; CHECK-NEXT:    [[TMP21]] = add <2 x i64> [[TMP19]], [[WIDE_LOAD29]]
-; CHECK-NEXT:    [[TMP22]] = add <2 x i64> [[TMP20]], [[WIDE_LOAD30]]
+; CHECK-NEXT:    [[TMP17:%.*]] = add <2 x i64> [[WIDE_LOAD27]], [[WIDE_LOAD]]
+; CHECK-NEXT:    [[TMP18:%.*]] = add <2 x i64> [[WIDE_LOAD28]], [[WIDE_LOAD26]]
+; CHECK-NEXT:    [[TMP19:%.*]] = add <2 x i64> [[TMP17]], [[WIDE_LOAD29]]
+; CHECK-NEXT:    [[TMP20:%.*]] = add <2 x i64> [[TMP18]], [[WIDE_LOAD30]]
+; CHECK-NEXT:    [[TMP21]] = add <2 x i64> [[TMP19]], [[VEC_PHI]]
+; CHECK-NEXT:    [[TMP22]] = add <2 x i64> [[TMP20]], [[VEC_PHI25]]
 ; CHECK-NEXT:    [[INDEX_NEXT]] = add nuw i64 [[INDEX]], 4
 ; CHECK-NEXT:    [[TMP23:%.*]] = icmp eq i64 [[INDEX_NEXT]], [[N_VEC]]
 ; CHECK-NEXT:    br i1 [[TMP23]], label [[MIDDLE_BLOCK:%.*]], label [[VECTOR_BODY]], !llvm.loop [[LOOP4:![0-9]+]]
@@ -200,9 +200,9 @@ define i64 @sum_3_at_with_int_conversion(ptr %A, ptr %B, ptr %C, i64 %N) {
 ; CHECK-NEXT:    [[LV_I9:%.*]] = load i64, ptr [[GEP_IDX_I8]], align 8
 ; CHECK-NEXT:    [[GEP_IDX_I19:%.*]] = getelementptr i64, ptr [[START_I12]], i64 [[IV]]
 ; CHECK-NEXT:    [[LV_I20:%.*]] = load i64, ptr [[GEP_IDX_I19]], align 8
-; CHECK-NEXT:    [[ADD_1:%.*]] = add i64 [[LV_I]], [[SUM]]
-; CHECK-NEXT:    [[ADD_2:%.*]] = add i64 [[ADD_1]], [[LV_I9]]
-; CHECK-NEXT:    [[SUM_NEXT]] = add i64 [[ADD_2]], [[LV_I20]]
+; CHECK-NEXT:    [[ADD_1:%.*]] = add i64 [[LV_I9]], [[LV_I]]
+; CHECK-NEXT:    [[ADD_2:%.*]] = add i64 [[ADD_1]], [[LV_I20]]
+; CHECK-NEXT:    [[SUM_NEXT]] = add i64 [[ADD_2]], [[SUM]]
 ; CHECK-NEXT:    [[IV_NEXT]] = add nuw i64 [[IV]], 1
 ; CHECK-NEXT:    [[EXITCOND_NOT:%.*]] = icmp eq i64 [[IV]], [[SMAX]]
 ; CHECK-NEXT:    br i1 [[EXITCOND_NOT]], label [[EXIT]], label [[LOOP]], !llvm.loop [[LOOP5:![0-9]+]]

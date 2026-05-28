@@ -31,12 +31,14 @@
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/GlobalsModRef.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstrTypes.h"
@@ -231,6 +233,34 @@ unsigned ReassociatePass::getRank(Value *V) {
 
   return ValueRankMap[I] = Rank;
 }
+
+namespace llvm::reassociate {
+
+OpClassifier::OpClassifier(const LoopInfo *LI, const Instruction *I)
+    : EnclosingLoop(LI && I ? LI->getLoopFor(I->getParent()) : nullptr) {}
+
+OpCategory OpClassifier::classify(const Value *V) const {
+  if (isa<Constant>(V))
+    return OpCategory::LoopInvariantOrConst;
+  if (!EnclosingLoop)
+    return OpCategory::LoopVariant;
+
+  // A header phi of this loop with an in-loop incoming edge is the recurrence
+  // accumulator. Check incomings via contains() rather than getLoopLatch(),
+  // which is null for multi-latch loops. A phi from another loop's header
+  // falls through and isLoopInvariant() puts it with the invariants.
+  if (const auto *Phi = dyn_cast<PHINode>(V))
+    if (Phi->getParent() == EnclosingLoop->getHeader())
+      for (BasicBlock *Pred : Phi->blocks())
+        if (EnclosingLoop->contains(Pred))
+          return OpCategory::LoopCarriedRecurrence;
+
+  if (EnclosingLoop->isLoopInvariant(V))
+    return OpCategory::LoopInvariantOrConst;
+  return OpCategory::LoopVariant;
+}
+
+} // namespace llvm::reassociate
 
 // Canonicalize constants to RHS.  Otherwise, sort the operands by rank.
 void ReassociatePass::canonicalizeOperands(Instruction *I) {
@@ -1105,8 +1135,10 @@ Value *ReassociatePass::RemoveFactorFromExpression(Value *V, Value *Factor,
   MadeChange |= LinearizeExprTree(BO, Tree, RedoInsts, Flags);
   SmallVector<ValueEntry, 8> Factors;
   Factors.reserve(Tree.size());
+  reassociate::OpClassifier Cls(LI, BO);
   for (const RepeatedValue &E : Tree)
-    Factors.append(E.second, ValueEntry(getRank(E.first), E.first));
+    Factors.append(
+        E.second, ValueEntry(getRank(E.first), E.first, Cls.classify(E.first)));
 
   bool FoundFactor = false;
   bool NeedsNegate = false;
@@ -1494,6 +1526,8 @@ Value *ReassociatePass::OptimizeAdd(Instruction *I,
   // scan for any
   // duplicates.  We want to canonicalize Y+Y+Y+Z -> 3*Y+Z.
 
+  reassociate::OpClassifier Cls(LI, I);
+
   for (unsigned i = 0, e = Ops.size(); i != e; ++i) {
     Value *TheOp = Ops[i].Op;
     // Check to see if we've seen this operand before.  If so, we factor all
@@ -1533,7 +1567,7 @@ Value *ReassociatePass::OptimizeAdd(Instruction *I,
       // Otherwise, we had some input that didn't have the dupe, such as
       // "A + A + B" -> "A*2 + B".  Add the new multiply to the list of
       // things being added by this operation.
-      Ops.insert(Ops.begin(), ValueEntry(getRank(Mul), Mul));
+      Ops.insert(Ops.begin(), ValueEntry(getRank(Mul), Mul, Cls.classify(Mul)));
 
       --i;
       e = Ops.size();
@@ -1572,7 +1606,7 @@ Value *ReassociatePass::OptimizeAdd(Instruction *I,
     // if X and ~X we append -1 to the operand list.
     if (match(TheOp, m_Not(m_Value()))) {
       Value *V = Constant::getAllOnesValue(X->getType());
-      Ops.insert(Ops.end(), ValueEntry(getRank(V), V));
+      Ops.insert(Ops.end(), ValueEntry(getRank(V), V, Cls.classify(V)));
       e += 1;
     }
   }
@@ -1710,7 +1744,7 @@ Value *ReassociatePass::OptimizeAdd(Instruction *I,
     // Otherwise, we had some input that didn't have the factor, such as
     // "A*B + A*C + D" -> "A*(B+C) + D".  Add the new multiply to the list of
     // things being added by this operation.
-    Ops.insert(Ops.begin(), ValueEntry(getRank(V2), V2));
+    Ops.insert(Ops.begin(), ValueEntry(getRank(V2), V2, Cls.classify(V2)));
   }
 
   return nullptr;
@@ -1886,7 +1920,8 @@ Value *ReassociatePass::OptimizeMul(BinaryOperator *I,
   if (Ops.empty())
     return V;
 
-  ValueEntry NewEntry = ValueEntry(getRank(V), V);
+  reassociate::OpClassifier Cls(LI, I);
+  ValueEntry NewEntry = ValueEntry(getRank(V), V, Cls.classify(V));
   Ops.insert(llvm::lower_bound(Ops, NewEntry), NewEntry);
   return nullptr;
 }
@@ -1923,7 +1958,8 @@ Value *ReassociatePass::OptimizeExpression(BinaryOperator *I,
   if (Cst && Cst != ConstantExpr::getBinOpIdentity(Opcode, I->getType())) {
     if (Cst == ConstantExpr::getBinOpAbsorber(Opcode, I->getType()))
       return Cst;
-    Ops.push_back(ValueEntry(0, Cst));
+    Ops.push_back(
+        ValueEntry(0, Cst, reassociate::OpCategory::LoopInvariantOrConst));
   }
 
   if (Ops.size() == 1) return Ops[0].Op;
@@ -2292,17 +2328,14 @@ void ReassociatePass::ReassociateExpression(BinaryOperator *I) {
   MadeChange |= LinearizeExprTree(I, Tree, RedoInsts, Flags);
   SmallVector<ValueEntry, 8> Ops;
   Ops.reserve(Tree.size());
+  reassociate::OpClassifier Cls(LI, I);
   for (const RepeatedValue &E : Tree)
-    Ops.append(E.second, ValueEntry(getRank(E.first), E.first));
+    Ops.append(E.second,
+               ValueEntry(getRank(E.first), E.first, Cls.classify(E.first)));
 
   LLVM_DEBUG(dbgs() << "RAIn:\t"; PrintOps(I, Ops); dbgs() << '\n');
 
-  // Now that we have linearized the tree to a list and have gathered all of
-  // the operands and their ranks, sort the operands by their rank.  Use a
-  // stable_sort so that values with equal ranks will have their relative
-  // positions maintained (and so the compiler is deterministic).  Note that
-  // this sorts so that the highest ranking values end up at the beginning of
-  // the vector.
+  // Sort by category then rank (see operator<). stable_sort for determinism.
   llvm::stable_sort(Ops);
 
   // Now that we have the expression tree in a convenient
@@ -2553,6 +2586,19 @@ PreservedAnalyses ReassociatePass::run(Function &F, FunctionAnalysisManager &) {
   // analysing dead basic blocks).
   ReversePostOrderTraversal<Function *> RPOT(&F);
 
+  // Build LoopInfo locally for OpClassifier. We don't take it from the FAM:
+  // Reassociate runs before LICM so it isn't cached yet, and the legacy PM
+  // calls run() with an empty FAM that would assert. Skip single-BB functions
+  // (no loops, so LI stays null and ordering reduces to rank only).
+  std::optional<DominatorTree> DT;
+  std::optional<LoopInfo> LIStorage;
+  LI = nullptr;
+  if (!F.empty() && std::next(F.begin()) != F.end()) {
+    DT.emplace(F);
+    LIStorage.emplace(*DT);
+    LI = &*LIStorage;
+  }
+
   // Calculate the rank map for F.
   BuildRankMap(F, RPOT);
 
@@ -2614,6 +2660,9 @@ PreservedAnalyses ReassociatePass::run(Function &F, FunctionAnalysisManager &) {
   ValueRankMap.clear();
   for (auto &Entry : PairMap)
     Entry.clear();
+
+  // LIStorage is about to go out of scope; don't leave LI dangling.
+  LI = nullptr;
 
   if (MadeChange) {
     PreservedAnalyses PA;
