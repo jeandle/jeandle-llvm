@@ -129,8 +129,8 @@ bool isBackEdgePoll(CallInst *CI, Loop *L, DominatorTree &DT) {
   return DT.dominates(CI->getParent(), Latch);
 }
 
-SmallVector<CallInst *, 4>
-collectBackEdgePolls(Loop *L, LoopInfo &LI, DominatorTree &DT) {
+SmallVector<CallInst *, 4> collectBackEdgePolls(Loop *L, LoopInfo &LI,
+                                                DominatorTree &DT) {
   SmallVector<CallInst *, 4> Out;
   for (BasicBlock *BB : L->blocks()) {
     // Only consider polls owned by this loop, not by an inner sub-loop —
@@ -204,7 +204,8 @@ PreservedAnalyses SafepointElimination::run(Loop &L, LoopAnalysisManager &AM,
   if (!EnableSafepointElim)
     return PreservedAnalyses::all();
 
-  if (!F.getParent()->getNamedMetadata(jeandle::Metadata::JavaMethodCompilation))
+  if (!F.getParent()->getNamedMetadata(
+          jeandle::Metadata::JavaMethodCompilation))
     return PreservedAnalyses::all();
 
   if (!tryEliminateInLoop(&L, AR))
