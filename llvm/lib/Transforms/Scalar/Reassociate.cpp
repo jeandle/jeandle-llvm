@@ -79,6 +79,14 @@ static cl::opt<bool>
                             "when exposing CSE opportunities"),
                    cl::init(true), cl::Hidden);
 
+// When off, run() skips the DominatorTree/LoopInfo build and OpClassifier sees
+// a null loop, so ordering falls back to rank-only (legacy behavior).
+static cl::opt<bool> ReassociateLoopCarriedRecurrence(
+    DEBUG_TYPE "-loop-carried-recurrence",
+    cl::desc("Sort loop-carried recurrence phis to the outermost operand of a "
+             "reassociated expression, shortening the loop-carried dependency"),
+    cl::init(true), cl::Hidden);
+
 #ifndef NDEBUG
 /// Print out the expression identified in the Ops list.
 static void PrintOps(Instruction *I, const SmallVectorImpl<ValueEntry> &Ops) {
@@ -2593,7 +2601,8 @@ PreservedAnalyses ReassociatePass::run(Function &F, FunctionAnalysisManager &) {
   std::optional<DominatorTree> DT;
   std::optional<LoopInfo> LIStorage;
   LI = nullptr;
-  if (!F.empty() && std::next(F.begin()) != F.end()) {
+  if (ReassociateLoopCarriedRecurrence && !F.empty() &&
+      std::next(F.begin()) != F.end()) {
     DT.emplace(F);
     LIStorage.emplace(*DT);
     LI = &*LIStorage;
