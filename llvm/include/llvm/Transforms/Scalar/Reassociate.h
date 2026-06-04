@@ -87,6 +87,10 @@ public:
 
 private:
   const Loop *EnclosingLoop;
+  // Root of the expression tree being sorted. Only the header phi closed by
+  // this root is the chain's recurrence; other header phis (induction vars)
+  // are ordinary loop-variant leaves here.
+  const Instruction *RootI;
 };
 
 /// Utility class representing a base and exponent pair which form one
@@ -133,6 +137,10 @@ protected:
 
 public:
   LLVM_ABI PreservedAnalyses run(Function &F, FunctionAnalysisManager &);
+  // Shared body for both pass managers. The caller passes LI (from the FAM in
+  // the new PM, or from LoopInfoWrapperPass in the legacy PM); null disables the
+  // loop-carried ordering.
+  LLVM_ABI PreservedAnalyses runImpl(Function &F, LoopInfo *LI);
 
 private:
   void BuildRankMap(Function &F, ReversePostOrderTraversal<Function *> &RPOT);

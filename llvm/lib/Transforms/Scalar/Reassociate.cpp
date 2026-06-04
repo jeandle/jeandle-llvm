@@ -38,7 +38,6 @@
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
-#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstrTypes.h"
@@ -79,8 +78,8 @@ static cl::opt<bool>
                             "when exposing CSE opportunities"),
                    cl::init(true), cl::Hidden);
 
-// When off, run() skips the DominatorTree/LoopInfo build and OpClassifier sees
-// a null loop, so ordering falls back to rank-only (legacy behavior).
+// When off, run() skips the LoopInfo fetch and OpClassifier sees a null loop,
+// so ordering falls back to rank-only (legacy behavior).
 static cl::opt<bool> ReassociateLoopCarriedRecurrence(
     DEBUG_TYPE "-loop-carried-recurrence",
     cl::desc("Sort loop-carried recurrence phis to the outermost operand of a "
@@ -245,7 +244,8 @@ unsigned ReassociatePass::getRank(Value *V) {
 namespace llvm::reassociate {
 
 OpClassifier::OpClassifier(const LoopInfo *LI, const Instruction *I)
-    : EnclosingLoop(LI && I ? LI->getLoopFor(I->getParent()) : nullptr) {}
+    : EnclosingLoop(LI && I ? LI->getLoopFor(I->getParent()) : nullptr),
+      RootI(I) {}
 
 OpCategory OpClassifier::classify(const Value *V) const {
   if (isa<Constant>(V))
@@ -253,14 +253,16 @@ OpCategory OpClassifier::classify(const Value *V) const {
   if (!EnclosingLoop)
     return OpCategory::LoopVariant;
 
-  // A header phi of this loop with an in-loop incoming edge is the recurrence
-  // accumulator. Check incomings via contains() rather than getLoopLatch(),
-  // which is null for multi-latch loops. A phi from another loop's header
-  // falls through and isLoopInvariant() puts it with the invariants.
+  // The recurrence accumulator of *this* expression is the header phi whose
+  // in-loop incoming value is the root we are reassociating. Other header phis
+  // (e.g. induction variables, whose backedge value is a different chain) are
+  // ordinary loop-variant leaves and must not steal the outermost slot.
+  // contains() rather than getLoopLatch(), which is null for multi-latch loops.
   if (const auto *Phi = dyn_cast<PHINode>(V))
     if (Phi->getParent() == EnclosingLoop->getHeader())
       for (BasicBlock *Pred : Phi->blocks())
-        if (EnclosingLoop->contains(Pred))
+        if (EnclosingLoop->contains(Pred) &&
+            Phi->getIncomingValueForBlock(Pred) == RootI)
           return OpCategory::LoopCarriedRecurrence;
 
   if (EnclosingLoop->isLoopInvariant(V))
@@ -1501,15 +1503,16 @@ Value *ReassociatePass::OptimizeXor(Instruction *I,
   // Step 4: Reassemble the Ops
   if (Changed) {
     Ops.clear();
+    reassociate::OpClassifier Cls(LI, I);
     for (const XorOpnd &O : Opnds) {
       if (O.isInvalid())
         continue;
-      ValueEntry VE(getRank(O.getValue()), O.getValue());
-      Ops.push_back(VE);
+      Value *V = O.getValue();
+      Ops.push_back(ValueEntry(getRank(V), V, Cls.classify(V)));
     }
     if (!ConstOpnd.isZero()) {
       Value *C = ConstantInt::get(Ty, ConstOpnd);
-      ValueEntry VE(getRank(C), C);
+      ValueEntry VE(getRank(C), C, Cls.classify(C));
       Ops.push_back(VE);
     }
     unsigned Sz = Ops.size();
@@ -2473,6 +2476,12 @@ void ReassociatePass::ReassociateExpression(BinaryOperator *I) {
     for (unsigned i = Ops.size() - 1; i > LimitIdx; --i) {
       // We must use int type to go below zero when LimitIdx is 0.
       for (int j = i - 1; j >= (int)LimitIdx; --j) {
+        // Keep the loop-carried recurrence outermost: don't let a pair that
+        // contains it be pulled to the innermost (CSE) position, which would
+        // re-lengthen the loop-carried dependency the category sort shortened.
+        if (Ops[i].Category == reassociate::OpCategory::LoopCarriedRecurrence ||
+            Ops[j].Category == reassociate::OpCategory::LoopCarriedRecurrence)
+          continue;
         unsigned Score = 0;
         Value *Op0 = Ops[i].Op;
         Value *Op1 = Ops[j].Op;
@@ -2587,26 +2596,26 @@ ReassociatePass::BuildPairMap(ReversePostOrderTraversal<Function *> &RPOT) {
   }
 }
 
-PreservedAnalyses ReassociatePass::run(Function &F, FunctionAnalysisManager &) {
+PreservedAnalyses ReassociatePass::run(Function &F, FunctionAnalysisManager &FAM) {
+  // Reassociate preserves the CFG, so the LoopInfo (and the DominatorTree it is
+  // built from) stays valid for the LICM run that follows. Fetch it from the FAM
+  // so it is cached and reused rather than rebuilt. Only needed when the
+  // loop-carried ordering is enabled and the function has more than one block
+  // (otherwise there are no loops and ordering reduces to rank only).
+  LoopInfo *LIResult = nullptr;
+  if (ReassociateLoopCarriedRecurrence && !F.empty() &&
+      std::next(F.begin()) != F.end())
+    LIResult = &FAM.getResult<LoopAnalysis>(F);
+  return runImpl(F, LIResult);
+}
+
+PreservedAnalyses ReassociatePass::runImpl(Function &F, LoopInfo *LIResult) {
+  LI = LIResult;
   // Get the functions basic blocks in Reverse Post Order. This order is used by
   // BuildRankMap to pre calculate ranks correctly. It also excludes dead basic
   // blocks (it has been seen that the analysis in this pass could hang when
   // analysing dead basic blocks).
   ReversePostOrderTraversal<Function *> RPOT(&F);
-
-  // Build LoopInfo locally for OpClassifier. We don't take it from the FAM:
-  // Reassociate runs before LICM so it isn't cached yet, and the legacy PM
-  // calls run() with an empty FAM that would assert. Skip single-BB functions
-  // (no loops, so LI stays null and ordering reduces to rank only).
-  std::optional<DominatorTree> DT;
-  std::optional<LoopInfo> LIStorage;
-  LI = nullptr;
-  if (ReassociateLoopCarriedRecurrence && !F.empty() &&
-      std::next(F.begin()) != F.end()) {
-    DT.emplace(F);
-    LIStorage.emplace(*DT);
-    LI = &*LIStorage;
-  }
 
   // Calculate the rank map for F.
   BuildRankMap(F, RPOT);
@@ -2670,7 +2679,7 @@ PreservedAnalyses ReassociatePass::run(Function &F, FunctionAnalysisManager &) {
   for (auto &Entry : PairMap)
     Entry.clear();
 
-  // LIStorage is about to go out of scope; don't leave LI dangling.
+  // Don't leave the member pointing at FAM-owned LoopInfo across functions.
   LI = nullptr;
 
   if (MadeChange) {
@@ -2698,13 +2707,20 @@ public:
     if (skipFunction(F))
       return false;
 
-    FunctionAnalysisManager DummyFAM;
-    auto PA = Impl.run(F, DummyFAM);
+    // Provide LoopInfo from the wrapper pass (required below) so the shared body
+    // sees the same loop-carried ordering as the new PM.
+    LoopInfo *LI = nullptr;
+    if (ReassociateLoopCarriedRecurrence && !F.empty() &&
+        std::next(F.begin()) != F.end())
+      LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+    auto PA = Impl.runImpl(F, LI);
     return !PA.areAllPreserved();
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
+    if (ReassociateLoopCarriedRecurrence)
+      AU.addRequired<LoopInfoWrapperPass>();
     AU.addPreserved<AAResultsWrapperPass>();
     AU.addPreserved<BasicAAWrapperPass>();
     AU.addPreserved<GlobalsAAWrapperPass>();
@@ -2715,8 +2731,11 @@ public:
 
 char ReassociateLegacyPass::ID = 0;
 
-INITIALIZE_PASS(ReassociateLegacyPass, "reassociate",
-                "Reassociate expressions", false, false)
+INITIALIZE_PASS_BEGIN(ReassociateLegacyPass, "reassociate",
+                      "Reassociate expressions", false, false)
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
+INITIALIZE_PASS_END(ReassociateLegacyPass, "reassociate",
+                    "Reassociate expressions", false, false)
 
 // Public interface to the Reassociate pass
 FunctionPass *llvm::createReassociatePass() {

@@ -587,3 +587,71 @@ exit:
 }
 
 declare void @use(i32)
+
+; ---------------------------------------------------------------------------
+; Induction phi must not be mistaken for the recurrence
+; ---------------------------------------------------------------------------
+; Two header phis: the reduction accumulator %s (closed by the add-chain root
+; %result) and the induction variable %i (closed by %i.next, a different
+; chain). Only %s is this chain's recurrence; %i is an ordinary loop-variant
+; leaf here and must not steal the outermost slot. The recurrence is the one
+; whose in-loop incoming value is the root we are reassociating.
+define i32 @induction_phi_not_recurrence(i32 %n, ptr %arr) {
+; CHECK-LABEL: @induction_phi_not_recurrence
+; CHECK:         %s = phi i32 [ 0, %entry ], [ [[RES:%.*]], %loop ]
+; CHECK:         [[RES]] = add i32 {{.*}}, %s
+; CHECK:         br i1
+entry:
+  br label %loop
+
+loop:
+  %s = phi i32 [ 0, %entry ], [ %result, %loop ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
+  %p = getelementptr i32, ptr %arr, i32 %i
+  %v = load i32, ptr %p, align 4
+  %body = mul i32 %v, 7
+  %t1 = add i32 %s, %i
+  %result = add i32 %t1, %body
+  %i.next = add i32 %i, 1
+  %cmp = icmp slt i32 %i.next, %n
+  br i1 %cmp, label %loop, label %exit
+
+exit:
+  ret i32 %result
+}
+
+; ---------------------------------------------------------------------------
+; CSE pair reordering must not override the recurrence placement
+; ---------------------------------------------------------------------------
+; `%s + %a` is the most popular pair (it also appears in the @use side chain),
+; so the CSE-driven reorder would normally move it to the innermost position,
+; pulling the recurrence %s off the outermost slot. The pair selection skips
+; recurrence operands, so %s stays outermost.
+define i32 @cse_pair_keeps_recurrence_outermost(i32 %n, ptr %arr) {
+; CHECK-LABEL: @cse_pair_keeps_recurrence_outermost
+; CHECK:         %s = phi i32 [ 0, %entry ], [ [[RES:%.*]], %loop ]
+; CHECK:         [[RES]] = add i32 {{.*}}, %s
+; CHECK:         br i1
+entry:
+  br label %loop
+
+loop:
+  %s = phi i32 [ 0, %entry ], [ %result, %loop ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
+  %p = getelementptr i32, ptr %arr, i32 %i
+  %v = load i32, ptr %p, align 4
+  %a = mul i32 %v, 3
+  %b = mul i32 %v, 5
+  %b2 = lshr i32 %v, 2
+  %side1 = add i32 %s, %a
+  %side = add i32 %side1, %b
+  call void @use(i32 %side)
+  %t1 = add i32 %s, %a
+  %result = add i32 %t1, %b2
+  %i.next = add i32 %i, 1
+  %cmp = icmp slt i32 %i.next, %n
+  br i1 %cmp, label %loop, label %exit
+
+exit:
+  ret i32 %result
+}
