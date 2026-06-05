@@ -465,18 +465,15 @@ exit:
 }
 
 ; ---------------------------------------------------------------------------
-; Jeandle-style IR shape: the recurrence has a statepoint-like opaque call
-; in the loop body. This is precisely the IR pattern that motivated the
-; deep refactor -- Jeandle's safepoint polls (which become statepoints
-; after RewriteStatepointsForGC) live inside the loop body and prevent
-; LoopVectorize from firing. We need to confirm Reassociate's recurrence
-; placement is unaffected by the opaque call's presence.
+; Recurrence with an opaque call in the loop body
+; ---------------------------------------------------------------------------
+; An opaque call sits between the recurrence phi and its add chain. The
+; recurrence accumulator must still land at the outermost RHS regardless of
+; the call's presence in the loop body.
 ; ---------------------------------------------------------------------------
 
-; Declared with no attributes: the call is assumed to have unknown memory
-; effects, so DCE / CSE cannot remove it even when its return value is
-; unused. This is exactly the property a Jeandle safepoint / statepoint
-; has -- opaque to the optimizer but not blocking adjacent computation.
+; Declared with no attributes: the call has unknown memory effects, so DCE/CSE
+; cannot remove it even with an unused result; it stays in the loop body.
 declare void @opaque_call()
 
 define i32 @recurrence_with_opaque_call_in_body(i32 %n, ptr %arr) {
@@ -496,7 +493,7 @@ loop:
   %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
   %p = getelementptr i32, ptr %arr, i32 %i
   %v = load i32, ptr %p, align 4
-  call void @opaque_call()                       ; safepoint-like opaque call
+  call void @opaque_call()                       ; opaque call
   %m = mul i32 %v, 7
   %r = lshr i32 %v, 2
   %add1 = add i32 %m, %r

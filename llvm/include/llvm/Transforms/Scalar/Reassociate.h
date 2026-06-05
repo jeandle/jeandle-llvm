@@ -70,8 +70,7 @@ struct ValueEntry {
 
 inline bool operator<(const ValueEntry &LHS, const ValueEntry &RHS) {
   // Category first (lower sorts to the outermost operand), then rank as the
-  // legacy tiebreaker. If several recurrence phis share an expression only
-  // the first gets the outermost slot; that's rare and left as-is.
+  // legacy tiebreaker; operands in the same category keep their rank order.
   if (LHS.Category != RHS.Category)
     return LHS.Category < RHS.Category;
   return LHS.Rank > RHS.Rank;
@@ -137,10 +136,10 @@ protected:
 
 public:
   LLVM_ABI PreservedAnalyses run(Function &F, FunctionAnalysisManager &);
-  // Shared body for both pass managers. The caller passes LI (from the FAM in
-  // the new PM, or from LoopInfoWrapperPass in the legacy PM); null disables the
-  // loop-carried ordering.
-  LLVM_ABI PreservedAnalyses runImpl(Function &F, LoopInfo *LI);
+  // Shared body for both pass managers (not part of the exported API): the new
+  // PM passes LI from the FAM, the legacy wrapper from LoopInfoWrapperPass;
+  // null falls back to rank-only ordering.
+  PreservedAnalyses runImpl(Function &F, LoopInfo *LI);
 
 private:
   void BuildRankMap(Function &F, ReversePostOrderTraversal<Function *> &RPOT);
