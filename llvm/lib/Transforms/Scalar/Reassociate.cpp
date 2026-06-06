@@ -2596,10 +2596,11 @@ ReassociatePass::BuildPairMap(ReversePostOrderTraversal<Function *> &RPOT) {
   }
 }
 
-PreservedAnalyses ReassociatePass::run(Function &F, FunctionAnalysisManager &FAM) {
+PreservedAnalyses ReassociatePass::run(Function &F,
+                                       FunctionAnalysisManager &FAM) {
   // Reassociate preserves the CFG, so the LoopInfo (and the DominatorTree it is
-  // built from) stays valid for the LICM run that follows. Fetch it from the FAM
-  // so it is cached and reused rather than rebuilt. Only needed when the
+  // built from) stays valid for the LICM run that follows. Fetch it from the
+  // FAM so it is cached and reused rather than rebuilt. Only needed when the
   // loop-carried ordering is enabled and the function has more than one block
   // (otherwise there are no loops and ordering reduces to rank only).
   LoopInfo *LIResult = nullptr;
@@ -2707,8 +2708,8 @@ public:
     if (skipFunction(F))
       return false;
 
-    // Provide LoopInfo from the wrapper pass (required below) so the shared body
-    // sees the same loop-carried ordering as the new PM.
+    // Provide LoopInfo from the wrapper pass (required below) so the shared
+    // body sees the same loop-carried ordering as the new PM.
     LoopInfo *LI = nullptr;
     if (ReassociateLoopCarriedRecurrence && !F.empty() &&
         std::next(F.begin()) != F.end())
