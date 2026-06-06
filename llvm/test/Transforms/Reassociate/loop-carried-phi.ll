@@ -289,6 +289,45 @@ exit:
 }
 
 ; ---------------------------------------------------------------------------
+; Floating-point WITHOUT fast-math: a plain fadd is not reassociable, so
+; Reassociate never linearizes the chain and the OpClassifier never runs on
+; it. The recurrence placement must therefore be a no-op here: %s must NOT be
+; hoisted to the outer RHS the way the fast-math case is. Guards that the
+; ordering is scoped to reassociable ops and never reorders FP where doing so
+; would change the result. (Output is identical with the flag on or off.)
+; ---------------------------------------------------------------------------
+
+define float @fp_recurrence_no_fast_not_reassociated(i32 %n, ptr %arr) {
+; CHECK-LABEL: @fp_recurrence_no_fast_not_reassociated
+; CHECK:       loop:
+; CHECK:         %s = phi float [ 0.000000e+00, %entry ], [ [[ADD2:%.*]], %loop ]
+; CHECK:         [[M:%.*]] = fmul float %v, 7.000000e+00
+; CHECK:         [[R:%.*]] = fmul float %v, 2.500000e-01
+; CHECK:         [[ADD1:%.*]] = fadd float [[M]], [[R]]
+; The recurrence stays where source order + canonicalization put it (LHS of
+; the outer fadd), NOT pulled to the outer RHS -- no category reordering.
+; CHECK:         [[ADD2]] = fadd float %s, [[ADD1]]
+entry:
+  br label %loop
+
+loop:
+  %s = phi float [ 0.0, %entry ], [ %add2, %loop ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
+  %p = getelementptr float, ptr %arr, i32 %i
+  %v = load float, ptr %p, align 4
+  %m = fmul float %v, 7.0
+  %r = fmul float %v, 0.25
+  %add1 = fadd float %m, %r
+  %add2 = fadd float %add1, %s
+  %i.next = add i32 %i, 1
+  %cmp = icmp slt i32 %i.next, %n
+  br i1 %cmp, label %loop, label %exit
+
+exit:
+  ret float %add2
+}
+
+; ---------------------------------------------------------------------------
 ; Self-loop: the simplest possible loop, a single BB that branches back to
 ; itself. The header IS the latch, in-loop incoming is the BB itself.
 ; OpClassifier must still recognise the loop-carried phi correctly when the
