@@ -29,6 +29,12 @@ public:
   static constexpr const char *JavaKlass = "java-klass";
 
   static constexpr const char *JavaKlassExact = "java-klass-exact";
+
+  static constexpr const char *JavaMethod = "java-method";
+
+  static constexpr const char *JavaAccessorMethod = "java-accessor-method";
+
+  static constexpr const char *MonomorphicTarget = "monomorphic-target";
 };
 
 } // namespace llvm::jeandle

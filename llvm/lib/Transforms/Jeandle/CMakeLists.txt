@@ -1,6 +1,7 @@
 add_llvm_component_library(LLVMJeandleTransforms
   InsertGCBarriers.cpp
   JavaOperationLower.cpp
+  JeandleInliner.cpp
   TLSPointerRewrite.cpp
   TypeCheckElimination.cpp
 

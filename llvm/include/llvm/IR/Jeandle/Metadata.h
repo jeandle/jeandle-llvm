@@ -25,6 +25,8 @@ public:
   static constexpr const char *JavaKlass = "java-klass";
 
   static constexpr const char *JavaKlassExact = "java-klass-exact";
+
+  static constexpr const char *InlineScopeID = "inline-scope-id";
 };
 
 enum AddrSpace : unsigned {

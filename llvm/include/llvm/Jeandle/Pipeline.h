@@ -19,12 +19,25 @@
 
 namespace llvm::jeandle {
 
+// Controls whether JeandleInliner is added and which callees it may try.
+enum class InlineMode {
+  Disabled,
+  Default,
+  AccessorOnly,
+};
+
+struct PipelineOptions {
+  InlineMode Inlining = InlineMode::Default;
+};
+
 class Pipeline {
 public:
-  Pipeline(OptimizationLevel Level, LLVMContext &Ctx);
+  Pipeline(OptimizationLevel Level, LLVMContext &Ctx,
+           PipelineOptions Options = {});
 
   LLVM_ABI static ModulePassManager
-  buildJeandlePipeline(PassBuilder &PB, OptimizationLevel Level);
+  buildJeandlePipeline(PassBuilder &PB, OptimizationLevel Level,
+                       PipelineOptions Options = {});
 
   void run(Module &M);
 

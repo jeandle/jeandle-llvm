@@ -126,7 +126,18 @@ enum class VMCallbackValueType : uint8_t {
       (VMCallbackValueType::Uintptr), 1)                                         \
   def(IsEffectivelyFinal, bool, Bool,                                            \
       (uintptr_t a1), (a1),                                                      \
-      (VMCallbackValueType::Uintptr), 1)
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(RecordInlineSuccess, bool, Bool,                                           \
+      (int a1, int a2, uintptr_t a3), (a1, a2, a3),                              \
+      (VMCallbackValueType::Int, VMCallbackValueType::Int,                       \
+       VMCallbackValueType::Uintptr), 3)                                         \
+  def(IsOkToInline, bool, Bool,                                                  \
+      (int a1, int a2, uintptr_t a3), (a1, a2, a3),                              \
+      (VMCallbackValueType::Int, VMCallbackValueType::Int,                       \
+       VMCallbackValueType::Uintptr), 3)                                         \
+  def(GetInlineCalleeIR, bool, Bool,                                             \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
 
 // =============================================================================
 // VMCallbacks struct — generated from master list

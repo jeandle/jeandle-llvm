@@ -9,8 +9,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Jeandle/Pipeline.h"
+#include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
+#include "llvm/Transforms/Jeandle/JeandleInliner.h"
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/Scalar/InstSimplifyPass.h"
@@ -18,7 +20,8 @@
 
 namespace llvm::jeandle {
 
-Pipeline::Pipeline(OptimizationLevel level, LLVMContext &Ctx)
+Pipeline::Pipeline(OptimizationLevel level, LLVMContext &Ctx,
+                   PipelineOptions Options)
     : SI(Ctx, /*DebugLogging=*/false) {
   SI.registerCallbacks(PIC, &MAM);
 
@@ -31,12 +34,29 @@ Pipeline::Pipeline(OptimizationLevel level, LLVMContext &Ctx)
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
-  PM = buildJeandlePipeline(PB, level);
+  PM = buildJeandlePipeline(PB, level, Options);
 }
 
 ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
-                                                 OptimizationLevel level) {
+                                                 OptimizationLevel level,
+                                                 PipelineOptions Options) {
   ModulePassManager PM;
+  // JeandleInlineDriver owns the inline-specific loop. Future CHA/PGO
+  // refinement between inline rounds should be wired inside the driver so
+  // inline-scope state can be preserved across IR rewrites.
+  switch (Options.Inlining) {
+  case InlineMode::Disabled:
+    break;
+  case InlineMode::Default:
+    PM.addPass(JeandleInlineDriver());
+    break;
+  case InlineMode::AccessorOnly:
+    PM.addPass(JeandleInlineDriver(/*InlineAccessorsOnly=*/true));
+    break;
+  }
+  // Remove unreachable available_externally functions after inlining so that
+  // subsequent passes do not process them.
+  PM.addPass(GlobalDCEPass());
   PM.addPass(JavaOperationLower(0));
   PM.addPass(createModuleToFunctionPassAdaptor(InstSimplifyPass()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
