@@ -30,6 +30,7 @@ enum class VMCallbackValueType : uint8_t {
   Bool,    // bool
   Uintptr, // uintptr_t
   Int,     // int
+  Long,    // int64_t
 };
 
 // =============================================================================
@@ -126,7 +127,28 @@ enum class VMCallbackValueType : uint8_t {
       (VMCallbackValueType::Uintptr), 1)                                         \
   def(IsEffectivelyFinal, bool, Bool,                                            \
       (uintptr_t a1), (a1),                                                      \
-      (VMCallbackValueType::Uintptr), 1)
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(IsConstantField, bool, Bool,                                               \
+      (int a1, int a2), (a1, a2),                                                \
+      (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)                   \
+  def(GetFieldBasicTypeByOop, int, Int,                                          \
+      (int a1, int a2), (a1, a2),                                                \
+      (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)                   \
+  def(GetConstantFieldInt, int, Int,                                             \
+      (int a1, int a2), (a1, a2),                                                \
+      (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)                   \
+  def(GetConstantFieldLong, int64_t, Long,                                       \
+      (int a1, int a2), (a1, a2),                                                \
+      (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)                   \
+  def(GetConstantFieldFloatBits, int, Int,                                       \
+      (int a1, int a2), (a1, a2),                                                \
+      (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)                   \
+  def(GetConstantFieldDoubleBits, int64_t, Long,                                 \
+      (int a1, int a2), (a1, a2),                                                \
+      (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)                   \
+  def(GetConstantFieldOop, int, Int,                                             \
+      (int a1, int a2), (a1, a2),                                                \
+      (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)
 
 // =============================================================================
 // VMCallbacks struct — generated from master list
@@ -153,6 +175,19 @@ enum class VMCallbackValueType : uint8_t {
 ///   IsInterface         — Returns true if the klass is an interface.
 ///   IsObjectKlass       — Returns true if the klass is java.lang.Object.
 ///   IsEffectivelyFinal  — Returns true if no subclass can exist at runtime.
+///   IsConstantField     — Returns true if oop id + byte offset is foldable.
+///   GetFieldBasicTypeByOop
+///                       — Returns the HotSpot BasicType value for a field.
+///   GetConstantFieldInt — Returns widened int value for boolean/byte/char/
+///                         short/int fields.
+///   GetConstantFieldLong
+///                       — Returns long value.
+///   GetConstantFieldFloatBits
+///                       — Returns raw int bits for float fields.
+///   GetConstantFieldDoubleBits
+///                       — Returns raw long bits for double fields.
+///   GetConstantFieldOop — Returns stable oop id for object/array field value,
+///                         or -1 for null.
 struct VMCallbacks {
   ALL_JEANDLE_VM_CALLBACKS(DEF_VM_CALLBACK_FIELD)
 };

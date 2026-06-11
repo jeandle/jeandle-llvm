@@ -155,6 +155,9 @@ template <> inline int64_t encodeVMCallbackValue<uintptr_t>(uintptr_t V) {
 template <> inline int64_t encodeVMCallbackValue<int>(int V) {
   return static_cast<int64_t>(V);
 }
+template <> inline int64_t encodeVMCallbackValue<int64_t>(int64_t V) {
+  return V;
+}
 template <> inline int64_t encodeVMCallbackValue<bool>(bool V) {
   return V ? 1 : 0;
 }
@@ -168,6 +171,9 @@ template <> inline uintptr_t decodeVMCallbackValue<uintptr_t>(int64_t V) {
 }
 template <> inline int decodeVMCallbackValue<int>(int64_t V) {
   return static_cast<int>(V);
+}
+template <> inline int64_t decodeVMCallbackValue<int64_t>(int64_t V) {
+  return V;
 }
 
 /// Encode variadic args into a vector for replay matching.

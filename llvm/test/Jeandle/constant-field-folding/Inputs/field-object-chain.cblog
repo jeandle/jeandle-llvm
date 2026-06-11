@@ -1,0 +1,6 @@
+IsConstantField 0 16 = true
+GetFieldBasicTypeByOop 0 16 = 12
+GetConstantFieldOop 0 16 = 1
+IsConstantField 1 20 = true
+GetFieldBasicTypeByOop 1 20 = 10
+GetConstantFieldInt 1 20 = 7

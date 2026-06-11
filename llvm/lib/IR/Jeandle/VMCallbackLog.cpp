@@ -111,6 +111,9 @@ Error VMCallbackLogRecorder::dump(StringRef FilePath) {
       case VMCallbackValueType::Int:
         OS << static_cast<int>(Key.Args[I]);
         break;
+      case VMCallbackValueType::Long:
+        OS << static_cast<int64_t>(Key.Args[I]);
+        break;
       case VMCallbackValueType::Bool:
         OS << (Key.Args[I] ? "true" : "false");
         break;
@@ -126,6 +129,9 @@ Error VMCallbackLogRecorder::dump(StringRef FilePath) {
       break;
     case VMCallbackValueType::Int:
       OS << static_cast<int>(Result);
+      break;
+    case VMCallbackValueType::Long:
+      OS << static_cast<int64_t>(Result);
       break;
     }
     OS << "\n";
@@ -282,6 +288,12 @@ static std::optional<int64_t> parseValue(StringRef Token,
     if (Token.getAsInteger(0, Val))
       return std::nullopt;
     return static_cast<int64_t>(Val);
+  }
+  case VMCallbackValueType::Long: {
+    int64_t Val;
+    if (Token.getAsInteger(0, Val))
+      return std::nullopt;
+    return Val;
   }
   }
   return std::nullopt;
