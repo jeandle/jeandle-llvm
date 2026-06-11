@@ -46,7 +46,9 @@
 
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AssumptionCache.h"
@@ -54,20 +56,28 @@
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/GlobalAlias.h"
+#include "llvm/IR/GlobalObject.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
+#include "llvm/IR/Jeandle/VMCallbackLog.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Format.h"
+#include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/Threading.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
 
+#include <limits>
+#include <memory>
 #include <string>
 
 #define DEBUG_TYPE "jeandle-inliner"
@@ -265,9 +275,57 @@ static int getCallSiteBCI(const CallBase &CB) {
   reportInvalidCallSiteBCI(CB, "missing adjacent i32 deopt bci pair");
 }
 
+[[noreturn]] static void reportInvalidJavaMethodPointer(const Function &F,
+                                                        const char *Reason) {
+  std::string Message;
+  raw_string_ostream OS(Message);
+
+  OS << "JeandleInliner: " << Reason << " for " << F.getName();
+
+  OS.flush();
+  report_fatal_error(StringRef(Message));
+}
+
+static uintptr_t getJavaMethodPointer(const Function &F) {
+  llvm::Attribute Attr =
+      F.getFnAttribute(jeandle::Attribute::JavaMethodPointer);
+  if (!Attr.isStringAttribute())
+    reportInvalidJavaMethodPointer(F, "missing java method pointer attribute");
+
+  StringRef Value = Attr.getValueAsString();
+  if (Value.empty())
+    reportInvalidJavaMethodPointer(F, "empty java method pointer attribute");
+
+  uint64_t Raw = 0;
+  bool Failed = Value.getAsInteger(10, Raw);
+
+  if (Failed || Raw > std::numeric_limits<uintptr_t>::max())
+    reportInvalidJavaMethodPointer(F, "invalid java method pointer attribute");
+
+  return static_cast<uintptr_t>(Raw);
+}
+
+static void materializeInlineCalleeIRForReplay(Module &M,
+                                               StringRef InlineCalleeIRPath,
+                                               uintptr_t CalleeMethod);
+static void clearInlineCalleeReplayState();
+
+#ifndef NDEBUG
+static void assertNoNonEntryAlloca(const Function &F) {
+  const BasicBlock &Entry = F.getEntryBlock();
+  for (const BasicBlock &BB : F) {
+    if (&BB == &Entry)
+      continue;
+    for (const Instruction &I : BB)
+      assert(!isa<AllocaInst>(&I) &&
+             "JeandleInliner: non-entry alloca remains after inlining");
+  }
+}
+#endif
+
 // Returns the depth of the call site represented by this inline scope chain.
 // Example: A calls B (depth 0), B calls C (depth 1), C calls D (depth 2).
-static int getInlineScopeDepth(
+[[maybe_unused]] static int getInlineScopeDepth(
     int InlineScopeID,
     const SmallVectorImpl<std::pair<Function *, int>> &InlineScopes) {
   int Depth = 0;
@@ -406,8 +464,8 @@ runInlineRound(Module &M, ModuleAnalysisManager &MAM, bool InlineAccessorsOnly,
       continue;
     }
 
-    bool IsOkToInline = VC->IsOkToInline(InlineScopeID, BCI,
-                                         (uintptr_t)Callee->getName().data());
+    uintptr_t CalleeMethod = getJavaMethodPointer(*Callee);
+    bool IsOkToInline = VC->IsOkToInline(InlineScopeID, BCI, CalleeMethod);
 
     if (!IsOkToInline) {
       logInlineEvent("no-inline", ScopeCaller, BCI, Callee, InlineScopeID,
@@ -418,13 +476,13 @@ runInlineRound(Module &M, ModuleAnalysisManager &MAM, bool InlineAccessorsOnly,
     if (Callee->isDeclaration()) {
       logInlineEvent("request-ir", ScopeCaller, BCI, Callee, InlineScopeID,
                      ThreadID, InlineScopes);
-      bool GotCalleeIR =
-          VC->GetInlineCalleeIR((uintptr_t)Callee->getName().data());
+      bool GotCalleeIR = VC->GetInlineCalleeIR(CalleeMethod);
       if (!GotCalleeIR) {
         logInlineEvent("missing-ir", ScopeCaller, BCI, Callee, InlineScopeID,
                        ThreadID, InlineScopes);
         continue;
       }
+      Changed = true;
       if (Callee->isDeclaration()) {
         logInlineEvent("missing-def", ScopeCaller, BCI, Callee, InlineScopeID,
                        ThreadID, InlineScopes);
@@ -458,8 +516,13 @@ runInlineRound(Module &M, ModuleAnalysisManager &MAM, bool InlineAccessorsOnly,
                         << "\n");
       continue;
     } else {
-      bool Recorded = VC->RecordInlineSuccess(
-          InlineScopeID, BCI, (uintptr_t)Callee->getName().data());
+#ifndef NDEBUG
+      // The JVM frontend guarantees that callee allocas are static allocas, so
+      // InlineFunction should hoist them into the caller entry block. Recheck
+      // that invariant in debug builds.
+      assertNoNonEntryAlloca(*Caller);
+#endif
+      bool Recorded = VC->RecordInlineSuccess(InlineScopeID, BCI, CalleeMethod);
       if (!Recorded) {
         logInlineEvent("record-fail", ScopeCaller, BCI, Callee, InlineScopeID,
                        ThreadID, InlineScopes);
@@ -560,6 +623,15 @@ runPGORefinement(Module &, ModuleAnalysisManager &) {
 
 PreservedAnalyses JeandleInlineDriver::run(Module &M,
                                            ModuleAnalysisManager &MAM) {
+  jeandle::registerInlineCalleeIRReplayMaterializer(
+      &materializeInlineCalleeIRForReplay);
+  // ReplayM is parsed into M's LLVMContext, so context-uniqued constants may
+  // share use-lists with M. Keep the replay state scoped to this driver run so
+  // later passes cannot leave cross-module uses in thread-local replay state.
+  struct ClearReplayStateAtExit {
+    ~ClearReplayStateAtExit() { clearInlineCalleeReplayState(); }
+  } ClearReplayState;
+  jeandle::VMCallbackReplayModuleScope ReplayModuleScope(M);
   SmallVector<std::pair<Function *, int>, 16> InlineScopes;
   bool Changed = false;
 
@@ -611,6 +683,13 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   if (RootFunction)
     Changed |= eraseInlineScopeIDs(*RootFunction);
 
+  // Notify the VM before available_externally callee bodies are removed. The
+  // JVM uses this point to snapshot a replay side module containing the IR
+  // materialized through GetInlineCalleeIR during this inline driver run.
+  const jeandle::VMCallbacks *VC = jeandle::getVMCallbacks();
+  if (VC && VC->RecordInliningComplete && !VC->RecordInliningComplete())
+    LLVM_DEBUG(dbgs() << "JeandleInliner: RecordInliningComplete failed\n");
+
   // Callee IR requested from the JVM is available_externally: it is useful for
   // optimization, but should not remain as a definition after the inline driver
   // is done. If such a method still has uses, delete only its body so existing
@@ -621,3 +700,349 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
     return PreservedAnalyses::none();
   return getInlineRoundPreservedAnalyses(Changed);
 }
+
+/* ------------- Inline callee replay support begin ------------- */
+
+struct InlineCalleeIRReplayState {
+  std::unique_ptr<Module> ReplayModule;
+  DenseMap<uintptr_t, Function *> Callees;
+  ValueToValueMapTy VMap;
+  Module *DestModule = nullptr;
+  std::string ReplayPath;
+};
+
+static thread_local InlineCalleeIRReplayState InlineCalleeReplayState;
+
+static void clearInlineCalleeReplayState() {
+  InlineCalleeReplayState.VMap.clear();
+  InlineCalleeReplayState.Callees.clear();
+  InlineCalleeReplayState.ReplayModule.reset();
+  InlineCalleeReplayState.DestModule = nullptr;
+  InlineCalleeReplayState.ReplayPath.clear();
+}
+
+static std::string formatSMDiagnostic(const SMDiagnostic &Diag) {
+  std::string Message;
+  raw_string_ostream OS(Message);
+  Diag.print("JeandleInliner", OS);
+  return Message;
+}
+
+static void loadInlineCalleeReplayModule(Module &DestM, StringRef ReplayPath) {
+  if (InlineCalleeReplayState.ReplayModule &&
+      InlineCalleeReplayState.DestModule == &DestM &&
+      InlineCalleeReplayState.ReplayPath == ReplayPath)
+    return;
+
+  clearInlineCalleeReplayState();
+
+  SMDiagnostic Diag;
+  std::unique_ptr<Module> ReplayM =
+      parseIRFile(ReplayPath, Diag, DestM.getContext());
+  if (!ReplayM) {
+    std::string DiagMessage = formatSMDiagnostic(Diag);
+    report_fatal_error("JeandleInliner: cannot parse inline callee replay "
+                       "module '" +
+                       Twine(ReplayPath) + "': " + DiagMessage);
+  }
+
+#ifndef NDEBUG
+  if (!ReplayM->ifunc_empty())
+    report_fatal_error(
+        "JeandleInliner: inline callee replay module contains ifuncs");
+#endif
+
+  for (Function &F : *ReplayM) {
+    if (!isJeandleJavaMethod(F))
+      continue;
+
+    if (F.isDeclaration())
+      continue;
+
+    uintptr_t Method = getJavaMethodPointer(F);
+
+    auto [It, Inserted] =
+        InlineCalleeReplayState.Callees.try_emplace(Method, &F);
+    if (!Inserted && It->second->getName() != F.getName())
+      report_fatal_error("JeandleInliner: duplicate java method pointer " +
+                         Twine(static_cast<unsigned long long>(Method)) +
+                         " for inline callee replay functions '" +
+                         It->second->getName() + "' and '" + F.getName() + "'");
+  }
+
+  InlineCalleeReplayState.ReplayModule = std::move(ReplayM);
+  InlineCalleeReplayState.DestModule = &DestM;
+  InlineCalleeReplayState.ReplayPath = ReplayPath.str();
+}
+
+struct InlineCalleeReplayCloneWorklist {
+  SmallVector<std::pair<const GlobalVariable *, GlobalVariable *>, 8>
+      GlobalVariables;
+  SmallVector<std::pair<const GlobalAlias *, GlobalAlias *>, 4> Aliases;
+};
+
+static void verifyReplayGlobalObjectHasNoComdat(const GlobalObject &Src) {
+  if (!Src.getComdat())
+    return;
+
+  report_fatal_error("JeandleInliner: inline callee replay global object '" +
+                     Twine(Src.getName()) + "' unexpectedly has comdat");
+}
+
+[[noreturn]] static void
+reportInvalidReplayGlobalReference(const Function &SrcF, const GlobalValue &GV,
+                                   StringRef Reason) {
+  std::string Message;
+  raw_string_ostream OS(Message);
+
+  OS << "JeandleInliner: inline callee replay function '" << SrcF.getName()
+     << "' references global value ";
+  if (GV.hasName())
+    OS << "'" << GV.getName() << "'";
+  else
+    OS << "<unnamed>";
+  OS << ": " << Reason;
+
+  OS.flush();
+  report_fatal_error(StringRef(Message));
+}
+
+static void verifyReplayValueMapped(const Value *V, const Function &SrcF,
+                                    const ValueToValueMapTy &VMap,
+                                    SmallPtrSetImpl<const Value *> &Visited) {
+  V = V->stripPointerCasts();
+  if (const auto *GV = dyn_cast<GlobalValue>(V)) {
+    auto It = VMap.find(GV);
+    if (It == VMap.end() || !It->second)
+      reportInvalidReplayGlobalReference(
+          SrcF, *GV, "missing mapping in the destination module");
+    if (It->second->getType() != GV->getType())
+      reportInvalidReplayGlobalReference(
+          SrcF, *GV, "mismatched type in the destination module");
+    return;
+  }
+
+  const auto *C = dyn_cast<Constant>(V);
+  if (!C || !Visited.insert(C).second)
+    return;
+
+  for (const Use &Op : C->operands())
+    verifyReplayValueMapped(Op.get(), SrcF, VMap, Visited);
+}
+
+static void
+populateReplayValueDependencies(Module &DestM, const Value *V,
+                                ValueToValueMapTy &VMap,
+                                InlineCalleeReplayCloneWorklist &CloneWorklist,
+                                SmallPtrSetImpl<const Value *> &Visited);
+
+static void mapReplayGlobalValue(Module &DestM, const GlobalValue &SrcGV,
+                                 ValueToValueMapTy &VMap,
+                                 InlineCalleeReplayCloneWorklist &CloneWorklist,
+                                 SmallPtrSetImpl<const Value *> &Visited) {
+  if (VMap.count(&SrcGV))
+    return;
+
+  if (const auto *SrcGO = dyn_cast<GlobalObject>(&SrcGV))
+    verifyReplayGlobalObjectHasNoComdat(*SrcGO);
+
+  // ReplayM is a copy of an earlier complete DestM. For GlobalVariable,
+  // Function, and GlobalAlias values, a same-named value in DestM is therefore
+  // the canonical value to use. Clone only values that are actually referenced
+  // by the current callee and are absent from DestM.
+  if (GlobalValue *DstGV = DestM.getNamedValue(SrcGV.getName())) {
+    VMap[&SrcGV] = DstGV;
+    return;
+  }
+
+  if (const auto *SrcG = dyn_cast<GlobalVariable>(&SrcGV)) {
+    auto *NewGV = new GlobalVariable(
+        DestM, SrcG->getValueType(), SrcG->isConstant(), SrcG->getLinkage(),
+        /*Initializer=*/nullptr, SrcG->getName(),
+        /*InsertBefore=*/nullptr, SrcG->getThreadLocalMode(),
+        SrcG->getType()->getAddressSpace(), SrcG->isExternallyInitialized());
+    NewGV->copyAttributesFrom(SrcG);
+    VMap[SrcG] = NewGV;
+    CloneWorklist.GlobalVariables.push_back({SrcG, NewGV});
+    if (SrcG->hasInitializer())
+      populateReplayValueDependencies(DestM, SrcG->getInitializer(), VMap,
+                                      CloneWorklist, Visited);
+    return;
+  }
+
+  if (const auto *SrcF = dyn_cast<Function>(&SrcGV)) {
+    if (!SrcF->isDeclaration())
+      report_fatal_error("JeandleInliner: inline callee replay function '" +
+                         Twine(SrcF->getName()) +
+                         "' is missing in the destination module but has a "
+                         "definition");
+
+    Function *NewF = Function::Create(
+        cast<FunctionType>(SrcF->getValueType()), GlobalValue::ExternalLinkage,
+        SrcF->getAddressSpace(), SrcF->getName(), &DestM);
+    NewF->copyAttributesFrom(SrcF);
+    NewF->setPersonalityFn(nullptr);
+    VMap[SrcF] = NewF;
+    return;
+  }
+
+  if (const auto *SrcA = dyn_cast<GlobalAlias>(&SrcGV)) {
+    GlobalAlias *NewA =
+        GlobalAlias::create(SrcA->getValueType(), SrcA->getAddressSpace(),
+                            SrcA->getLinkage(), SrcA->getName(), &DestM);
+    NewA->copyAttributesFrom(SrcA);
+    VMap[SrcA] = NewA;
+    CloneWorklist.Aliases.push_back({SrcA, NewA});
+    if (const Constant *Aliasee = SrcA->getAliasee())
+      populateReplayValueDependencies(DestM, Aliasee, VMap, CloneWorklist,
+                                      Visited);
+    return;
+  }
+
+  report_fatal_error("JeandleInliner: unsupported inline callee replay global "
+                     "value kind for '" +
+                     Twine(SrcGV.getName()) + "'");
+}
+
+static void
+populateReplayValueDependencies(Module &DestM, const Value *V,
+                                ValueToValueMapTy &VMap,
+                                InlineCalleeReplayCloneWorklist &CloneWorklist,
+                                SmallPtrSetImpl<const Value *> &Visited) {
+  V = V->stripPointerCasts();
+  if (const auto *GV = dyn_cast<GlobalValue>(V)) {
+    mapReplayGlobalValue(DestM, *GV, VMap, CloneWorklist, Visited);
+    return;
+  }
+
+  const auto *C = dyn_cast<Constant>(V);
+  if (!C || !Visited.insert(C).second)
+    return;
+
+  for (const Use &Op : C->operands())
+    populateReplayValueDependencies(DestM, Op.get(), VMap, CloneWorklist,
+                                    Visited);
+}
+
+static void cloneReplayGlobalValueDefinitions(
+    ValueToValueMapTy &VMap, InlineCalleeReplayCloneWorklist &CloneWorklist) {
+  for (auto [SrcG, DstG] : CloneWorklist.GlobalVariables) {
+    if (SrcG->hasInitializer())
+      DstG->setInitializer(
+          cast<Constant>(MapValue(SrcG->getInitializer(), VMap)));
+  }
+
+  for (auto [SrcA, DstA] : CloneWorklist.Aliases) {
+    if (const Constant *Aliasee = SrcA->getAliasee())
+      DstA->setAliasee(cast<Constant>(MapValue(Aliasee, VMap)));
+  }
+}
+
+static void mapReplayPersonalityFunction(Module &DestM, const Function &SrcF,
+                                         ValueToValueMapTy &VMap) {
+  if (!SrcF.hasPersonalityFn())
+    report_fatal_error("JeandleInliner: inline callee replay function '" +
+                       Twine(SrcF.getName()) +
+                       "' is missing jeandle.personality");
+
+  Constant *SrcPersonality = SrcF.getPersonalityFn();
+  auto *SrcPersonalityGV =
+      dyn_cast<GlobalValue>(SrcPersonality->stripPointerCasts());
+  if (!SrcPersonalityGV || SrcPersonalityGV->getName() != "jeandle.personality")
+    report_fatal_error("JeandleInliner: unexpected inline callee replay "
+                       "personality function for '" +
+                       Twine(SrcF.getName()) + "'");
+
+  GlobalVariable *DstPersonality =
+      DestM.getGlobalVariable("jeandle.personality");
+  if (!DstPersonality)
+    report_fatal_error("JeandleInliner: missing destination "
+                       "jeandle.personality global");
+
+  VMap[SrcPersonality] = DstPersonality;
+}
+
+static void populateInlineCalleeReplayVMap(Module &DestM, const Function &SrcF,
+                                           Function &DstF,
+                                           ValueToValueMapTy &VMap) {
+  InlineCalleeReplayCloneWorklist CloneWorklist;
+  VMap[&SrcF] = &DstF;
+  verifyReplayGlobalObjectHasNoComdat(SrcF);
+
+  if (SrcF.arg_size() != DstF.arg_size())
+    report_fatal_error("JeandleInliner: inline callee replay function '" +
+                       Twine(SrcF.getName()) +
+                       "' has an argument count mismatch");
+
+  for (auto [SrcArg, DstArg] : zip(SrcF.args(), DstF.args()))
+    VMap[&SrcArg] = &DstArg;
+
+  mapReplayPersonalityFunction(DestM, SrcF, VMap);
+
+  if (SrcF.hasPrefixData())
+    report_fatal_error("JeandleInliner: inline callee replay function '" +
+                       Twine(SrcF.getName()) +
+                       "' unexpectedly has prefix data");
+  if (SrcF.hasPrologueData())
+    report_fatal_error("JeandleInliner: inline callee replay function '" +
+                       Twine(SrcF.getName()) +
+                       "' unexpectedly has prologue data");
+
+  SmallPtrSet<const Value *, 16> DependencyVisited;
+  for (const Instruction &I : instructions(SrcF)) {
+    for (const Use &Op : I.operands())
+      populateReplayValueDependencies(DestM, Op.get(), VMap, CloneWorklist,
+                                      DependencyVisited);
+  }
+
+  cloneReplayGlobalValueDefinitions(VMap, CloneWorklist);
+
+  SmallPtrSet<const Value *, 16> Visited;
+  for (const Instruction &I : instructions(SrcF)) {
+    for (const Use &Op : I.operands())
+      verifyReplayValueMapped(Op.get(), SrcF, VMap, Visited);
+  }
+}
+
+static void cloneInlineCalleeForReplay(Module &DestM, const Function &SrcF) {
+  Function *DstF = DestM.getFunction(SrcF.getName());
+  if (!DstF)
+    report_fatal_error("JeandleInliner: inline callee replay function '" +
+                       Twine(SrcF.getName()) +
+                       "' has no declaration in the destination module");
+
+  if (!DstF->isDeclaration())
+    return;
+
+  if (DstF->getFunctionType() != SrcF.getFunctionType())
+    report_fatal_error("JeandleInliner: inline callee replay function '" +
+                       Twine(SrcF.getName()) +
+                       "' has a mismatched function type");
+
+  ValueToValueMapTy &VMap = InlineCalleeReplayState.VMap;
+  populateInlineCalleeReplayVMap(DestM, SrcF, *DstF, VMap);
+
+  SmallVector<ReturnInst *, 8> Returns;
+  CloneFunctionInto(DstF, &SrcF, VMap, CloneFunctionChangeType::DifferentModule,
+                    Returns);
+  DstF->setLinkage(GlobalValue::AvailableExternallyLinkage);
+}
+
+static void materializeInlineCalleeIRForReplay(Module &M,
+                                               StringRef InlineCalleeIRPath,
+                                               uintptr_t CalleeMethod) {
+  loadInlineCalleeReplayModule(M, InlineCalleeIRPath);
+
+  // This hook is reached only when GetInlineCalleeIR replay returns true, so
+  // the replay module must contain the requested callee IR definition.
+  auto It = InlineCalleeReplayState.Callees.find(CalleeMethod);
+  if (It == InlineCalleeReplayState.Callees.end())
+    report_fatal_error("JeandleInliner: missing callee method " +
+                       Twine(static_cast<unsigned long long>(CalleeMethod)) +
+                       " in inline callee replay module '" +
+                       InlineCalleeIRPath + "'");
+
+  cloneInlineCalleeForReplay(M, *It->second);
+}
+
+/* -------------- Inline callee replay support end -------------- */

@@ -33,12 +33,17 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
 
 #include <cstdint>
 #include <initializer_list>
+
+namespace llvm {
+class Module;
+} // namespace llvm
 
 namespace llvm::jeandle {
 
@@ -184,8 +189,36 @@ inline SmallVector<int64_t, 4> encodeArgs(Ts... Args) {
 /// Entries are looked up by (CallbackKind, Args) key during replay.
 /// Duplicate entries with the same key and result are silently accepted;
 /// conflicting duplicates (same key, different result) produce an error.
+/// InlineCalleeIRPath is used to replay GetInlineCalleeIR side effects.
 /// Returns Error::success() on success, or an error on failure.
-Error loadAndRegisterVMCallbackLog(StringRef FilePath);
+Error loadAndRegisterVMCallbackLog(StringRef FilePath,
+                                   StringRef InlineCalleeIRPath);
+
+using InlineCalleeIRReplayMaterializerFn =
+    void (*)(Module &M, StringRef InlineCalleeIRPath, uintptr_t CalleeMethod);
+
+/// Register the materializer used by GetInlineCalleeIR replay. The VM callback
+/// log layer owns the replay decision/result, while the Jeandle inliner owns
+/// the actual IR parsing/linking because it has the destination module and the
+/// right component dependencies.
+void registerInlineCalleeIRReplayMaterializer(
+    InlineCalleeIRReplayMaterializerFn Materializer);
+
+/// Sets the current destination module while replay callbacks are executing.
+/// GetInlineCalleeIR replay uses this to materialize callee IR from the
+/// companion *_inline_callees.ll replay module into the module being optimized.
+class VMCallbackReplayModuleScope {
+public:
+  explicit VMCallbackReplayModuleScope(Module &M);
+  ~VMCallbackReplayModuleScope();
+
+  VMCallbackReplayModuleScope(const VMCallbackReplayModuleScope &) = delete;
+  VMCallbackReplayModuleScope &
+  operator=(const VMCallbackReplayModuleScope &) = delete;
+
+private:
+  Module *Previous = nullptr;
+};
 
 /// Install recording trampolines over the currently registered VM callbacks.
 /// Must be called after registerVMCallbacks(). The trampolines delegate to

@@ -1,0 +1,7 @@
+IsOkToInline -1 13 105 = true
+IsOkToInline -1 17 106 = true
+GetInlineCalleeIR 105 = true
+GetInlineCalleeIR 106 = true
+RecordInlineSuccess -1 13 105 = true
+RecordInlineSuccess -1 17 106 = true
+RecordInliningComplete = true

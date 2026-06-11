@@ -300,9 +300,27 @@ static cl::opt<std::string>
                          cl::desc("Load a VM callback log for Jeandle passes"),
                          cl::value_desc("filename"));
 
+static cl::opt<std::string> JeandleInlineCalleeIR(
+    "jeandle-inline-callee-ir",
+    cl::desc("Load inline callee IR for Jeandle VM callback replay. If unset, "
+             "defaults to the *_inline_callees.ll file next to "
+             "-jeandle-vm-callback-log"),
+    cl::value_desc("filename"));
+
 //===----------------------------------------------------------------------===//
 // CodeGen-related helper functions.
 //
+
+static std::optional<std::string>
+getDefaultJeandleInlineCalleeIRPath(StringRef CallbackLog) {
+  if (!CallbackLog.ends_with(".cblog"))
+    return std::nullopt;
+
+  std::string Path = CallbackLog.str();
+  Path.resize(Path.size() - StringRef(".cblog").size());
+  Path += "_inline_callees.ll";
+  return Path;
+}
 
 static CodeGenOptLevel GetCodeGenOptLevel() {
   return static_cast<CodeGenOptLevel>(unsigned(CodeGenOptLevelCL));
@@ -741,8 +759,25 @@ optMain(int argc, char **argv,
 
     // Load VM callback log for Jeandle passes if specified.
     if (!JeandleVMCallbackLog.empty()) {
-      if (Error Err =
-              jeandle::loadAndRegisterVMCallbackLog(JeandleVMCallbackLog)) {
+      std::string InlineCalleeIRPath = JeandleInlineCalleeIR;
+      if (InlineCalleeIRPath.empty()) {
+        std::optional<std::string> DefaultInlineCalleeIRPath =
+            getDefaultJeandleInlineCalleeIRPath(JeandleVMCallbackLog);
+        if (!DefaultInlineCalleeIRPath) {
+          errs() << argv[0] << ": error loading inline callee IR replay "
+                 << "module: -jeandle-vm-callback-log must end with .cblog "
+                 << "when -jeandle-inline-callee-ir is not specified\n";
+          return 1;
+        }
+        InlineCalleeIRPath = *DefaultInlineCalleeIRPath;
+      }
+      if (!sys::fs::exists(InlineCalleeIRPath)) {
+        errs() << argv[0] << ": error loading inline callee IR replay module: "
+               << InlineCalleeIRPath << " does not exist\n";
+        return 1;
+      }
+      if (Error Err = jeandle::loadAndRegisterVMCallbackLog(
+              JeandleVMCallbackLog, InlineCalleeIRPath)) {
         errs() << argv[0] << ": error loading VM callback log: "
                << toString(std::move(Err)) << "\n";
         return 1;
