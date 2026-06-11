@@ -132,14 +132,15 @@ int StatepointOpers::getFirstGCPtrIdx() {
 }
 
 unsigned StatepointOpers::getGCPointerMap(
-    SmallVectorImpl<std::pair<unsigned, unsigned>> &GCMap) {
+    SmallVectorImpl<GCPointerMapEntry> &GCMap) {
   unsigned CurIdx = getNumGcMapEntriesIdx();
   unsigned GCMapSize = getConstMetaVal(*MI, CurIdx - 1);
   CurIdx++;
   for (unsigned N = 0; N < GCMapSize; ++N) {
     unsigned B = MI->getOperand(CurIdx++).getImm();
     unsigned D = MI->getOperand(CurIdx++).getImm();
-    GCMap.push_back(std::make_pair(B, D));
+    bool IsNarrowOop = MI->getOperand(CurIdx++).getImm() != 0;
+    GCMap.push_back({B, D, IsNarrowOop});
   }
 
   return GCMapSize;
@@ -449,22 +450,24 @@ void StackMaps::parseStatepointOpers(const MachineInstr &MI,
       GCPtrIdx = StackMaps::getNextMetaArgIdx(&MI, GCPtrIdx);
     }
 
-    SmallVector<std::pair<unsigned, unsigned>, 8> GCPairs;
+    SmallVector<StatepointOpers::GCPointerMapEntry, 8> GCPairs;
     unsigned NumGCPairs = SO.getGCPointerMap(GCPairs);
     (void)NumGCPairs;
     LLVM_DEBUG(dbgs() << "NumGCPairs = " << NumGCPairs << "\n");
 
     auto MOB = MI.operands_begin();
     for (auto &P : GCPairs) {
-      assert(P.first < GCPtrIndices.size() && "base pointer index not found");
-      assert(P.second < GCPtrIndices.size() &&
+      assert(P.Base < GCPtrIndices.size() && "base pointer index not found");
+      assert(P.Derived < GCPtrIndices.size() &&
              "derived pointer index not found");
-      unsigned BaseIdx = GCPtrIndices[P.first];
-      unsigned DerivedIdx = GCPtrIndices[P.second];
+      unsigned BaseIdx = GCPtrIndices[P.Base];
+      unsigned DerivedIdx = GCPtrIndices[P.Derived];
       LLVM_DEBUG(dbgs() << "Base : " << BaseIdx << " Derived : " << DerivedIdx
                         << "\n");
       (void)parseOperand(MOB + BaseIdx, MOE, Locations, LiveOuts);
       (void)parseOperand(MOB + DerivedIdx, MOE, Locations, LiveOuts);
+      Locations.emplace_back(Location::Constant, sizeof(int64_t), 0,
+                             P.IsNarrowOop ? 1 : 0);
     }
 
     MOI = MOB + GCPtrIdx;

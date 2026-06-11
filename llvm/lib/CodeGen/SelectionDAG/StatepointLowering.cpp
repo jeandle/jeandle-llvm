@@ -37,6 +37,7 @@
 #include "llvm/IR/GCStrategy.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Type.h"
@@ -689,7 +690,8 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   pushStackMapConstant(Ops, Builder, Allocas.size());
   Ops.append(Allocas.begin(), Allocas.end());
 
-  // Now construct GC base/derived map;
+  // Now construct GC base/derived map. Each entry also records whether the
+  // derived pointer is a narrowoop using the original IR pointer address space.
   pushStackMapConstant(Ops, Builder, SI.Ptrs.size());
   SDLoc L = Builder.getCurSDLoc();
   for (unsigned i = 0; i < SI.Ptrs.size(); ++i) {
@@ -701,6 +703,13 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
     assert(GCPtrIndexMap.count(Derived) && "derived not found in index map");
     Ops.push_back(
         Builder.DAG.getTargetConstant(GCPtrIndexMap[Derived], L, MVT::i64));
+
+    Type *DerivedTy = SI.Ptrs[i]->getType()->getScalarType();
+    auto *DerivedPtrTy = cast<PointerType>(DerivedTy);
+    bool IsNarrowOop =
+        DerivedPtrTy->getAddressSpace() == jeandle::AddrSpace::NarrowOopAddrSpace;
+    Ops.push_back(
+        Builder.DAG.getTargetConstant(IsNarrowOop ? 1 : 0, L, MVT::i64));
   }
 }
 

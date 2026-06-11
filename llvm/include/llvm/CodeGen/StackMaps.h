@@ -151,8 +151,8 @@ public:
 ///   <StackMaps::ConstantOp>, <num deopt args>, [deopt args...],
 ///   <StackMaps::ConstantOp>, <num gc pointer args>, [gc pointer args...],
 ///   <StackMaps::ConstantOp>, <num gc allocas>, [gc allocas args...],
-///   <StackMaps::ConstantOp>, <num  entries in gc map>, [base/derived pairs]
-///   base/derived pairs in gc map are logical indices into <gc pointer args>
+///   <StackMaps::ConstantOp>, <num  entries in gc map>, [base/derived/narrow flag triples]
+///   base/derived entries in gc map are logical indices into <gc pointer args>
 ///   section.
 ///   All gc pointers assigned to VRegs produce new value (in form of MI Def
 ///   operand) and are tied to it.
@@ -238,11 +238,17 @@ public:
   /// Get index of first GC pointer operand of -1 if there are none.
   LLVM_ABI int getFirstGCPtrIdx();
 
-  /// Get vector of base/derived pairs from statepoint.
-  /// Elements are indices into GC Pointer operand list (logical).
+  struct GCPointerMapEntry {
+    unsigned Base;
+    unsigned Derived;
+    bool IsNarrowOop;
+  };
+
+  /// Get vector of base/derived/narrow flag entries from statepoint.
+  /// Base/derived elements are indices into GC Pointer operand list (logical).
   /// Returns number of elements in GCMap.
   LLVM_ABI unsigned
-  getGCPointerMap(SmallVectorImpl<std::pair<unsigned, unsigned>> &GCMap);
+  getGCPointerMap(SmallVectorImpl<GCPointerMapEntry> &GCMap);
 
   /// Return true if Reg is used only in operands which can be folded to
   /// stack usage.
