@@ -209,13 +209,13 @@ public:
   /// optimizations and code generation. This hook provides a target specific
   /// check on the validity of this DataLayout.
   bool isCompatibleDataLayout(const DataLayout &Candidate) const {
-    return DL == Candidate;
-  }
+    if (DL == Candidate)
+      return true;
 
-  static std::string jeandleExtendDataLayout(StringRef DataLayoutString) {
-    std::string DL = DataLayoutString.str();
-    DL += "-p3:32:32:32";  // 3 = NarrowOopAddrSpace
-    return DL;
+    std::string JeandleLayout = DL.getStringRepresentation();
+    if (JeandleLayout.find("-p3:") == std::string::npos)
+      JeandleLayout += "-p3:32:32:32"; // 3 = NarrowOopAddrSpace
+    return DataLayout(JeandleLayout) == Candidate;
   }
 
   /// Get the pointer size for this target.
