@@ -198,12 +198,12 @@ struct ReplayData {
 };
 
 static std::unique_ptr<ReplayData> LogData;
-static thread_local Module *ActiveReplayModule = nullptr;
+static thread_local Module *CurrentReplayDestModule = nullptr;
 static InlineCalleeIRReplayMaterializerFn InlineCalleeIRReplayMaterializer =
     nullptr;
 
 static void materializeInlineCalleeIR(uintptr_t CalleeMethod) {
-  if (!ActiveReplayModule)
+  if (!CurrentReplayDestModule)
     report_fatal_error("VMCallbackLog GetInlineCalleeIR replay has no active "
                        "destination module");
 
@@ -214,7 +214,7 @@ static void materializeInlineCalleeIR(uintptr_t CalleeMethod) {
     report_fatal_error("VMCallbackLog GetInlineCalleeIR replay has no inline "
                        "callee IR materializer");
 
-  InlineCalleeIRReplayMaterializer(*ActiveReplayModule,
+  InlineCalleeIRReplayMaterializer(*CurrentReplayDestModule,
                                    LogData->InlineCalleeIRPath, CalleeMethod);
 }
 
@@ -274,12 +274,13 @@ ALL_JEANDLE_VM_CALLBACKS(DEF_REPLAY_CB)
 
 llvm::jeandle::VMCallbackReplayModuleScope::VMCallbackReplayModuleScope(
     Module &M) {
-  Previous = ActiveReplayModule;
-  ActiveReplayModule = &M;
+  assert(!CurrentReplayDestModule &&
+         "Nested VMCallbackReplayModuleScope is not supported");
+  CurrentReplayDestModule = &M;
 }
 
 llvm::jeandle::VMCallbackReplayModuleScope::~VMCallbackReplayModuleScope() {
-  ActiveReplayModule = Previous;
+  CurrentReplayDestModule = nullptr;
 }
 
 void llvm::jeandle::registerInlineCalleeIRReplayMaterializer(

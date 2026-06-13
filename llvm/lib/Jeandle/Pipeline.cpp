@@ -41,7 +41,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
                                                  OptimizationLevel level,
                                                  PipelineOptions Options) {
   ModulePassManager PM;
-  // JeandleInlineDriver owns the inline-specific loop. Future CHA/PGO
+  // JeandleInlineDriver owns the inline-specific loop. Devirtualization
   // refinement between inline rounds should be wired inside the driver so
   // inline-scope state can be preserved across IR rewrites.
   switch (Options.Inlining) {

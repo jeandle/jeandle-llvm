@@ -10,7 +10,7 @@
 //
 // This file defines the JeandleInlineDriver and JeandleInliner passes for
 // Jeandle JVM JIT. JeandleInlineDriver owns the inline pipeline shape and is
-// the extension point for future CHA/PGO refinement between inline rounds.
+// the extension point for devirtualization refinement between inline rounds.
 // JeandleInliner handles the current inline step: it inlines Java method calls
 // where the callee may initially be a declaration, asks
 // VMCallbacks::IsOkToInline for policy, and uses
@@ -18,9 +18,10 @@
 //
 // The pass supports nested/transitive inlining: after a callee is inlined,
 // newly exposed Java method call sites are considered. Inline policy, including
-// any depth limit, is decided by the VM callbacks, while LLVM keeps a
-// structural guard that rejects recursive cycles in the active inline scope
-// chain. In accessor-only mode, candidate callees must also carry the
+// any depth limit or non-root recursion decision, is decided by the VM
+// callbacks. LLVM only rejects attempts to inline the root function as a
+// callee, because root/caller IR and inlinee IR model unwind differently. In
+// accessor-only mode, candidate callees must also carry the
 // llvm::jeandle::Attribute::JavaAccessorMethod function attribute.
 //
 //===----------------------------------------------------------------------===//
@@ -28,9 +29,24 @@
 #ifndef LLVM_TRANSFORMS_JEANDLE_JEANDLEINLINER_H
 #define LLVM_TRANSFORMS_JEANDLE_JEANDLEINLINER_H
 
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/PassManager.h"
 
+#include <cstdint>
+#include <utility>
+
 namespace llvm {
+
+class Function;
+
+using JeandleInlineScope = std::pair<Function *, int>;
+
+struct InlineRoundResult {
+  PreservedAnalyses PA = PreservedAnalyses::all();
+  bool Changed = false;
+  bool ExposedNewCallSites = false;
+};
 
 class JeandleInlineDriver : public PassInfoMixin<JeandleInlineDriver> {
 public:
@@ -48,11 +64,20 @@ public:
   explicit JeandleInliner(bool InlineAccessorsOnly = false)
       : InlineAccessorsOnly(InlineAccessorsOnly) {}
 
+  InlineRoundResult
+  runInlineRound(Module &M, ModuleAnalysisManager &MAM,
+                 SmallVectorImpl<JeandleInlineScope> &InlineScopes);
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
 
 private:
   bool InlineAccessorsOnly;
 };
+
+namespace jeandle::detail {
+void clearInlineCalleeReplayState();
+void materializeInlineCalleeIRForReplay(Module &M, StringRef InlineCalleeIRPath,
+                                        uintptr_t CalleeMethod);
+} // namespace jeandle::detail
 
 } // namespace llvm
 

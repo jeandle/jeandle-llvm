@@ -215,9 +215,6 @@ public:
   VMCallbackReplayModuleScope(const VMCallbackReplayModuleScope &) = delete;
   VMCallbackReplayModuleScope &
   operator=(const VMCallbackReplayModuleScope &) = delete;
-
-private:
-  Module *Previous = nullptr;
 };
 
 /// Install recording trampolines over the currently registered VM callbacks.

@@ -99,7 +99,9 @@ MODULE_PASS("inliner-ml-advisor-release",
 MODULE_PASS("inliner-wrapper", ModuleInlinerWrapperPass())
 MODULE_PASS("inliner-wrapper-no-mandatory-first",
             ModuleInlinerWrapperPass(getInlineParams(), false))
+MODULE_PASS("jeandle-devirtualization", JeandleDevirtualization())
 MODULE_PASS("jeandle-inline-driver", JeandleInlineDriver())
+MODULE_PASS("jeandle-inliner", JeandleInliner())
 MODULE_PASS("insert-gcov-profiling", GCOVProfilerPass())
 MODULE_PASS("instrprof", InstrProfilingLoweringPass())
 MODULE_PASS("ctx-instr-lower", PGOCtxProfLoweringPass())

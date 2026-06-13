@@ -1,6 +1,8 @@
 add_llvm_component_library(LLVMJeandleTransforms
   InsertGCBarriers.cpp
   JavaOperationLower.cpp
+  JeandleDevirtualization.cpp
+  JeandleInlineDriver.cpp
   JeandleInliner.cpp
   TLSPointerRewrite.cpp
   TypeCheckElimination.cpp
@@ -12,4 +14,5 @@ add_llvm_component_library(LLVMJeandleTransforms
   Analysis
   Core
   IRReader
+  TransformUtils
   )
