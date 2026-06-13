@@ -19,6 +19,7 @@
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCObjectFileInfo.h"
@@ -43,6 +44,15 @@ static cl::opt<int> StackMapVersion(
     cl::desc("Specify the stackmap encoding version (default = 3)"));
 
 const char *StackMaps::WSMP = "Stack Maps: ";
+
+static bool useJeandleNarrowOopStackMaps(const MachineInstr &MI) {
+  const MachineFunction *MF = MI.getMF();
+  if (!MF)
+    return false;
+
+  return MF->getFunction().hasFnAttribute(
+      jeandle::Attribute::UseCompressedOops);
+}
 
 static uint64_t getConstMetaVal(const MachineInstr &MI, unsigned Idx) {
   assert(MI.getOperand(Idx).isImm() &&
@@ -136,10 +146,13 @@ unsigned StatepointOpers::getGCPointerMap(
   unsigned CurIdx = getNumGcMapEntriesIdx();
   unsigned GCMapSize = getConstMetaVal(*MI, CurIdx - 1);
   CurIdx++;
+  bool UseNarrowOopStackMaps = useJeandleNarrowOopStackMaps(*MI);
   for (unsigned N = 0; N < GCMapSize; ++N) {
     unsigned B = MI->getOperand(CurIdx++).getImm();
     unsigned D = MI->getOperand(CurIdx++).getImm();
-    bool IsNarrowOop = MI->getOperand(CurIdx++).getImm() != 0;
+    bool IsNarrowOop = false;
+    if (UseNarrowOopStackMaps)
+      IsNarrowOop = MI->getOperand(CurIdx++).getImm() != 0;
     GCMap.push_back({B, D, IsNarrowOop});
   }
 
@@ -454,6 +467,7 @@ void StackMaps::parseStatepointOpers(const MachineInstr &MI,
     unsigned NumGCPairs = SO.getGCPointerMap(GCPairs);
     (void)NumGCPairs;
     LLVM_DEBUG(dbgs() << "NumGCPairs = " << NumGCPairs << "\n");
+    bool UseNarrowOopStackMaps = useJeandleNarrowOopStackMaps(MI);
 
     auto MOB = MI.operands_begin();
     for (auto &P : GCPairs) {
@@ -466,8 +480,9 @@ void StackMaps::parseStatepointOpers(const MachineInstr &MI,
                         << "\n");
       (void)parseOperand(MOB + BaseIdx, MOE, Locations, LiveOuts);
       (void)parseOperand(MOB + DerivedIdx, MOE, Locations, LiveOuts);
-      Locations.emplace_back(Location::Constant, sizeof(int64_t), 0,
-                             P.IsNarrowOop ? 1 : 0);
+      if (UseNarrowOopStackMaps)
+        Locations.emplace_back(Location::Constant, sizeof(int64_t), 0,
+                               P.IsNarrowOop ? 1 : 0);
     }
 
     MOI = MOB + GCPtrIdx;
