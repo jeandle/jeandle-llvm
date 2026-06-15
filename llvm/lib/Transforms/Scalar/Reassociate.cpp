@@ -247,6 +247,34 @@ OpClassifier::OpClassifier(const LoopInfo *LI, const Instruction *I)
     : EnclosingLoop(LI && I ? LI->getLoopFor(I->getParent()) : nullptr),
       RootI(I) {}
 
+// Walk backward from `V` through in-loop operands (bounded, not crossing phis)
+// to test whether `RootI` reaches it -- i.e. whether the reassociated root feeds
+// `V`, possibly through intermediate ops such as a clamp or mask. This lets a
+// loop-carried recurrence whose phi closes through such ops be recognised, not
+// only the phi that closes directly on the root.
+static bool rootReaches(const Value *V, const Instruction *RootI,
+                        const Loop *L) {
+  SmallVector<const Value *, 8> Worklist;
+  Worklist.push_back(V);
+  SmallPtrSet<const Value *, 16> Visited;
+  unsigned Steps = 0;
+  while (!Worklist.empty()) {
+    const Value *Cur = Worklist.pop_back_val();
+    if (Cur == RootI)
+      return true;
+    // Intermediate ops between the root and the backedge are few in practice;
+    // bound the walk so a pathological chain can't cost compile time.
+    if (!Visited.insert(Cur).second || ++Steps > 32)
+      continue;
+    const auto *I = dyn_cast<Instruction>(Cur);
+    if (!I || !L->contains(I->getParent()) || isa<PHINode>(I))
+      continue;
+    for (const Value *Op : I->operands())
+      Worklist.push_back(Op);
+  }
+  return false;
+}
+
 OpCategory OpClassifier::classify(const Value *V) const {
   if (isa<Constant>(V))
     return OpCategory::LoopInvariantOrConst;
@@ -254,15 +282,18 @@ OpCategory OpClassifier::classify(const Value *V) const {
     return OpCategory::LoopVariant;
 
   // The recurrence accumulator of *this* expression is the header phi whose
-  // in-loop incoming value is the root we are reassociating. Other header phis
-  // (e.g. induction variables, whose backedge value is a different chain) are
-  // ordinary loop-variant leaves and must not steal the outermost slot.
-  // contains() rather than getLoopLatch(), which is null for multi-latch loops.
+  // in-loop incoming value flows back from the root we are reassociating --
+  // directly, or through intermediate ops (a clamp, mask, etc.). Other header
+  // phis (e.g. induction variables, whose backedge is a different chain) do not
+  // reach the root and stay ordinary loop-variant leaves, so they don't steal
+  // the outermost slot. contains() rather than getLoopLatch(), which is null for
+  // multi-latch loops.
   if (const auto *Phi = dyn_cast<PHINode>(V))
     if (Phi->getParent() == EnclosingLoop->getHeader())
       for (BasicBlock *Pred : Phi->blocks())
         if (EnclosingLoop->contains(Pred) &&
-            Phi->getIncomingValueForBlock(Pred) == RootI)
+            rootReaches(Phi->getIncomingValueForBlock(Pred), RootI,
+                        EnclosingLoop))
           return OpCategory::LoopCarriedRecurrence;
 
   if (EnclosingLoop->isLoopInvariant(V))

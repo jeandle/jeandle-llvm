@@ -657,6 +657,43 @@ exit:
 }
 
 ; ---------------------------------------------------------------------------
+; Recurrence that closes through an intermediate op
+; ---------------------------------------------------------------------------
+; The phi's backedge value is not the reassociated add (%add2) directly but a
+; clamp of it (%clamped = %add2 & 255). The recurrence must still be recognised:
+; %s sorts to the outermost RHS of the add chain. Matching the phi backedge
+; against the root exactly would miss this; the classifier walks back from the
+; backedge through in-loop ops to find the root.
+define i32 @indirect_recurrence_and_clamp(i32 %n, ptr %arr) {
+; CHECK-LABEL: @indirect_recurrence_and_clamp
+; CHECK:         %s = phi i32 [ 0, %entry ], [ [[CLAMPED:%.*]], %loop ]
+; CHECK:         [[M:%.*]] = mul i32 %v, 7
+; CHECK:         [[R:%.*]] = lshr i32 %v, 2
+; CHECK:         [[ADD1:%.*]] = add i32 [[M]], [[R]]
+; CHECK:         [[ADD2:%.*]] = add i32 [[ADD1]], %s
+; CHECK:         [[CLAMPED]] = and i32 [[ADD2]], 255
+entry:
+  br label %loop
+
+loop:
+  %s = phi i32 [ 0, %entry ], [ %clamped, %loop ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
+  %p = getelementptr i32, ptr %arr, i32 %i
+  %v = load i32, ptr %p, align 4
+  %m = mul i32 %v, 7
+  %r = lshr i32 %v, 2
+  %add1 = add i32 %m, %r
+  %add2 = add i32 %add1, %s
+  %clamped = and i32 %add2, 255
+  %i.next = add i32 %i, 1
+  %cmp = icmp slt i32 %i.next, %n
+  br i1 %cmp, label %loop, label %exit
+
+exit:
+  ret i32 %clamped
+}
+
+; ---------------------------------------------------------------------------
 ; CSE pair reordering must not override the recurrence placement
 ; ---------------------------------------------------------------------------
 ; `%s + %a` is the most popular pair (it also appears in the @use side chain),
@@ -690,4 +727,153 @@ loop:
 
 exit:
   ret i32 %result
+}
+
+; ---------------------------------------------------------------------------
+; CSE pair reordering vs a recurrence that closes through an intermediate op
+; ---------------------------------------------------------------------------
+; As cse_pair_keeps_recurrence_outermost (the %s + %a pair is popular), but %s
+; closes indirectly through %clamped = %result & 255. The CSE-pair skip keys on
+; the recurrence category, so it must still recognise the indirectly-closed
+; recurrence and leave %s at the outer RHS rather than pulling it into the pair.
+define i32 @cse_pair_indirect_recurrence(i32 %n, ptr %arr) {
+; CHECK-LABEL: @cse_pair_indirect_recurrence
+; CHECK:         %s = phi i32 [ 0, %entry ], [ %clamped, %loop ]
+; CHECK:         %result = add i32 %t1, %s
+; CHECK-NEXT:    %clamped = and i32 %result, 255
+entry:
+  br label %loop
+
+loop:
+  %s = phi i32 [ 0, %entry ], [ %clamped, %loop ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
+  %p = getelementptr i32, ptr %arr, i32 %i
+  %v = load i32, ptr %p, align 4
+  %a = mul i32 %v, 3
+  %b = mul i32 %v, 5
+  %b2 = lshr i32 %v, 2
+  %side1 = add i32 %s, %a
+  %side = add i32 %side1, %b
+  call void @use(i32 %side)
+  %t1 = add i32 %s, %a
+  %result = add i32 %t1, %b2
+  %clamped = and i32 %result, 255
+  %i.next = add i32 %i, 1
+  %cmp = icmp slt i32 %i.next, %n
+  br i1 %cmp, label %loop, label %exit
+
+exit:
+  ret i32 %clamped
+}
+
+; ---------------------------------------------------------------------------
+; Two recurrences feeding one expression
+; ---------------------------------------------------------------------------
+; %s closes directly on the root (%s <- %root) and %t closes through an
+; intermediate op (%t <- %root + 1). Both are leaves of the same add chain and
+; both genuinely carry the root around the loop, so both must be tagged as
+; recurrences and sort ahead of the loop-variant %body (which is pushed to the
+; innermost RHS). Matching the backedge against the root exactly would tag only
+; %s and sink %t in with %body, re-lengthening %t's carry.
+define i32 @two_recurrences_one_expression(i32 %n, ptr %arr) {
+; CHECK-LABEL: @two_recurrences_one_expression
+; CHECK:         %s = phi i32 [ 0, %entry ], [ [[ROOT:%.*]], %loop ]
+; CHECK:         %t = phi i32 [ 0, %entry ], [ [[TNEXT:%.*]], %loop ]
+; CHECK:         [[BODY:%.*]] = mul i32 %v, 7
+; CHECK:         [[A1:%.*]] = add i32 %s, [[BODY]]
+; CHECK:         [[ROOT]] = add i32 [[A1]], %t
+; CHECK:         [[TNEXT]] = add i32 [[ROOT]], 1
+entry:
+  br label %loop
+
+loop:
+  %s = phi i32 [ 0, %entry ], [ %root, %loop ]
+  %t = phi i32 [ 0, %entry ], [ %tnext, %loop ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
+  %p = getelementptr i32, ptr %arr, i32 %i
+  %v = load i32, ptr %p, align 4
+  %body = mul i32 %v, 7
+  %a1 = add i32 %s, %t
+  %root = add i32 %a1, %body
+  %tnext = add i32 %root, 1
+  %i.next = add i32 %i, 1
+  %cmp = icmp slt i32 %i.next, %n
+  br i1 %cmp, label %loop, label %exit
+
+exit:
+  ret i32 %root
+}
+
+; ---------------------------------------------------------------------------
+; Recurrence that closes through a chain of intermediate ops
+; ---------------------------------------------------------------------------
+; The backedge value is two ops removed from the root (%add2 -> and -> xor),
+; exercising more than a single hop of the backward walk. %s must still sort to
+; the outermost RHS of the add chain.
+define i32 @recurrence_through_two_ops(i32 %n, ptr %arr) {
+; CHECK-LABEL: @recurrence_through_two_ops
+; CHECK:         %s = phi i32 [ 0, %entry ], [ [[CLOSED:%.*]], %loop ]
+; CHECK:         [[M:%.*]] = mul i32 %v, 7
+; CHECK:         [[R:%.*]] = lshr i32 %v, 2
+; CHECK:         [[ADD1:%.*]] = add i32 [[M]], [[R]]
+; CHECK:         [[ADD2:%.*]] = add i32 [[ADD1]], %s
+; CHECK:         [[MASKED:%.*]] = and i32 [[ADD2]], 1023
+; CHECK:         [[CLOSED]] = xor i32 [[MASKED]], 32
+entry:
+  br label %loop
+
+loop:
+  %s = phi i32 [ 0, %entry ], [ %closed, %loop ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
+  %p = getelementptr i32, ptr %arr, i32 %i
+  %v = load i32, ptr %p, align 4
+  %m = mul i32 %v, 7
+  %r = lshr i32 %v, 2
+  %add1 = add i32 %m, %r
+  %add2 = add i32 %add1, %s
+  %masked = and i32 %add2, 1023
+  %closed = xor i32 %masked, 32
+  %i.next = add i32 %i, 1
+  %cmp = icmp slt i32 %i.next, %n
+  br i1 %cmp, label %loop, label %exit
+
+exit:
+  ret i32 %closed
+}
+
+; ---------------------------------------------------------------------------
+; A header phi that reaches the root only through another phi is not a recurrence
+; ---------------------------------------------------------------------------
+; %s is the accumulator (closes directly on %root). %p is a second header phi
+; that is also a leaf of %root's chain, but its backedge (%pnext = %s + 7) reaches
+; the root only by crossing the %s phi. The backward walk stops at phis, so %p is
+; NOT tagged: %s takes the outermost RHS and %p sorts with the loop-variant %body.
+; Removing the phi-stop would let %p reach %root and wrongly steal the outer slot.
+define i32 @backedge_through_phi_not_recurrence(i32 %n, ptr %arr) {
+; CHECK-LABEL: @backedge_through_phi_not_recurrence
+; CHECK:         %s = phi i32 [ 0, %entry ], [ [[ROOT:%.*]], %loop ]
+; CHECK:         %p = phi i32 [ 0, %entry ], [ [[PNEXT:%.*]], %loop ]
+; CHECK:         [[BODY:%.*]] = mul i32 %v, 7
+; CHECK:         [[T1:%.*]] = add i32 [[BODY]], %p
+; CHECK:         [[ROOT]] = add i32 [[T1]], %s
+; CHECK:         [[PNEXT]] = add i32 %s, 7
+entry:
+  br label %loop
+
+loop:
+  %s = phi i32 [ 0, %entry ], [ %root, %loop ]
+  %p = phi i32 [ 0, %entry ], [ %pnext, %loop ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
+  %q = getelementptr i32, ptr %arr, i32 %i
+  %v = load i32, ptr %q, align 4
+  %body = mul i32 %v, 7
+  %t1 = add i32 %s, %p
+  %root = add i32 %t1, %body
+  %pnext = add i32 %s, 7
+  %i.next = add i32 %i, 1
+  %cmp = icmp slt i32 %i.next, %n
+  br i1 %cmp, label %loop, label %exit
+
+exit:
+  ret i32 %root
 }

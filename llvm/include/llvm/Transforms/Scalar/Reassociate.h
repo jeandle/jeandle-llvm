@@ -86,9 +86,10 @@ public:
 
 private:
   const Loop *EnclosingLoop;
-  // Root of the expression tree being sorted. Only the header phi closed by
-  // this root is the chain's recurrence; other header phis (induction vars)
-  // are ordinary loop-variant leaves here.
+  // Root of the expression tree being sorted. A header phi is this chain's
+  // recurrence if its backedge value flows back from the root (directly or
+  // through intermediate ops); other header phis (e.g. induction vars, whose
+  // backedge is a different chain) are ordinary loop-variant leaves here.
   const Instruction *RootI;
 };
 
