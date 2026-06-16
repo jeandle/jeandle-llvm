@@ -248,10 +248,10 @@ OpClassifier::OpClassifier(const LoopInfo *LI, const Instruction *I)
       RootI(I) {}
 
 // Walk backward from `V` through in-loop operands (bounded, not crossing phis)
-// to test whether `RootI` reaches it -- i.e. whether the reassociated root feeds
-// `V`, possibly through intermediate ops such as a clamp or mask. This lets a
-// loop-carried recurrence whose phi closes through such ops be recognised, not
-// only the phi that closes directly on the root.
+// to test whether `RootI` reaches it -- i.e. whether the reassociated root
+// feeds `V`, possibly through intermediate ops such as a clamp or mask. This
+// lets a loop-carried recurrence whose phi closes through such ops be
+// recognised, not only the phi that closes directly on the root.
 static bool rootReaches(const Value *V, const Instruction *RootI,
                         const Loop *L) {
   SmallVector<const Value *, 8> Worklist;
@@ -286,8 +286,8 @@ OpCategory OpClassifier::classify(const Value *V) const {
   // directly, or through intermediate ops (a clamp, mask, etc.). Other header
   // phis (e.g. induction variables, whose backedge is a different chain) do not
   // reach the root and stay ordinary loop-variant leaves, so they don't steal
-  // the outermost slot. contains() rather than getLoopLatch(), which is null for
-  // multi-latch loops.
+  // the outermost slot. contains() rather than getLoopLatch(), which is null
+  // for multi-latch loops.
   if (const auto *Phi = dyn_cast<PHINode>(V))
     if (Phi->getParent() == EnclosingLoop->getHeader())
       for (BasicBlock *Pred : Phi->blocks())
