@@ -5,6 +5,7 @@ on:
     types: [ opened, synchronize, reopened, labeled, unlabeled ]
     branches:
       - 'main'
+      - 'performance'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref }}
