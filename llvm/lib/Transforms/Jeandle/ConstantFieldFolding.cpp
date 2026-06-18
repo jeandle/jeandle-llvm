@@ -45,7 +45,9 @@ namespace {
 
 using llvm::jeandle::getOopHandleId;
 using llvm::jeandle::HotspotBasicType;
+using llvm::jeandle::isNarrowOopType;
 using llvm::jeandle::isJavaOopType;
+using llvm::jeandle::isOopType;
 using llvm::jeandle::T_ARRAY;
 using llvm::jeandle::T_BOOLEAN;
 using llvm::jeandle::T_BYTE;
@@ -105,9 +107,18 @@ struct FieldLoadMatch {
   int Offset;
 };
 
+bool isDecodeHeapOopCall(User *U) {
+  auto *CB = dyn_cast<CallBase>(U);
+  if (!CB || !isOopType(CB->getType()))
+    return false;
+
+  Function *Callee = CB->getCalledFunction();
+  return Callee && Callee->getName() == "jeandle.decode_heap_oop";
+}
+
 // If `LI` is a load from an oop_handle_* global, return its id.
 std::optional<int> getOopHandleLoadId(LoadInst *LI) {
-  if (!LI || !isJavaOopType(LI->getType()))
+  if (!LI || !isOopType(LI->getType()))
     return std::nullopt;
   return getOopHandleId(LI->getPointerOperand());
 }
@@ -119,7 +130,7 @@ std::optional<int> getOopHandleLoadId(LoadInst *LI) {
 // Sources (loads from oop_handle_* globals) are handled separately as
 // initial seeds and are NOT forwarders.
 bool isForwarder(Instruction &I) {
-  if (!isJavaOopType(I.getType()))
+  if (!isOopType(I.getType()))
     return false;
   if (isa<PHINode>(&I) || isa<SelectInst>(&I) || isa<BitCastInst>(&I) ||
       isa<AddrSpaceCastInst>(&I) || isa<FreezeInst>(&I))
@@ -217,7 +228,7 @@ DenseMap<Value *, int> computeConstOops(Function &F) {
         States[&I] = ConstOopLattice::top();
         continue;
       }
-      if (isJavaOopType(I.getType())) {
+      if (isOopType(I.getType())) {
         States[&I] = ConstOopLattice::bottom();
         Worklist.push_back(&I);
       }
@@ -418,15 +429,43 @@ bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
     if (!isJavaOopType(LI->getType()))
       return false;
     int NewOopId = static_cast<int>(RawValue);
-    Value *NewValue = nullptr;
-    if (NewOopId < 0) {
-      NewValue = ConstantPointerNull::get(cast<PointerType>(LI->getType()));
-    } else {
-      NewValue = createConstOopLoad(M, Builder, NewOopId);
-      ++NumOopChains;
+    if (isOopType(LI->getType())) {
+      Value *NewValue = nullptr;
+      if (NewOopId < 0) {
+        NewValue = ConstantPointerNull::get(cast<PointerType>(LI->getType()));
+      } else {
+        NewValue = createConstOopLoad(M, Builder, NewOopId);
+        ++NumOopChains;
+      }
+      LI->replaceAllUsesWith(NewValue);
+      LI->eraseFromParent();
+    } else if (isNarrowOopType(LI->getType())) {
+      SmallVector<CallBase *, 4> DecodeUsers;
+      for (User *U : LI->users()) {
+        if (!isDecodeHeapOopCall(U))
+          return false;
+        DecodeUsers.push_back(cast<CallBase>(U));
+      }
+      if (DecodeUsers.empty())
+        return false;
+
+      Type *OopTy = PointerType::get(M.getContext(),
+                                    jeandle::AddrSpace::JavaHeapAddrSpace);
+      Value *NewValue = nullptr;
+      if (NewOopId < 0) {
+        NewValue = ConstantPointerNull::get(cast<PointerType>(OopTy));
+      } else {
+        NewValue = createConstOopLoad(M, Builder, NewOopId);
+        ++NumOopChains;
+      }
+
+      for (CallBase *Decode : DecodeUsers) {
+        Decode->replaceAllUsesWith(NewValue);
+        Decode->eraseFromParent();
+      }
+      if (LI->use_empty())
+        LI->eraseFromParent();
     }
-    LI->replaceAllUsesWith(NewValue);
-    LI->eraseFromParent();
     return true;
   }
 

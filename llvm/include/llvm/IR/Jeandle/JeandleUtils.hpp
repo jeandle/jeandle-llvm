@@ -36,10 +36,22 @@ enum HotspotBasicType {
 };
 
 /// Returns true if \p Ty is a pointer in the Java heap address space,
-/// i.e., it represents a Java object reference (oop).
-inline bool isJavaOopType(Type *Ty) {
+/// i.e., it represents a decoded Java object reference (oop).
+inline bool isOopType(Type *Ty) {
   auto *PT = dyn_cast<PointerType>(Ty);
   return PT && PT->getAddressSpace() == jeandle::AddrSpace::JavaHeapAddrSpace;
+}
+
+/// Returns true if \p Ty is a pointer in the narrow oop address space,
+/// i.e., it represents an encoded compressed Java object reference.
+inline bool isNarrowOopType(Type *Ty) {
+  auto *PT = dyn_cast<PointerType>(Ty);
+  return PT && PT->getAddressSpace() == jeandle::AddrSpace::NarrowOopAddrSpace;
+}
+
+/// Returns true for either decoded oop or compressed narrowOop values.
+inline bool isJavaOopType(Type *Ty) {
+  return isOopType(Ty) || isNarrowOopType(Ty);
 }
 
 /// Constant oop handle naming convention.
