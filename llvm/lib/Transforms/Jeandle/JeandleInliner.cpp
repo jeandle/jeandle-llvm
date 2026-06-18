@@ -73,6 +73,7 @@
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/Threading.h"
@@ -888,6 +889,11 @@ static void cloneInlineCalleeForReplay(Module &DestM, const Function &SrcF) {
 
 void llvm::jeandle::detail::materializeInlineCalleeIRForReplay(
     Module &M, StringRef InlineCalleeIRPath, uintptr_t CalleeMethod) {
+  if (!sys::fs::exists(InlineCalleeIRPath))
+    report_fatal_error("JeandleInliner: GetInlineCalleeIR replay returned "
+                       "true, but inline callee replay module '" +
+                       Twine(InlineCalleeIRPath) + "' does not exist");
+
   loadInlineCalleeReplayModule(M, InlineCalleeIRPath);
 
   // This hook is reached only when GetInlineCalleeIR replay returns true, so

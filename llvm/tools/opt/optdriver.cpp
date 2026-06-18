@@ -304,7 +304,8 @@ static cl::opt<std::string> JeandleInlineCalleeIR(
     "jeandle-inline-callee-ir",
     cl::desc("Load inline callee IR for Jeandle VM callback replay. If unset, "
              "defaults to the *_inline_callees.ll file next to "
-             "-jeandle-vm-callback-log"),
+             "-jeandle-vm-callback-log. The file is required only if replay "
+             "executes a successful GetInlineCalleeIR callback"),
     cl::value_desc("filename"));
 
 //===----------------------------------------------------------------------===//
@@ -770,11 +771,6 @@ optMain(int argc, char **argv,
           return 1;
         }
         InlineCalleeIRPath = *DefaultInlineCalleeIRPath;
-      }
-      if (!sys::fs::exists(InlineCalleeIRPath)) {
-        errs() << argv[0] << ": error loading inline callee IR replay module: "
-               << InlineCalleeIRPath << " does not exist\n";
-        return 1;
       }
       if (Error Err = jeandle::loadAndRegisterVMCallbackLog(
               JeandleVMCallbackLog, InlineCalleeIRPath)) {
