@@ -212,12 +212,6 @@ public:
     return DL == Candidate;
   }
 
-  static std::string jeandleExtendDataLayout(StringRef DataLayoutString) {
-    std::string DL = DataLayoutString.str();
-    DL += "-p3:32:32:32";  // 3 = NarrowOopAddrSpace
-    return DL;
-  }
-
   /// Get the pointer size for this target.
   ///
   /// This is the only time the DataLayout in the TargetMachine is used.

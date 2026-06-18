@@ -51,6 +51,7 @@
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ModuleSlotTracker.h"
@@ -86,6 +87,21 @@ static cl::opt<unsigned> AlignAllFunctions(
     cl::desc("Force the alignment of all functions in log2 format (e.g. 4 "
              "means align on 16B boundaries)."),
     cl::init(0), cl::Hidden);
+
+static bool isCompatibleDataLayout(const TargetMachine &Target,
+                                   const Function &F,
+                                   const DataLayout &Candidate) {
+  if (Target.isCompatibleDataLayout(Candidate))
+    return true;
+
+  if (!F.hasFnAttribute(jeandle::Attribute::UseCompressedOops))
+    return false;
+
+  std::string JeandleLayout = Target.createDataLayout().getStringRepresentation();
+  if (JeandleLayout.find("-p3:") == std::string::npos)
+    JeandleLayout += "-p3:32:32:32";
+  return DataLayout(JeandleLayout) == Candidate;
+}
 
 static const char *getPropertyName(MachineFunctionProperties::Property Prop) {
   using P = MachineFunctionProperties::Property;
@@ -239,7 +255,7 @@ void MachineFunction::init() {
     WasmEHInfo = new (Allocator) WasmEHFuncInfo();
   }
 
-  assert(Target.isCompatibleDataLayout(getDataLayout()) &&
+  assert(isCompatibleDataLayout(Target, F, getDataLayout()) &&
          "Can't create a MachineFunction using a Module with a "
          "Target-incompatible DataLayout attached\n");
 
