@@ -9,10 +9,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Jeandle/Pipeline.h"
-#include "llvm/Transforms/IPO/GlobalDCE.h"
+#include "llvm/Transforms/Jeandle/ConstantFieldFolding.h"
 #include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
+#include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/Scalar/InstSimplifyPass.h"
@@ -37,6 +38,7 @@ Pipeline::Pipeline(OptimizationLevel level, LLVMContext &Ctx,
   PM = buildJeandlePipeline(PB, level, Options);
 }
 
+// TODO: The pass selection/ordering is not optimal. We need to improve it.
 ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
                                                  OptimizationLevel level,
                                                  PipelineOptions Options) {
@@ -54,16 +56,15 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     PM.addPass(JeandleInlineDriver(/*InlineAccessorsOnly=*/true));
     break;
   }
-  // Remove unreachable available_externally functions after inlining so that
-  // subsequent passes do not process them.
-  PM.addPass(GlobalDCEPass());
   PM.addPass(JavaOperationLower(0));
   PM.addPass(createModuleToFunctionPassAdaptor(InstSimplifyPass()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
-  PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(level)));
+  PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
+  PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
   PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
   PM.addPass(JavaOperationLower(1));
   PM.addPass(createModuleToFunctionPassAdaptor(TLSPointerRewrite()));
+  PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(level)));
   PM.addPass(RewriteStatepointsForGC());
   return PM;
 }

@@ -1,0 +1,8 @@
+GetConstantFieldInfo 0 208 = 12
+GetConstantFieldValue 0 208 = 1
+GetConstantFieldInfo 1 16 = 12
+GetConstantFieldValue 1 16 = 2
+GetConstantFieldInfo 2 16 = 10
+GetConstantFieldValue 2 16 = 77
+GetOopHandleName 1 = "oop_handle_Child_1"
+GetOopHandleName 2 = "oop_handle_Grandchild_2"

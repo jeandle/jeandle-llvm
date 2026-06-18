@@ -46,6 +46,29 @@ static llvm::ArrayRef<CallbackInfo> getCallbackTable() {
 #undef DEF_CALLBACK_TABLE_ENTRY
 
 // =============================================================================
+// Helpers for formatting CallbackValue in error messages
+// =============================================================================
+
+static void formatArgList(raw_string_ostream &OS,
+                          ArrayRef<CallbackValue> Args) {
+  for (size_t I = 0; I < Args.size(); ++I) {
+    if (I > 0)
+      OS << ", ";
+    if (Args[I].IsString)
+      OS << "\"" << Args[I].StrVal << "\"";
+    else
+      OS << Args[I].NumVal;
+  }
+}
+
+static void formatValue(raw_string_ostream &OS, const CallbackValue &V) {
+  if (V.IsString)
+    OS << "\"" << V.StrVal << "\"";
+  else
+    OS << V.NumVal;
+}
+
+// =============================================================================
 // Thread-local active recorder
 // =============================================================================
 
@@ -64,22 +87,24 @@ VMCallbackLogRecorder::VMCallbackLogRecorder() {
 
 VMCallbackLogRecorder::~VMCallbackLogRecorder() { ActiveRecorder = nullptr; }
 
-void VMCallbackLogRecorder::recordIfNew(unsigned Kind, ArrayRef<int64_t> Args,
-                                        int64_t Result) {
-  CallbackKey Key{Kind, SmallVector<int64_t, 4>(Args.begin(), Args.end())};
+void VMCallbackLogRecorder::recordIfNew(unsigned Kind,
+                                        ArrayRef<CallbackValue> Args,
+                                        CallbackValue Result) {
+  CallbackKey Key{Kind,
+                  SmallVector<CallbackValue, 4>(Args.begin(), Args.end())};
   auto [It, Inserted] = Entries.try_emplace(Key, Result);
   if (!Inserted && It->second != Result) {
     const auto &Info = getCallbackTable()[Kind];
-    std::string ArgStr;
-    raw_string_ostream OS(ArgStr);
-    for (size_t I = 0; I < Args.size(); ++I) {
-      if (I > 0)
-        OS << ", ";
-      OS << Args[I];
-    }
+    std::string ArgStr, PrevStr, CurStr;
+    raw_string_ostream ArgOS(ArgStr);
+    raw_string_ostream PrevOS(PrevStr);
+    raw_string_ostream CurOS(CurStr);
+    formatArgList(ArgOS, Args);
+    formatValue(PrevOS, It->second);
+    formatValue(CurOS, Result);
     report_fatal_error("VMCallbackLog purity violation: " + Twine(Info.Name) +
-                       "(" + ArgStr + ") returned " + Twine(Result) +
-                       ", previously " + Twine(It->second));
+                       "(" + ArgStr + ") returned " + CurStr + ", previously " +
+                       PrevStr);
   }
 }
 
@@ -90,43 +115,62 @@ Error VMCallbackLogRecorder::dump(StringRef FilePath) {
     return createStringError(EC, "cannot open file '%s': %s",
                              FilePath.str().c_str(), EC.message().c_str());
 
-  // Collect entries and sort by (Kind, Args) for deterministic output.
-  SmallVector<std::pair<CallbackKey, int64_t>, 16> SortedEntries;
+  // Collect entries sorted by (Kind, Args) for determinism.
+  SmallVector<CallbackKey, 20> SortedKeys;
   for (const auto &KV : Entries)
-    SortedEntries.emplace_back(KV.getFirst(), KV.getSecond());
-  llvm::sort(SortedEntries, [](const auto &A, const auto &B) {
-    return std::tie(A.first.Kind, A.first.Args) <
-           std::tie(B.first.Kind, B.first.Args);
+    SortedKeys.push_back(KV.getFirst());
+
+  llvm::sort(SortedKeys, [](const CallbackKey &A, const CallbackKey &B) {
+    if (A.Kind != B.Kind)
+      return A.Kind < B.Kind;
+    return A.Args < B.Args;
   });
 
-  for (const auto &[Key, Result] : SortedEntries) {
+  for (const auto &Key : SortedKeys) {
+    const auto &Val = Entries.lookup(Key);
     const auto &Info = getCallbackTable()[Key.Kind];
+
     OS << Info.Name;
     for (unsigned I = 0; I < Info.ArgTypes.size(); ++I) {
       OS << " ";
       switch (Info.ArgTypes[I]) {
       case VMCallbackValueType::Uintptr:
-        OS << static_cast<uintptr_t>(Key.Args[I]);
+        OS << static_cast<uintptr_t>(Key.Args[I].NumVal);
         break;
       case VMCallbackValueType::Int:
-        OS << static_cast<int>(Key.Args[I]);
+        OS << static_cast<int>(Key.Args[I].NumVal);
+        break;
+      case VMCallbackValueType::Long:
+        OS << static_cast<int64_t>(Key.Args[I].NumVal);
         break;
       case VMCallbackValueType::Bool:
-        OS << (Key.Args[I] ? "true" : "false");
+        OS << (Key.Args[I].NumVal ? "true" : "false");
+        break;
+      case VMCallbackValueType::String:
+        OS << "\"" << Key.Args[I].StrVal << "\"";
         break;
       }
     }
     OS << " = ";
-    switch (Info.ResType) {
-    case VMCallbackValueType::Bool:
-      OS << (Result ? "true" : "false");
-      break;
-    case VMCallbackValueType::Uintptr:
-      OS << static_cast<uintptr_t>(Result);
-      break;
-    case VMCallbackValueType::Int:
-      OS << static_cast<int>(Result);
-      break;
+    if (Val.IsString) {
+      OS << "\"" << Val.StrVal << "\"";
+    } else {
+      switch (Info.ResType) {
+      case VMCallbackValueType::Bool:
+        OS << (Val.NumVal ? "true" : "false");
+        break;
+      case VMCallbackValueType::Uintptr:
+        OS << static_cast<uintptr_t>(Val.NumVal);
+        break;
+      case VMCallbackValueType::Int:
+        OS << static_cast<int>(Val.NumVal);
+        break;
+      case VMCallbackValueType::Long:
+        OS << static_cast<int64_t>(Val.NumVal);
+        break;
+      case VMCallbackValueType::String:
+        break;
+      }
     }
     OS << "\n";
   }
@@ -152,7 +196,7 @@ static VMCallbacks RealCallbacks;
     RetType Result = RealCallbacks.Name(JEANDLE_STRIP_PARENS Args);            \
     if (auto *R = VMCallbackLogRecorder::getActiveRecorder())                  \
       R->recordIfNew(CK_##Name, encodeArgs(JEANDLE_STRIP_PARENS Args),         \
-                     static_cast<int64_t>(Result));                            \
+                     encodeVMCallbackValue(Result));                           \
     return Result;                                                             \
   }
 
@@ -193,7 +237,8 @@ void jeandle::enableVMCallbackRecording() {
 namespace {
 
 struct ReplayData {
-  DenseMap<CallbackKey, int64_t, CallbackKeyDenseMapInfo> Entries;
+
+  DenseMap<CallbackKey, CallbackValue, CallbackKeyDenseMapInfo> Entries;
   std::string InlineCalleeIRPath;
 };
 
@@ -218,48 +263,64 @@ static void materializeInlineCalleeIR(uintptr_t CalleeMethod) {
                                    LogData->InlineCalleeIRPath, CalleeMethod);
 }
 
-/// Look up a callback result by (Kind, Args). Terminates if the log is
-/// not initialized or the key is not found.
-static int64_t lookupResult(unsigned Kind, ArrayRef<int64_t> Args,
-                            const char *CallbackName) {
+/// Look up a callback result by (Kind, Args). Returns a reference into the
+/// long-lived log data, so the returned pointer is stable (important for
+/// string results decoded via decodeVMCallbackValue<const char*>).
+/// Terminates if the log is not initialized or the key is not found.
+static const CallbackValue &lookupValue(unsigned Kind,
+                                        ArrayRef<CallbackValue> Args,
+                                        const char *CallbackName) {
   if (!LogData) {
     report_fatal_error("VMCallbackLog replay not initialized at " +
                        Twine(CallbackName));
   }
-  CallbackKey Key{Kind, SmallVector<int64_t, 4>(Args.begin(), Args.end())};
+  CallbackKey Key{Kind,
+                  SmallVector<CallbackValue, 4>(Args.begin(), Args.end())};
   auto It = LogData->Entries.find(Key);
   if (It == LogData->Entries.end()) {
     std::string ArgStr;
     raw_string_ostream OS(ArgStr);
-    for (size_t I = 0; I < Args.size(); ++I) {
-      if (I > 0)
-        OS << ", ";
-      OS << Args[I];
-    }
+    formatArgList(OS, Args);
     report_fatal_error("VMCallbackLog missing entry for " +
                        Twine(CallbackName) + "(" + ArgStr + ")");
   }
-  return It->second;
+  return It->second; // returns reference to map-owned value
 }
 
-static void handleReplaySideEffects(unsigned Kind, ArrayRef<int64_t> Args,
-                                    int64_t RawResult) {
-  if (Kind != CK_GetInlineCalleeIR || !decodeVMCallbackValue<bool>(RawResult))
+// =============================================================================
+// Replay dispatch
+// =============================================================================
+
+static void handleReplaySideEffects(unsigned Kind, ArrayRef<CallbackValue> Args,
+                                    const CallbackValue &RawResult) {
+  switch (Kind) {
+  case CK_GetInlineCalleeIR:
+    if (!decodeVMCallbackValue<bool>(RawResult))
+      return;
+    assert(Args.size() == 1 && "GetInlineCalleeIR expects one argument");
+    assert(!Args[0].IsString && "GetInlineCalleeIR expects numeric method id");
+    materializeInlineCalleeIR(decodeVMCallbackValue<uintptr_t>(Args[0]));
     return;
 
-  assert(Args.size() == 1 && "GetInlineCalleeIR expects one argument");
-  materializeInlineCalleeIR(static_cast<uintptr_t>(Args[0]));
+  default:
+    return;
+  }
+}
+
+template <typename T>
+static T fetchReplayedResult(unsigned Kind, ArrayRef<CallbackValue> Args,
+                             const char *Name) {
+  const CallbackValue &RawResult = lookupValue(Kind, Args, Name);
+  handleReplaySideEffects(Kind, Args, RawResult);
+  return decodeVMCallbackValue<T>(RawResult);
 }
 
 // REPLAY_CALLBACK(Name, RetType, (param-decls), (arg-names))
 // Same parenthesized-params pattern as RECORD_CALLBACK.
 #define REPLAY_CALLBACK(Name, RetType, Params, Args)                           \
   static RetType replay##Name Params {                                         \
-    SmallVector<int64_t, 4> EncodedArgs =                                      \
-        encodeArgs(JEANDLE_STRIP_PARENS Args);                                 \
-    int64_t RawResult = lookupResult(CK_##Name, EncodedArgs, #Name);           \
-    handleReplaySideEffects(CK_##Name, EncodedArgs, RawResult);                \
-    return decodeVMCallbackValue<RetType>(RawResult);                          \
+    return fetchReplayedResult<RetType>(                                       \
+        CK_##Name, encodeArgs(JEANDLE_STRIP_PARENS Args), #Name);              \
   }
 
 #define DEF_REPLAY_CB(Name, RetType, ResType, Params, Args, ArgTypes, NumArgs) \
@@ -303,9 +364,9 @@ static unsigned findCallbackKind(StringRef Name) {
           .Default(getCallbackTable().size());
 }
 
-/// Parse a token according to its expected value type.
-static std::optional<int64_t> parseValue(StringRef Token,
-                                         VMCallbackValueType VT) {
+/// Parse a numeric token according to its expected value type.
+static std::optional<int64_t> parseNumericToken(StringRef Token,
+                                                VMCallbackValueType VT) {
   switch (VT) {
   case VMCallbackValueType::Bool: {
     if (Token == "true")
@@ -330,13 +391,57 @@ static std::optional<int64_t> parseValue(StringRef Token,
       return std::nullopt;
     return static_cast<int64_t>(Val);
   }
+  case VMCallbackValueType::Long: {
+    int64_t Val;
+    if (Token.getAsInteger(0, Val))
+      return std::nullopt;
+    return Val;
+  }
+  case VMCallbackValueType::String:
+    // String tokens are handled separately by parseArgToken.
+    return std::nullopt;
   }
   return std::nullopt;
 }
 
+/// Parse a single argument token from `Str` starting at position `Pos`.
+/// - For String type: expects a double-quoted token.
+/// - For numeric types: expects an unquoted token.
+/// Returns the parsed CallbackValue and advances `Pos` past the token.
+/// Returns std::nullopt on parse error.
+static std::optional<std::pair<CallbackValue, size_t>>
+parseArgToken(StringRef Str, size_t Pos, VMCallbackValueType VT) {
+  // Skip leading whitespace.
+  while (Pos < Str.size() && (Str[Pos] == ' ' || Str[Pos] == '\t'))
+    ++Pos;
+  if (Pos >= Str.size())
+    return std::nullopt;
+
+  if (VT == VMCallbackValueType::String) {
+    // Expect a double-quoted string.
+    if (Str[Pos] != '"')
+      return std::nullopt;
+    size_t EndQuote = Str.find('"', Pos + 1);
+    if (EndQuote == StringRef::npos)
+      return std::nullopt;
+    std::string S = Str.substr(Pos + 1, EndQuote - Pos - 1).str();
+    return std::make_pair(CallbackValue::fromStr(S), EndQuote + 1);
+  }
+
+  // Numeric token: read up to next whitespace.
+  size_t TokEnd = Pos;
+  while (TokEnd < Str.size() && Str[TokEnd] != ' ' && Str[TokEnd] != '\t')
+    ++TokEnd;
+  StringRef Token = Str.substr(Pos, TokEnd - Pos);
+  auto Val = parseNumericToken(Token, VT);
+  if (!Val)
+    return std::nullopt;
+  return std::make_pair(CallbackValue::fromNum(*Val), TokEnd);
+}
+
 static Error parseLogBuffer(
     StringRef Buffer,
-    DenseMap<CallbackKey, int64_t, CallbackKeyDenseMapInfo> &Entries) {
+    DenseMap<CallbackKey, CallbackValue, CallbackKeyDenseMapInfo> &Entries) {
   SmallVector<StringRef, 0> Lines;
   Buffer.split(Lines, '\n');
 
@@ -347,67 +452,80 @@ static Error parseLogBuffer(
     if (Line.empty() || Line.starts_with("#"))
       continue;
 
-    // Parse: <CallbackName> <arg1> [<arg2> ...] = <result>
-    SmallVector<StringRef, 8> Tokens;
-    Line.split(Tokens, ' ', /*MaxSplit=*/-1, /*KeepEmpty=*/false);
-
-    if (Tokens.size() < 3)
-      return createStringError("line %zu: too few tokens: '%s'", LineNum + 1,
-                               Line.str().c_str());
-
-    unsigned Kind = findCallbackKind(Tokens[0]);
+    unsigned Kind = findCallbackKind(
+        Line.take_while([](char C) { return C != ' ' && C != '\t'; }));
     if (Kind >= getCallbackTable().size())
       return createStringError("line %zu: unknown callback: '%s'", LineNum + 1,
-                               Tokens[0].str().c_str());
+                               Line.str().c_str());
 
     const auto &Info = getCallbackTable()[Kind];
 
-    // Find the '=' separator.
-    size_t EqIdx = Tokens.size();
-    for (size_t I = 1; I < Tokens.size(); ++I) {
-      if (Tokens[I] == "=") {
-        EqIdx = I;
-        break;
+    // Find " = " to separate args from result.
+    size_t EqPos = Line.find(" = ");
+    if (EqPos == StringRef::npos)
+      return createStringError("line %zu: missing ' = ': '%s'", LineNum + 1,
+                               Line.str().c_str());
+
+    // Extract the arg portion (between callback name and " = ").
+    StringRef NameAndArgs = Line.substr(0, EqPos);
+    StringRef ArgPart;
+    size_t FirstSpace = NameAndArgs.find(' ');
+    if (FirstSpace != StringRef::npos)
+      ArgPart = NameAndArgs.substr(FirstSpace + 1);
+
+    // Parse args token by token, handling quoted strings for String type.
+    SmallVector<CallbackValue, 4> Args;
+    if (!ArgPart.empty()) {
+      size_t Pos = 0;
+      for (unsigned I = 0; I < Info.ArgTypes.size(); ++I) {
+        auto Parsed = parseArgToken(ArgPart, Pos, Info.ArgTypes[I]);
+        if (!Parsed)
+          return createStringError("line %zu: invalid argument %u for '%s'",
+                                   LineNum + 1, I + 1, Info.Name);
+        Args.push_back(Parsed->first);
+        Pos = Parsed->second;
       }
-    }
-    if (EqIdx >= Tokens.size() - 1)
-      return createStringError("line %zu: missing '=' or result: '%s'",
-                               LineNum + 1, Line.str().c_str());
-
-    // Validate argument count.
-    unsigned ParsedArgCount = EqIdx - 1;
-    if (ParsedArgCount != Info.ArgTypes.size())
-      return createStringError("line %zu: callback '%s' expects %zu "
-                               "argument(s), got %u",
-                               LineNum + 1, Info.Name, Info.ArgTypes.size(),
-                               ParsedArgCount);
-
-    // Parse arguments according to their declared types.
-    SmallVector<int64_t, 4> Args;
-    for (unsigned I = 0; I < Info.ArgTypes.size(); ++I) {
-      auto Val = parseValue(Tokens[I + 1], Info.ArgTypes[I]);
-      if (!Val)
-        return createStringError("line %zu: invalid argument %u for '%s': '%s'",
-                                 LineNum + 1, I + 1, Info.Name,
-                                 Tokens[I + 1].str().c_str());
-      Args.push_back(*Val);
+    } else if (Info.ArgTypes.size() != 0) {
+      return createStringError(
+          "line %zu: callback '%s' expects %zu argument(s), got 0", LineNum + 1,
+          Info.Name, Info.ArgTypes.size());
     }
 
-    // Parse result according to the callback's return type.
-    StringRef ResultStr = Tokens[EqIdx + 1];
-    auto Result = parseValue(ResultStr, Info.ResType);
-    if (!Result)
-      return createStringError("line %zu: invalid result for '%s': '%s'",
-                               LineNum + 1, Info.Name, ResultStr.str().c_str());
+    // Parse the result.
+    StringRef ResultPart = Line.substr(EqPos + 3).trim();
+    CallbackValue ResultVal;
+
+    if (Info.ResType == VMCallbackValueType::String) {
+      // String result: expect "...".
+      if (!ResultPart.starts_with('"') || !ResultPart.ends_with('"'))
+        return createStringError(
+            "line %zu: string result must be double-quoted: '%s'", LineNum + 1,
+            ResultPart.str().c_str());
+      ResultVal =
+          CallbackValue::fromStr(ResultPart.substr(1, ResultPart.size() - 2));
+    } else {
+      // Numeric result.
+      auto Result = parseNumericToken(ResultPart, Info.ResType);
+      if (!Result)
+        return createStringError("line %zu: invalid result for '%s': '%s'",
+                                 LineNum + 1, Info.Name,
+                                 ResultPart.str().c_str());
+      ResultVal = CallbackValue::fromNum(*Result);
+    }
 
     // Insert into map; error on conflicting duplicates.
-    CallbackKey Key{Kind, SmallVector<int64_t, 4>(Args.begin(), Args.end())};
-    auto [It, Inserted] = Entries.try_emplace(Key, *Result);
-    if (!Inserted && It->second != *Result) {
+    CallbackKey Key{Kind,
+                    SmallVector<CallbackValue, 4>(Args.begin(), Args.end())};
+    auto [It, Inserted] = Entries.try_emplace(Key, ResultVal);
+    if (!Inserted && It->second != ResultVal) {
+      std::string PrevStr, CurStr;
+      raw_string_ostream PrevOS(PrevStr);
+      raw_string_ostream CurOS(CurStr);
+      formatValue(PrevOS, It->second);
+      formatValue(CurOS, ResultVal);
       return createStringError(
-          "line %zu: conflicting result for '%s': previously %lld, now %lld",
-          LineNum + 1, Info.Name, static_cast<long long>(It->second),
-          static_cast<long long>(*Result));
+          "line %zu: conflicting result for '%s': previously %s, now %s",
+          LineNum + 1, Info.Name, PrevStr.c_str(), CurStr.c_str());
     }
   }
 

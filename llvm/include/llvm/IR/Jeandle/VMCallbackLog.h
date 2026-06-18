@@ -40,6 +40,7 @@
 
 #include <cstdint>
 #include <initializer_list>
+#include <string>
 
 namespace llvm {
 class Module;
@@ -81,6 +82,34 @@ enum CallbackKind : unsigned { ALL_JEANDLE_VM_CALLBACKS(DEF_CALLBACK_KIND) };
 #undef DEF_CALLBACK_KIND
 
 // =============================================================================
+// CallbackValue — unified type for callback arguments and results
+// =============================================================================
+
+/// A single value for VM callback arguments or results: numeric (int64_t) or
+/// string. Used both as the element type in CallbackKey::Args and as the map
+/// value type in recording/replay data structures.
+struct CallbackValue {
+  int64_t NumVal = 0;
+  std::string StrVal;
+  bool IsString = false;
+
+  static CallbackValue fromNum(int64_t V) { return {V, {}, false}; }
+  static CallbackValue fromStr(StringRef S) { return {0, S.str(), true}; }
+
+  bool operator==(const CallbackValue &O) const {
+    if (IsString != O.IsString)
+      return false;
+    return IsString ? (StrVal == O.StrVal) : (NumVal == O.NumVal);
+  }
+  bool operator!=(const CallbackValue &O) const { return !(*this == O); }
+  bool operator<(const CallbackValue &O) const {
+    if (IsString != O.IsString)
+      return IsString < O.IsString;
+    return IsString ? (StrVal < O.StrVal) : (NumVal < O.NumVal);
+  }
+};
+
+// =============================================================================
 // Callback key for map-based lookup
 // =============================================================================
 
@@ -89,7 +118,7 @@ enum CallbackKind : unsigned { ALL_JEANDLE_VM_CALLBACKS(DEF_CALLBACK_KIND) };
 /// callbacks are pure functions.
 struct CallbackKey {
   unsigned Kind; // CallbackKind enum value
-  SmallVector<int64_t, 4> Args;
+  SmallVector<CallbackValue, 4> Args;
 
   bool operator==(const CallbackKey &Other) const {
     return Kind == Other.Kind && Args == Other.Args;
@@ -106,8 +135,15 @@ struct CallbackKeyDenseMapInfo {
     return {DenseMapInfo<unsigned>::getTombstoneKey(), {}};
   }
   static unsigned getHashValue(const CallbackKey &Key) {
-    return hash_combine(Key.Kind,
-                        hash_combine_range(Key.Args.begin(), Key.Args.end()));
+    unsigned H = Key.Kind;
+    for (const auto &A : Key.Args) {
+      if (A.IsString)
+        H = hash_combine(H,
+                         hash_combine_range(A.StrVal.begin(), A.StrVal.end()));
+      else
+        H = hash_combine(H, A.NumVal);
+    }
+    return H;
   }
   static bool isEqual(const CallbackKey &LHS, const CallbackKey &RHS) {
     return LHS == RHS;
@@ -142,10 +178,11 @@ public:
   /// Record a callback invocation result. If the (Kind, Args) key already
   /// exists with a different Result, report a fatal error (purity violation).
   /// If the key already exists with the same Result, this is a no-op (dedup).
-  void recordIfNew(unsigned Kind, ArrayRef<int64_t> Args, int64_t Result);
+  void recordIfNew(unsigned Kind, ArrayRef<CallbackValue> Args,
+                   CallbackValue Result);
 
 private:
-  DenseMap<CallbackKey, int64_t, CallbackKeyDenseMapInfo> Entries;
+  DenseMap<CallbackKey, CallbackValue, CallbackKeyDenseMapInfo> Entries;
   static thread_local VMCallbackLogRecorder *ActiveRecorder;
 };
 
@@ -153,31 +190,49 @@ private:
 // Encoding/decoding helpers for recording and replay trampolines
 // =============================================================================
 
-template <typename T> inline int64_t encodeVMCallbackValue(T V);
-template <> inline int64_t encodeVMCallbackValue<uintptr_t>(uintptr_t V) {
-  return static_cast<int64_t>(V);
+/// Encode a C++ argument value into a CallbackValue for key construction.
+template <typename T> inline CallbackValue encodeVMCallbackValue(T V);
+template <> inline CallbackValue encodeVMCallbackValue<uintptr_t>(uintptr_t V) {
+  return CallbackValue::fromNum(static_cast<int64_t>(V));
 }
-template <> inline int64_t encodeVMCallbackValue<int>(int V) {
-  return static_cast<int64_t>(V);
+template <> inline CallbackValue encodeVMCallbackValue<int>(int V) {
+  return CallbackValue::fromNum(static_cast<int64_t>(V));
 }
-template <> inline int64_t encodeVMCallbackValue<bool>(bool V) {
-  return V ? 1 : 0;
+template <> inline CallbackValue encodeVMCallbackValue<int64_t>(int64_t V) {
+  return CallbackValue::fromNum(V);
+}
+template <> inline CallbackValue encodeVMCallbackValue<bool>(bool V) {
+  return CallbackValue::fromNum(V ? 1 : 0);
+}
+template <>
+inline CallbackValue encodeVMCallbackValue<const char *>(const char *V) {
+  return CallbackValue::fromStr(V);
 }
 
-template <typename T> inline T decodeVMCallbackValue(int64_t V);
-template <> inline bool decodeVMCallbackValue<bool>(int64_t V) {
-  return V != 0;
+/// Decode a CallbackValue result back to the C++ return type.
+template <typename T> inline T decodeVMCallbackValue(const CallbackValue &V);
+template <> inline bool decodeVMCallbackValue<bool>(const CallbackValue &V) {
+  return V.NumVal != 0;
 }
-template <> inline uintptr_t decodeVMCallbackValue<uintptr_t>(int64_t V) {
-  return static_cast<uintptr_t>(V);
+template <>
+inline uintptr_t decodeVMCallbackValue<uintptr_t>(const CallbackValue &V) {
+  return static_cast<uintptr_t>(V.NumVal);
 }
-template <> inline int decodeVMCallbackValue<int>(int64_t V) {
-  return static_cast<int>(V);
+template <> inline int decodeVMCallbackValue<int>(const CallbackValue &V) {
+  return static_cast<int>(V.NumVal);
+}
+template <>
+inline int64_t decodeVMCallbackValue<int64_t>(const CallbackValue &V) {
+  return V.NumVal;
+}
+template <>
+inline const char *decodeVMCallbackValue<const char *>(const CallbackValue &V) {
+  return V.StrVal.c_str();
 }
 
 /// Encode variadic args into a vector for replay matching.
 template <typename... Ts>
-inline SmallVector<int64_t, 4> encodeArgs(Ts... Args) {
+inline SmallVector<CallbackValue, 4> encodeArgs(Ts... Args) {
   return {encodeVMCallbackValue(Args)...};
 }
 

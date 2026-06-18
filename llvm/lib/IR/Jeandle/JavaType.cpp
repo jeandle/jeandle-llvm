@@ -15,6 +15,7 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/Attributes.h"
+#include "llvm/IR/Jeandle/JeandleUtils.hpp"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/Support/Debug.h"
@@ -363,6 +364,20 @@ static JavaType getBaseJavaType(Value *V,
             }
           }
         }
+      }
+    }
+
+    // Constant oop: the frontend emits a compile-time-known object reference
+    // as an oop_handle_* global load WITHOUT !java-klass metadata. Recognize
+    // the handle by name and query the oop's exact runtime klass via the VM.
+    // Exact is sound because a constant oop is a single, fixed instance, so the
+    // returned klass is the value's exact dynamic type (the actual subclass is
+    // attributed directly, not a declared supertype).
+    if (std::optional<int> Id = getOopHandleId(LI->getPointerOperand())) {
+      const VMCallbacks *CB = getVMCallbacks();
+      if (CB && CB->GetOopKlass) {
+        if (uintptr_t Klass = CB->GetOopKlass(*Id); Klass != 0)
+          return {Klass, /*Exact=*/true};
       }
     }
     return {};

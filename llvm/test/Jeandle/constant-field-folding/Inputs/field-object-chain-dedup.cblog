@@ -1,0 +1,5 @@
+GetConstantFieldInfo 0 16 = 12
+GetConstantFieldValue 0 16 = 1
+GetConstantFieldInfo 1 20 = 10
+GetConstantFieldValue 1 20 = 7
+GetOopHandleName 1 = "oop_handle_Existing_1"
