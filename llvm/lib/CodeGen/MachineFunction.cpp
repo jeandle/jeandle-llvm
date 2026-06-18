@@ -97,7 +97,8 @@ static bool isCompatibleDataLayout(const TargetMachine &Target,
   if (!F.hasFnAttribute(jeandle::Attribute::UseCompressedOops))
     return false;
 
-  std::string JeandleLayout = Target.createDataLayout().getStringRepresentation();
+  std::string JeandleLayout =
+      Target.createDataLayout().getStringRepresentation();
   if (JeandleLayout.find("-p3:") == std::string::npos)
     JeandleLayout += "-p3:32:32:32";
   return DataLayout(JeandleLayout) == Candidate;

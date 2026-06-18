@@ -29,10 +29,9 @@ public:
   std::optional<bool> isGCManagedPointer(const llvm::Type *Ty) const override {
     // Method is only valid on pointer typed values.
     const llvm::PointerType *PT = llvm::cast<llvm::PointerType>(Ty);
-    return (llvm::jeandle::AddrSpace::JavaHeapAddrSpace ==
-            PT->getAddressSpace() || 
-            llvm::jeandle::AddrSpace::NarrowOopAddrSpace ==
-            PT->getAddressSpace());
+    return (
+        llvm::jeandle::AddrSpace::JavaHeapAddrSpace == PT->getAddressSpace() ||
+        llvm::jeandle::AddrSpace::NarrowOopAddrSpace == PT->getAddressSpace());
   }
 };
 

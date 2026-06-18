@@ -141,8 +141,8 @@ int StatepointOpers::getFirstGCPtrIdx() {
   return (int)NumGCPtrsIdx;
 }
 
-unsigned StatepointOpers::getGCPointerMap(
-    SmallVectorImpl<GCPointerMapEntry> &GCMap) {
+unsigned
+StatepointOpers::getGCPointerMap(SmallVectorImpl<GCPointerMapEntry> &GCMap) {
   unsigned CurIdx = getNumGcMapEntriesIdx();
   unsigned GCMapSize = getConstMetaVal(*MI, CurIdx - 1);
   CurIdx++;

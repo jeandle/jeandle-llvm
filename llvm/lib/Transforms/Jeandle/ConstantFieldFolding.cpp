@@ -45,8 +45,8 @@ namespace {
 
 using llvm::jeandle::getOopHandleId;
 using llvm::jeandle::HotspotBasicType;
-using llvm::jeandle::isNarrowOopType;
 using llvm::jeandle::isJavaOopType;
+using llvm::jeandle::isNarrowOopType;
 using llvm::jeandle::isOopType;
 using llvm::jeandle::T_ARRAY;
 using llvm::jeandle::T_BOOLEAN;
@@ -450,7 +450,7 @@ bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
         return false;
 
       Type *OopTy = PointerType::get(M.getContext(),
-                                    jeandle::AddrSpace::JavaHeapAddrSpace);
+                                     jeandle::AddrSpace::JavaHeapAddrSpace);
       Value *NewValue = nullptr;
       if (NewOopId < 0) {
         NewValue = ConstantPointerNull::get(cast<PointerType>(OopTy));

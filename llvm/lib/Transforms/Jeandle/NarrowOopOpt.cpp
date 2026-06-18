@@ -36,8 +36,8 @@ struct OpTable {
     };
     add("jeandle.encode_heap_oop", +1);
     add("jeandle.decode_heap_oop", -1);
-    add("jeandle.encode_klass",    +2);
-    add("jeandle.decode_klass",    -2);
+    add("jeandle.encode_klass", +2);
+    add("jeandle.decode_klass", -2);
   }
 
   int lookup(Function *F) const {
@@ -78,8 +78,7 @@ static Value *tryFoldRoundTrip(Instruction *I, const OpTable &Ops) {
 
 } // anonymous namespace
 
-PreservedAnalyses NarrowOopOpt::run(Function &F, 
-                                    FunctionAnalysisManager &) {
+PreservedAnalyses NarrowOopOpt::run(Function &F, FunctionAnalysisManager &) {
   OpTable Ops;
   Ops.init(*F.getParent());
   if (Ops.empty())
@@ -96,10 +95,12 @@ PreservedAnalyses NarrowOopOpt::run(Function &F,
 
   for (auto &VH : Candidates) {
     auto *I = dyn_cast_or_null<Instruction>(VH);
-    if (!I) continue;
+    if (!I)
+      continue;
 
     Value *Replacement = tryFoldRoundTrip(I, Ops);
-    if (!Replacement) continue;
+    if (!Replacement)
+      continue;
 
     Instruction *MaybeDead = dyn_cast<Instruction>(I->getOperand(0));
 

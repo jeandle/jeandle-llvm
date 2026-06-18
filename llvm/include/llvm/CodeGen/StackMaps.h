@@ -151,11 +151,10 @@ public:
 ///   <StackMaps::ConstantOp>, <num deopt args>, [deopt args...],
 ///   <StackMaps::ConstantOp>, <num gc pointer args>, [gc pointer args...],
 ///   <StackMaps::ConstantOp>, <num gc allocas>, [gc allocas args...],
-///   <StackMaps::ConstantOp>, <num  entries in gc map>, [base/derived/narrow flag triples]
-///   base/derived entries in gc map are logical indices into <gc pointer args>
-///   section.
-///   All gc pointers assigned to VRegs produce new value (in form of MI Def
-///   operand) and are tied to it.
+///   <StackMaps::ConstantOp>, <num  entries in gc map>, [base/derived/narrow
+///   flag triples] base/derived entries in gc map are logical indices into <gc
+///   pointer args> section. All gc pointers assigned to VRegs produce new value
+///   (in form of MI Def operand) and are tied to it.
 class StatepointOpers {
   // TODO:: we should change the STATEPOINT representation so that CC and
   // Flags should be part of meta operands, with args and deopt operands, and
@@ -247,8 +246,7 @@ public:
   /// Get vector of base/derived/narrow flag entries from statepoint.
   /// Base/derived elements are indices into GC Pointer operand list (logical).
   /// Returns number of elements in GCMap.
-  LLVM_ABI unsigned
-  getGCPointerMap(SmallVectorImpl<GCPointerMapEntry> &GCMap);
+  LLVM_ABI unsigned getGCPointerMap(SmallVectorImpl<GCPointerMapEntry> &GCMap);
 
   /// Return true if Reg is used only in operands which can be folded to
   /// stack usage.

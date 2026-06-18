@@ -44,9 +44,9 @@ bool isJavaHeapStore(Instruction *I) {
   PointerType *StoreAddressTy = dyn_cast<PointerType>(StoreAddress->getType());
 
   if ((StoredValueTy->getAddressSpace() !=
-          jeandle::AddrSpace::JavaHeapAddrSpace &&
-      StoredValueTy->getAddressSpace() !=
-          jeandle::AddrSpace::NarrowOopAddrSpace) ||
+           jeandle::AddrSpace::JavaHeapAddrSpace &&
+       StoredValueTy->getAddressSpace() !=
+           jeandle::AddrSpace::NarrowOopAddrSpace) ||
       StoreAddressTy->getAddressSpace() !=
           jeandle::AddrSpace::JavaHeapAddrSpace) {
     return false;
@@ -103,7 +103,8 @@ PreservedAnalyses InsertGCBarriers::run(Function &F,
               jeandle::AddrSpace::NarrowOopAddrSpace) {
         Function *DecodeFunc = M->getFunction("jeandle.decode_heap_oop");
         assert(DecodeFunc != nullptr && "jeandle.decode_heap_oop must exist");
-        CallInst *DecodeCall = PostBuilder.CreateCall(DecodeFunc, {StoredValue});
+        CallInst *DecodeCall =
+            PostBuilder.CreateCall(DecodeFunc, {StoredValue});
         DecodeCall->setCallingConv(CallingConv::Hotspot_JIT);
         BarrierValue = DecodeCall;
       }
