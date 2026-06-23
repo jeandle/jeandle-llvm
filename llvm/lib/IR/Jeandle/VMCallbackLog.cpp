@@ -237,7 +237,6 @@ void jeandle::enableVMCallbackRecording() {
 namespace {
 
 struct ReplayData {
-
   DenseMap<CallbackKey, CallbackValue, CallbackKeyDenseMapInfo> Entries;
   std::string InlineCalleeIRPath;
 };
