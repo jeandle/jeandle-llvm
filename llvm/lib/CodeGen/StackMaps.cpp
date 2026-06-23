@@ -474,8 +474,8 @@ void StackMaps::parseStatepointOpers(const MachineInstr &MI,
       assert(P.Base < GCPtrIndices.size() && "base pointer index not found");
       assert(P.Derived < GCPtrIndices.size() &&
              "derived pointer index not found");
-      unsigned BaseIdx = GCPtrIndices[P.Base];
       unsigned DerivedIdx = GCPtrIndices[P.Derived];
+      unsigned BaseIdx = P.IsNarrowOop ? DerivedIdx : GCPtrIndices[P.Base];
       LLVM_DEBUG(dbgs() << "Base : " << BaseIdx << " Derived : " << DerivedIdx
                         << "\n");
       (void)parseOperand(MOB + BaseIdx, MOE, Locations, LiveOuts);
