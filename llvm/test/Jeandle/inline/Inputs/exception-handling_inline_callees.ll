@@ -16,6 +16,6 @@ unwind:
 
 declare hotspotcc void @leaf_may_throw()
 
-attributes #0 = { "java-method" "java-method-pointer"="103" }
+attributes #0 = { "java-method"="103" }
 
 !java-method-compilation = !{}

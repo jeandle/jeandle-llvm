@@ -15,8 +15,8 @@ entry:
 
 declare hotspotcc i32 @callee_global_variable() #1 gc "hotspotgc"
 
-attributes #0 = { "java-method" "java-method-pointer"="1" }
-attributes #1 = { "java-method" "java-method-pointer"="101" }
+attributes #0 = { "java-method"="1" }
+attributes #1 = { "java-method"="101" }
 attributes #2 = { "monomorphic-target" }
 
 !java-method-compilation = !{}

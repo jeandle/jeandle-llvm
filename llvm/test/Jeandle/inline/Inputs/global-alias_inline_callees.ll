@@ -7,6 +7,6 @@ entry:
   ret i64 %addr
 }
 
-attributes #0 = { "java-method" "java-method-pointer"="102" }
+attributes #0 = { "java-method"="102" }
 
 !java-method-compilation = !{}

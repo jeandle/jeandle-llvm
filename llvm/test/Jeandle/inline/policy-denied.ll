@@ -14,8 +14,8 @@ entry:
 
 declare hotspotcc i32 @callee_policy_denied() #1 gc "hotspotgc"
 
-attributes #0 = { "java-method" "java-method-pointer"="4" }
-attributes #1 = { "java-method" "java-method-pointer"="104" }
+attributes #0 = { "java-method"="4" }
+attributes #1 = { "java-method"="104" }
 attributes #2 = { "monomorphic-target" }
 
 !java-method-compilation = !{}

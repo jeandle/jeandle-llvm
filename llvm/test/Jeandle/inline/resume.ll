@@ -28,9 +28,9 @@ root_unwind:
 declare hotspotcc void @callee_resume_landingpad() #1 gc "hotspotgc"
 declare hotspotcc void @callee_resume_zero() #2 gc "hotspotgc"
 
-attributes #0 = { "java-method" "java-method-pointer"="5" }
-attributes #1 = { "java-method" "java-method-pointer"="105" }
-attributes #2 = { "java-method" "java-method-pointer"="106" }
+attributes #0 = { "java-method"="5" }
+attributes #1 = { "java-method"="105" }
+attributes #2 = { "java-method"="106" }
 attributes #3 = { "monomorphic-target" }
 
 !java-method-compilation = !{}

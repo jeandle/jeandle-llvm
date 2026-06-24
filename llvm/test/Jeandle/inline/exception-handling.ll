@@ -23,8 +23,8 @@ unwind:
 
 declare hotspotcc i32 @callee_with_eh() #1 gc "hotspotgc"
 
-attributes #0 = { "java-method" "java-method-pointer"="3" }
-attributes #1 = { "java-method" "java-method-pointer"="103" }
+attributes #0 = { "java-method"="3" }
+attributes #1 = { "java-method"="103" }
 attributes #2 = { "monomorphic-target" }
 
 !java-method-compilation = !{}

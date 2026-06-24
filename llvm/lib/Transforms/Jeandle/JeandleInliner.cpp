@@ -229,8 +229,8 @@ static int getCallSiteBCI(const CallBase &CB) {
   reportInvalidCallSiteBCI(CB, "missing adjacent i32 deopt bci pair");
 }
 
-[[noreturn]] static void reportInvalidJavaMethodPointer(const Function &F,
-                                                        const char *Reason) {
+[[noreturn]] static void reportInvalidJavaMethodAttribute(const Function &F,
+                                                          const char *Reason) {
   std::string Message;
   raw_string_ostream OS(Message);
 
@@ -241,20 +241,19 @@ static int getCallSiteBCI(const CallBase &CB) {
 }
 
 static uintptr_t getJavaMethodPointer(const Function &F) {
-  llvm::Attribute Attr =
-      F.getFnAttribute(jeandle::Attribute::JavaMethodPointer);
+  llvm::Attribute Attr = F.getFnAttribute(jeandle::Attribute::JavaMethod);
   if (!Attr.isStringAttribute())
-    reportInvalidJavaMethodPointer(F, "missing java method pointer attribute");
+    reportInvalidJavaMethodAttribute(F, "missing java method attribute value");
 
   StringRef Value = Attr.getValueAsString();
   if (Value.empty())
-    reportInvalidJavaMethodPointer(F, "empty java method pointer attribute");
+    reportInvalidJavaMethodAttribute(F, "empty java method attribute value");
 
   uint64_t Raw = 0;
   bool Failed = Value.getAsInteger(10, Raw);
 
   if (Failed || Raw > std::numeric_limits<uintptr_t>::max())
-    reportInvalidJavaMethodPointer(F, "invalid java method pointer attribute");
+    reportInvalidJavaMethodAttribute(F, "invalid java method attribute value");
 
   return static_cast<uintptr_t>(Raw);
 }

@@ -32,8 +32,6 @@ public:
 
   static constexpr const char *JavaMethod = "java-method";
 
-  static constexpr const char *JavaMethodPointer = "java-method-pointer";
-
   static constexpr const char *JavaAccessorMethod = "java-accessor-method";
 
   static constexpr const char *MonomorphicTarget = "monomorphic-target";

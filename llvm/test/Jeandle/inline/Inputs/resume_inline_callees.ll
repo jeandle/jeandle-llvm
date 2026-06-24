@@ -21,7 +21,7 @@ entry:
 
 declare hotspotcc void @leaf_resume_landingpad()
 
-attributes #0 = { "java-method" "java-method-pointer"="105" }
-attributes #1 = { "java-method" "java-method-pointer"="106" }
+attributes #0 = { "java-method"="105" }
+attributes #1 = { "java-method"="106" }
 
 !java-method-compilation = !{}

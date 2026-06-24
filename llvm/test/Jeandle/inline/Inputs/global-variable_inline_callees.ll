@@ -8,6 +8,6 @@ entry:
   ret i32 %result
 }
 
-attributes #0 = { "java-method" "java-method-pointer"="101" }
+attributes #0 = { "java-method"="101" }
 
 !java-method-compilation = !{}
