@@ -15,16 +15,9 @@
 
 namespace llvm {
 
-struct DevirtualizationResult {
-  PreservedAnalyses PA = PreservedAnalyses::all();
-  bool Changed = false;
-  bool AddedMonomorphicTargets = false;
-};
-
 class JeandleDevirtualization : public PassInfoMixin<JeandleDevirtualization> {
 public:
-  DevirtualizationResult runDevirtualization(Module &M,
-                                             ModuleAnalysisManager &MAM);
+  PreservedAnalyses runDevirtualization(Module &M, ModuleAnalysisManager &MAM);
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
 };
 

@@ -16,10 +16,9 @@
 // progress condition holds.
 //
 // This is intentionally not a plain ModulePassManager. The driver must consume
-// step-specific results, such as ExposedNewCallSites and
-// AddedMonomorphicTargets, to decide when the repeat loop has reached a fixed
-// point. Standard pass managers only propagate PreservedAnalyses, so the repeat
-// policy has to live in this wrapper.
+// step-specific inline results, such as ExposedNewCallSites, to decide when the
+// repeat loop has reached a fixed point. Standard pass managers only propagate
+// PreservedAnalyses, so the repeat policy has to live in this wrapper.
 //
 //===----------------------------------------------------------------------===//
 
@@ -155,8 +154,9 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   //   2. If the inline round did not expose any new call sites, stop.
   //   3. Run devirtualization refinement. It must propagate inline-scope-id
   //      and deopt/BCI information when it clones or replaces calls.
-  //   4. If devirtualization did not produce a new MonomorphicTarget call
-  //      site, stop; otherwise rescan IR in the next inline round.
+  //   4. If devirtualization preserved everything, it did not produce a new
+  //      MonomorphicTarget call site and the loop stops; otherwise rescan IR
+  //      in the next inline round.
   for (;;) {
     InlineRoundResult InlineResult =
         Inliner.runInlineRound(M, MAM, InlineScopes);
@@ -166,17 +166,17 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
     if (!InlineResult.ExposedNewCallSites)
       break;
 
-    DevirtualizationResult DevirtResult =
-        Devirtualization.runDevirtualization(M, MAM);
-    Changed |= DevirtResult.Changed;
-    updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(DevirtResult.PA));
+    PreservedAnalyses DevirtPA = Devirtualization.runDevirtualization(M, MAM);
+    bool AddedMonomorphicTargets = !DevirtPA.areAllPreserved();
+    Changed |= AddedMonomorphicTargets;
+    updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(DevirtPA));
 
     // Devirtualization may rewrite the root IR and replace CallBase objects
     // exposed by the inline round. Do not carry a cross-step worklist through
     // this point; the next inline round rescans the root function and should
     // read the preserved inline-scope-id metadata from surviving/generated call
     // sites.
-    if (!DevirtResult.AddedMonomorphicTargets)
+    if (!AddedMonomorphicTargets)
       break;
   }
 

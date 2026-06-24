@@ -10,9 +10,13 @@
 //
 // JeandleDevirtualization has two entry points by design. run() is the
 // standard LLVM pass entry point for standalone use, while
-// runDevirtualization() returns DevirtualizationResult so JeandleInlineDriver
-// can use it as an iterative driver step and observe whether new monomorphic
-// targets were exposed.
+// runDevirtualization() is the named entry point used by JeandleInlineDriver.
+//
+// Devirtualization is allowed to change IR only when it exposes at least one
+// new llvm::jeandle::Attribute::MonomorphicTarget call site. If it cannot
+// expose a new inline candidate, it must leave IR unchanged and return
+// PreservedAnalyses::all(). The driver uses this contract to decide whether
+// another inline round is useful.
 //
 //===----------------------------------------------------------------------===//
 
@@ -20,10 +24,9 @@
 
 using namespace llvm;
 
-DevirtualizationResult
+PreservedAnalyses
 JeandleDevirtualization::runDevirtualization(Module &M,
                                              ModuleAnalysisManager &MAM) {
-  DevirtualizationResult Result;
   (void)M;
   (void)MAM;
 
@@ -37,11 +40,10 @@ JeandleDevirtualization::runDevirtualization(Module &M,
   //   - inline-scope-id metadata from the original call site, so the next
   //     inline round can pass the correct scope ID to JVM callbacks;
   //   - the deopt bundle / BCI information used by getCallSiteBCI.
-  Result.PA.preserveSet<AllAnalysesOn<Module>>();
-  return Result;
+  return PreservedAnalyses::all();
 }
 
 PreservedAnalyses JeandleDevirtualization::run(Module &M,
                                                ModuleAnalysisManager &MAM) {
-  return runDevirtualization(M, MAM).PA;
+  return runDevirtualization(M, MAM);
 }
