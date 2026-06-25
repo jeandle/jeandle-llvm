@@ -347,10 +347,11 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     return PreservedAnalyses::all();
 
   const jeandle::VMCallbacks *CB = jeandle::getVMCallbacks();
-  assert(CB && CB->IsConstantField && CB->GetFieldBasicTypeByOop &&
-         CB->GetConstantFieldInt && CB->GetConstantFieldLong &&
-         CB->GetConstantFieldFloatBits && CB->GetConstantFieldDoubleBits &&
-         CB->GetConstantFieldOop && "VMCallbacks must be set");
+  if (!CB || !CB->IsConstantField || !CB->GetFieldBasicTypeByOop ||
+      !CB->GetConstantFieldInt || !CB->GetConstantFieldLong ||
+      !CB->GetConstantFieldFloatBits || !CB->GetConstantFieldDoubleBits ||
+      !CB->GetConstantFieldOop)
+    return PreservedAnalyses::all();
 
   bool Changed = false;
   bool RoundChanged = false;
