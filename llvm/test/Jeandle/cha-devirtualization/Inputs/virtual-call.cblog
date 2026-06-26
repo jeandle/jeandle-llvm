@@ -1,0 +1,2 @@
+GetCHAOptInfo 100 200 300 500 false 0 = "600#700#25#Optimized_target"
+UpdateToStaticOptVirtualCall 42 = true

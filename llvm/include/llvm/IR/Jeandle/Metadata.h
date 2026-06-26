@@ -24,6 +24,8 @@ public:
   static constexpr const char *JavaMethodCompilation =
       "java-method-compilation";
 
+  static constexpr const char *StaticCallPatchSize = "static-call-patch-size";
+
   static constexpr const char *JavaKlass = "java-klass";
 
   static constexpr const char *JavaKlassExact = "java-klass-exact";

@@ -15,28 +15,13 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/Attributes.h"
-#include "llvm/IR/Jeandle/JeandleUtils.hpp"
+#include "llvm/IR/Jeandle/Deoptimization.h"
+#include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Statepoint.h"
 
 using namespace llvm;
-
-namespace {
-
-constexpr uint64_t NarrowOopMarkerType = 7;
-constexpr uint64_t HotSpotTNarrowOop = 16;
-
-// TODO: Update it when DeoptValueEncoding is moved to LLVM side and BasicType
-// mirror is added.
-uint64_t getNarrowOopMarkerEncoding() {
-  // Keep this layout in sync with HotSpot DeoptValueEncoding::encode().
-  // The marker has no slot index, so index is zero and the basic type
-  // records T_NARROWOOP.
-  return (NarrowOopMarkerType << 16) | HotSpotTNarrowOop;
-}
-
-} // end anonymous namespace
 
 PreservedAnalyses JeandleNarrowOopMarker::run(Function &F,
                                               FunctionAnalysisManager &) {
@@ -54,7 +39,10 @@ PreservedAnalyses JeandleNarrowOopMarker::run(Function &F,
 
   bool Changed = false;
   LLVMContext &Ctx = M->getContext();
-  uint64_t Marker = getNarrowOopMarkerEncoding();
+  uint64_t Marker = jeandle::DeoptValueEncoding(
+                        0, jeandle::DeoptValueEncoding::NarrowOopMarkerType,
+                        jeandle::T_NARROWOOP)
+                        .encode();
 
   for (CallBase *CB : Statepoints) {
     auto *SP = cast<GCStatepointInst>(CB);

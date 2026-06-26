@@ -28,6 +28,9 @@ attributes #1 = { "java-method"="103" }
 attributes #2 = { "monomorphic-target" }
 
 !java-method-compilation = !{}
+!static-call-patch-size = !{!0}
+
+!0 = !{i32 5}
 
 ; CHECK-LABEL: define hotspotcc i32 @root(
 ; CHECK-NOT: @callee_with_eh

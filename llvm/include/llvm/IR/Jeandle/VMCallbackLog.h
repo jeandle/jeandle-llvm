@@ -205,7 +205,7 @@ template <> inline CallbackValue encodeVMCallbackValue<bool>(bool V) {
   return CallbackValue::fromNum(V ? 1 : 0);
 }
 template <>
-inline CallbackValue encodeVMCallbackValue<const char *>(const char *V) {
+inline CallbackValue encodeVMCallbackValue<std::string>(std::string V) {
   return CallbackValue::fromStr(V);
 }
 
@@ -226,8 +226,8 @@ inline int64_t decodeVMCallbackValue<int64_t>(const CallbackValue &V) {
   return V.NumVal;
 }
 template <>
-inline const char *decodeVMCallbackValue<const char *>(const CallbackValue &V) {
-  return V.StrVal.c_str();
+inline std::string decodeVMCallbackValue<std::string>(const CallbackValue &V) {
+  return V.StrVal;
 }
 
 /// Encode variadic args into a vector for replay matching.

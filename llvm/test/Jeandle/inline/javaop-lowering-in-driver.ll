@@ -31,6 +31,9 @@ attributes #2 = { "monomorphic-target" }
 attributes #3 = { "lower-phase"="0" "noinline" }
 
 !java-method-compilation = !{}
+!static-call-patch-size = !{!0}
+
+!0 = !{i32 5}
 
 ; CHECK-LABEL: define hotspotcc i32 @root(
 ; The inlined JavaOp call is gone from @root, replaced by its body.

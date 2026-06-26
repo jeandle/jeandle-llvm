@@ -263,8 +263,7 @@ static void materializeInlineCalleeIR(uintptr_t CalleeMethod) {
 }
 
 /// Look up a callback result by (Kind, Args). Returns a reference into the
-/// long-lived log data, so the returned pointer is stable (important for
-/// string results decoded via decodeVMCallbackValue<const char*>).
+/// long-lived log data; std::string replay results are copied from it.
 /// Terminates if the log is not initialized or the key is not found.
 static const CallbackValue &lookupValue(unsigned Kind,
                                         ArrayRef<CallbackValue> Args,

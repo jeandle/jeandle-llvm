@@ -9,6 +9,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Jeandle/Pipeline.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/Transforms/Jeandle/CHADevirtualization.h"
 #include "llvm/Transforms/Jeandle/ConstantFieldFolding.h"
 #include "llvm/Transforms/Jeandle/ExpandNarrowOopCast.h"
 #include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
@@ -47,6 +49,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
                                                  PipelineOptions Options) {
   ModulePassManager PM;
   PM.addPass(JavaOperationLower(0));
+  PM.addPass(createModuleToFunctionPassAdaptor(CHADevirtualization()));
   // JeandleInlineDriver owns the inline-specific loop. Devirtualization
   // refinement between inline rounds should be wired inside the driver so
   // inline-scope state can be preserved across IR rewrites.

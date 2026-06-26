@@ -37,8 +37,8 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Jeandle/CHADevirtualization.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
-#include "llvm/Transforms/Jeandle/JeandleDevirtualization.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
@@ -126,6 +126,18 @@ static bool eraseAvailableExternallyJavaMethods(Module &M,
   return Changed;
 }
 
+static PreservedAnalyses getFunctionStepModulePreservedAnalyses(bool Changed) {
+  if (!Changed)
+    return PreservedAnalyses::all();
+
+  PreservedAnalyses PA;
+  // The changed function is invalidated explicitly with the function pass PA.
+  // Keep the FunctionAnalysisManager proxy so function analyses preserved by
+  // that PA, such as DominatorTreeAnalysis after CHA, remain cached.
+  PA.preserveSet<AllAnalysesOn<Function>>();
+  return PA;
+}
+
 static void updateDriverPreservedAnalyses(Module &M, ModuleAnalysisManager &MAM,
                                           PreservedAnalyses &DriverPA,
                                           PreservedAnalyses StepPA) {
@@ -197,9 +209,10 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   } ReplayScope(M);
 
   JeandleInliner Inliner(InlineAccessorsOnly);
-  JeandleDevirtualization Devirtualization;
+  CHADevirtualization Devirtualization;
   SmallVector<JeandleInlineScope, 16> InlineScopes;
   PreservedAnalyses DriverPA = PreservedAnalyses::all();
+  Function *RootFunction = getRootJavaMethodFunction(M);
   bool Changed = false;
 
   // The driver owns the inline/devirtualization loop. Keeping InlineScopes here
@@ -251,10 +264,15 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
       break;
     }
 
-    PreservedAnalyses DevirtPA = Devirtualization.runDevirtualization(M, MAM);
+    FunctionAnalysisManager &FAM =
+        MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
+    PreservedAnalyses DevirtPA = Devirtualization.run(*RootFunction, FAM);
     bool AddedMonomorphicTargets = !DevirtPA.areAllPreserved();
     Changed |= AddedMonomorphicTargets;
-    updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(DevirtPA));
+    FAM.invalidate(*RootFunction, DevirtPA);
+    updateDriverPreservedAnalyses(
+        M, MAM, DriverPA,
+        getFunctionStepModulePreservedAnalyses(AddedMonomorphicTargets));
 
     // Devirtualization may rewrite the root IR and replace CallBase objects
     // exposed by the inline round. Do not carry a cross-step worklist through
@@ -278,7 +296,6 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   if (!Changed)
     return PreservedAnalyses::all();
 
-  Function *RootFunction = getRootJavaMethodFunction(M);
   FunctionAnalysisManager &FAM =
       MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
 

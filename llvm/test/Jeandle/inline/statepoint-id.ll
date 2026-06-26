@@ -35,6 +35,9 @@ attributes #2 = { "monomorphic-target" }
 attributes #4 = { "java-method"="109" }
 
 !java-method-compilation = !{}
+!static-call-patch-size = !{!0}
+
+!0 = !{i32 5}
 
 ; CHECK-LABEL: define hotspotcc i32 @root(
 ; CHECK: invoke hotspotcc void @leaf_with_duplicate_statepoint() #[[FIRST_ATTR:[0-9]+]]

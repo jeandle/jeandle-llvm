@@ -18,6 +18,7 @@
 #define JEANDLE_VM_CALLBACK_H
 
 #include <cstdint>
+#include <string>
 
 namespace llvm::jeandle {
 
@@ -31,7 +32,7 @@ enum class VMCallbackValueType : uint8_t {
   Uintptr, // uintptr_t
   Int,     // int
   Long,    // int64_t
-  String,  // const char* (NUL-terminated)
+  String,  // std::string
 };
 
 // =============================================================================
@@ -41,7 +42,7 @@ enum class VMCallbackValueType : uint8_t {
 // ALL_JEANDLE_VM_CALLBACKS(def) invokes `def` for each VM callback with:
 //   Name     — callback name (struct field, CK_ prefix, stringification)
 //   RetType  — C++ return type (bool, uintptr_t)
-//   ResType  — VMCallbackValueType enum suffix (Bool, Uintptr, Int)
+//   ResType  — VMCallbackValueType enum suffix (Bool, Uintptr, Int, String)
 //   Params   — parenthesized parameter declarations,
 //              e.g. (uintptr_t a1, uintptr_t a2)
 //   Args     — parenthesized argument names, e.g. (a1, a2)
@@ -136,7 +137,7 @@ enum class VMCallbackValueType : uint8_t {
   def(GetConstantFieldInfo, int, Int,                                            \
       (int a1, int a2), (a1, a2),                                                \
       (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)                   \
-  def(GetOopHandleName, const char*, String,                                     \
+  def(GetOopHandleName, std::string, String,                                     \
       (int a1), (a1),                                                            \
       (VMCallbackValueType::Int), 1)                                             \
   def(GetOopKlass, uintptr_t, Uintptr,                                           \
@@ -157,7 +158,16 @@ enum class VMCallbackValueType : uint8_t {
       (VMCallbackValueType::Int, VMCallbackValueType::Int,                       \
        VMCallbackValueType::Uintptr), 3)                                         \
   def(RecordInliningComplete, bool, Bool,                                        \
-      (), (), (), 0)
+      (), (), (), 0)                                                             \
+  def(GetCHAOptInfo, std::string, String,                                        \
+      (uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4,                   \
+       bool a5, int a6), (a1, a2, a3, a4, a5, a6),                               \
+      (VMCallbackValueType::Uintptr, VMCallbackValueType::Uintptr,               \
+       VMCallbackValueType::Uintptr, VMCallbackValueType::Uintptr,               \
+       VMCallbackValueType::Bool, VMCallbackValueType::Int), 6)                  \
+  def(UpdateToStaticOptVirtualCall, bool, Bool,                                  \
+      (int64_t a1), (a1),                                                        \
+      (VMCallbackValueType::Long), 1)
 // clang-format on
 
 // =============================================================================
@@ -222,6 +232,18 @@ enum class VMCallbackValueType : uint8_t {
 ///                         materializing and inlining callees. The VM handles
 ///                         failures before returning, so LLVM expects a true
 ///                         result.
+///                         "oop_handle_Test_1") for a given oop id.
+///   GetOopKlass         — Returns the actual runtime klass pointer of the
+///                         constant oop with the given oop id, or 0 if it is
+///                         unavailable. Pure (id -> klass).
+///   GetCHAOptInfo       — Returns the CHA analysis info for CHA
+///                         devirtualization, or 0 if the call site cannot
+///                         be optimized. The JVM implementation also keeps
+///                         CallSiteInfo in sync for normal compilation.
+///   UpdateToStaticOptVirtualCall
+///                       — Updates the call site to a static opt virtual call.
+///                         This callback has side effects on jvm side.
+
 struct VMCallbacks {
   ALL_JEANDLE_VM_CALLBACKS(DEF_VM_CALLBACK_FIELD)
 };

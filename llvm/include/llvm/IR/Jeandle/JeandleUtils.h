@@ -1,4 +1,4 @@
-//===- JeandleUtils.hpp - Jeandle common utility definitions --------------===//
+//===- JeandleUtils.h - Jeandle common utility definitions ----------------===//
 //
 // Copyright (c) 2026, the Jeandle-LLVM Authors. All Rights Reserved.
 //
@@ -33,7 +33,35 @@ enum HotspotBasicType {
   T_LONG = 11,
   T_OBJECT = 12,
   T_ARRAY = 13,
+  T_VOID = 14,
+  T_ADDRESS = 15,
+  T_NARROWOOP = 16,
+  T_METADATA = 17,
+  T_NARROWKLASS = 18,
+  T_CONFLICT = 19,
+  T_ILLEGAL = 99
 };
+
+// Mirror of jvm isDoubleWordType function.
+// Return true if BasicTy is a double-word type.
+inline bool isDoubleWordType(HotspotBasicType BasicTy) {
+  return (BasicTy == T_DOUBLE || BasicTy == T_LONG);
+}
+
+// Transform llvm::Type to HotspotBasicType.
+inline HotspotBasicType llvm2java(Type *Ty) {
+  if (Ty->isPointerTy())
+    return T_OBJECT;
+  if (Ty->isIntegerTy(32))
+    return jeandle::T_INT;
+  if (Ty->isIntegerTy(64))
+    return jeandle::T_LONG;
+  if (Ty->isFloatTy())
+    return jeandle::T_FLOAT;
+  if (Ty->isDoubleTy())
+    return jeandle::T_DOUBLE;
+  return T_ILLEGAL;
+}
 
 /// Returns true if \p Ty is a pointer in the Java heap address space,
 /// i.e., it represents a uncompressed Java object reference (oop).

@@ -17,22 +17,34 @@ namespace llvm::jeandle {
 
 class Attribute {
 public:
+  /// Function attributes attached to Jeandle-compiled functions.
   static constexpr const char *UseCompressedOops = "use-compressed-oops";
 
+  static constexpr const char *LowerPhase = "lower-phase";
+
+  static constexpr const char *JavaMethod = "java-method";
+
+  static constexpr const char *JavaAccessorMethod = "java-accessor-method";
+
+  /// Java type attributes attached to function parameters, function returns,
+  /// and call/invoke returns.
+  static constexpr const char *JavaKlass = "java-klass";
+
+  static constexpr const char *JavaKlassExact = "java-klass-exact";
+
+  /// Call-site attributes attached to CallBase instructions.
+  ///
+  /// Java bytecode invokes are emitted as InvokeInsts, while VM calls may use
+  /// CallInsts. Both are represented by CallBase.
   static constexpr const char *StatepointID = "statepoint-id";
 
   static constexpr const char *StatepointNumPatchBytes =
       "statepoint-num-patch-bytes";
 
-  static constexpr const char *LowerPhase = "lower-phase";
+  /// Call-site attributes attached to java call(InvokeInsts).
+  static constexpr const char *Bytecode = "bytecode";
 
-  static constexpr const char *JavaKlass = "java-klass";
-
-  static constexpr const char *JavaKlassExact = "java-klass-exact";
-
-  static constexpr const char *JavaMethod = "java-method";
-
-  static constexpr const char *JavaAccessorMethod = "java-accessor-method";
+  static constexpr const char *DeclaredHolder = "declared-holder";
 
   static constexpr const char *MonomorphicTarget = "monomorphic-target";
 };
