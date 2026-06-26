@@ -38,7 +38,7 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/Attributes.h"
-#include "llvm/IR/Jeandle/Metadata.h"
+#include "llvm/IR/Jeandle/JeandleUtils.hpp"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Type.h"
@@ -700,10 +700,7 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   pushStackMapConstant(Ops, Builder, Allocas.size());
   Ops.append(Allocas.begin(), Allocas.end());
 
-  // Now construct GC base/derived map. Jeandle compressed-oop functions also
-  // carry a per-pair narrowoop flag based on the derived IR pointer address
-  // space.
-  bool UseNarrowOopStackMaps = useJeandleNarrowOopStackMaps(SI);
+  // Now construct GC base/derived map;
   pushStackMapConstant(Ops, Builder, SI.Ptrs.size());
   SDLoc L = Builder.getCurSDLoc();
   for (unsigned i = 0; i < SI.Ptrs.size(); ++i) {
@@ -715,14 +712,17 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
     assert(GCPtrIndexMap.count(Derived) && "derived not found in index map");
     Ops.push_back(
         Builder.DAG.getTargetConstant(GCPtrIndexMap[Derived], L, MVT::i64));
+  }
 
-    if (UseNarrowOopStackMaps) {
+  // Jeandle-owned side metadata. Keep the native GC pointer map layout as
+  // base/derived pairs; this independent block records the value shape for
+  // each pair in the same SI.Ptrs enumeration order.
+  if (useJeandleNarrowOopStackMaps(SI)) {
+    pushStackMapConstant(Ops, Builder, SI.Ptrs.size());
+    for (unsigned i = 0; i < SI.Ptrs.size(); ++i) {
       Type *DerivedTy = SI.Ptrs[i]->getType()->getScalarType();
-      auto *DerivedPtrTy = cast<PointerType>(DerivedTy);
-      bool IsNarrowOop = DerivedPtrTy->getAddressSpace() ==
-                         jeandle::AddrSpace::NarrowOopAddrSpace;
-      Ops.push_back(
-          Builder.DAG.getTargetConstant(IsNarrowOop ? 1 : 0, L, MVT::i64));
+      bool IsNarrowOop = jeandle::isNarrowOopType(DerivedTy);
+      Ops.push_back(Builder.DAG.getTargetConstant(IsNarrowOop ? 1 : 0, L, MVT::i64));
     }
   }
 }
