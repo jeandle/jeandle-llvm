@@ -24,6 +24,7 @@
 
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -32,6 +33,7 @@
 #include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/IR/Jeandle/VMCallbackLog.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -73,20 +75,22 @@ static Function *getRootJavaMethodFunction(Module &M) {
   return RootFunction;
 }
 
-static bool eraseInlineScopeIDs(Function &RootFunction) {
-  bool Changed = false;
+static void eraseInlineScopeIDs(Function &RootFunction) {
+  // inline-scope-id is private scheduling metadata produced and consumed only
+  // by this driver. Removing it before returning does not change the program IR
+  // seen by later passes, so it is intentionally not reported through
+  // PreservedAnalyses.
   for (Instruction &I : instructions(RootFunction)) {
     auto *CB = dyn_cast<CallBase>(&I);
     if (!CB || !CB->getMetadata(jeandle::Metadata::InlineScopeID))
       continue;
     CB->setMetadata(jeandle::Metadata::InlineScopeID, nullptr);
-    Changed = true;
   }
-  return Changed;
 }
 
 static bool eraseAvailableExternallyJavaMethods(Module &M,
-                                                Function *RootFunction) {
+                                                Function *RootFunction,
+                                                FunctionAnalysisManager &FAM) {
   SmallVector<Function *, 16> Candidates;
   bool Changed = false;
 
@@ -100,6 +104,7 @@ static bool eraseAvailableExternallyJavaMethods(Module &M,
   for (Function *F : Candidates) {
     if (F->isDeclaration())
       continue;
+    FAM.clear(*F, F->getName());
     F->deleteBody();
     Changed = true;
   }
@@ -107,6 +112,7 @@ static bool eraseAvailableExternallyJavaMethods(Module &M,
   for (Function *F : Candidates) {
     if (!F->use_empty())
       continue;
+    FAM.clear(*F, F->getName());
     F->eraseFromParent();
     Changed = true;
   }
@@ -140,6 +146,7 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   JeandleInliner Inliner(InlineAccessorsOnly);
   JeandleDevirtualization Devirtualization;
   SmallVector<JeandleInlineScope, 16> InlineScopes;
+  SmallDenseSet<uint64_t, 32> StatepointIDs;
   PreservedAnalyses DriverPA = PreservedAnalyses::all();
   bool Changed = false;
 
@@ -147,6 +154,10 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   // lets future devirtualization steps preserve JVM callback scope IDs across
   // IR rewrites instead of trying to infer scope from a freshly scanned root
   // body.
+  // StatepointIDs records every statepoint-id already used in the root
+  // compilation. Root call sites may already share an id; the set is not used
+  // to validate them. It only prevents newly inlined call sites from reusing an
+  // id whose Java-side CallSiteInfo already belongs to an existing call site.
   //
   // Loop shape:
   //   1. Run one inline round. The round tags every newly exposed call site
@@ -159,8 +170,8 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   //      in the next inline round.
   for (;;) {
     InlineRoundResult InlineResult =
-        Inliner.runInlineRound(M, MAM, InlineScopes);
-    Changed |= InlineResult.Changed;
+        Inliner.runInlineRound(M, MAM, InlineScopes, StatepointIDs);
+    Changed |= !InlineResult.PA.areAllPreserved();
     updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(InlineResult.PA));
 
     if (!InlineResult.ExposedNewCallSites)
@@ -184,32 +195,43 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
     return PreservedAnalyses::all();
 
   Function *RootFunction = getRootJavaMethodFunction(M);
+  FunctionAnalysisManager &FAM =
+      MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
 
   // inline-scope-id is driver-local scheduling state. It is only needed while
   // the driver loop is active so devirtualization rewrites can preserve scope
   // IDs for the next inline round. Drop it before leaving the driver to avoid
   // leaking stale scope IDs into later optimizations or a future driver
   // invocation.
-  bool ErasedInlineScopeIDs = false;
   if (RootFunction)
-    ErasedInlineScopeIDs = eraseInlineScopeIDs(*RootFunction);
-  Changed |= ErasedInlineScopeIDs;
+    eraseInlineScopeIDs(*RootFunction);
 
   // Notify the VM before available_externally callee bodies are removed. The
   // JVM uses this point to snapshot a replay side module containing the IR
   // materialized through GetInlineCalleeIR during this inline driver run.
   const jeandle::VMCallbacks *VC = jeandle::getVMCallbacks();
-  if (VC && VC->RecordInliningComplete && !VC->RecordInliningComplete())
-    LLVM_DEBUG(dbgs() << "JeandleInliner: RecordInliningComplete failed\n");
+  if (VC && VC->RecordInliningComplete) {
+    bool Recorded = VC->RecordInliningComplete();
+    assert(Recorded && "RecordInliningComplete must succeed or be handled by "
+                       "the JVM before returning");
+    (void)Recorded;
+  }
 
   // Callee IR requested from the JVM is available_externally: it is useful for
   // optimization, but should not remain as a definition after the inline driver
   // is done. If such a method still has uses, delete only its body so existing
   // references stay valid as declarations; otherwise erase the function.
-  bool RemovedCalleeIR = eraseAvailableExternallyJavaMethods(M, RootFunction);
+  bool RemovedCalleeIR =
+      eraseAvailableExternallyJavaMethods(M, RootFunction, FAM);
 
-  if (ErasedInlineScopeIDs || RemovedCalleeIR) {
-    PreservedAnalyses CleanupPA = PreservedAnalyses::none();
+  if (RemovedCalleeIR) {
+    PreservedAnalyses CleanupPA;
+    // eraseAvailableExternallyJavaMethods clears FAM entries for every callee
+    // it mutates or erases. Preserve the proxy and remaining function analyses
+    // so the module manager does not discard unrelated function-analysis
+    // caches.
+    CleanupPA.preserve<FunctionAnalysisManagerModuleProxy>();
+    CleanupPA.preserveSet<AllAnalysesOn<Function>>();
     updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(CleanupPA));
   }
 

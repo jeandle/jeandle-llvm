@@ -110,6 +110,7 @@ enum class VMCallbackValueType : uint8_t {
 // function in jeandleVMCallback.cpp and wire it in
 // register_jeandle_vm_callbacks().
 //
+// clang-format off
 #define ALL_JEANDLE_VM_CALLBACKS(def)                                            \
   def(IsSubtype, bool, Bool,                                                     \
       (uintptr_t a1, uintptr_t a2), (a1, a2),                                    \
@@ -148,12 +149,16 @@ enum class VMCallbackValueType : uint8_t {
   def(GetInlineCalleeIR, bool, Bool,                                             \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetNewStatepointID, int64_t, Long,                                         \
+      (int64_t a1), (a1),                                                        \
+      (VMCallbackValueType::Long), 1)                                            \
   def(RecordInlineSuccess, bool, Bool,                                           \
       (int a1, int a2, uintptr_t a3), (a1, a2, a3),                              \
       (VMCallbackValueType::Int, VMCallbackValueType::Int,                       \
        VMCallbackValueType::Uintptr), 3)                                         \
   def(RecordInliningComplete, bool, Bool,                                        \
-      (), (), (), 0)                                                             \
+      (), (), (), 0)
+// clang-format on
 
 // =============================================================================
 // VMCallbacks struct — generated from master list
@@ -195,9 +200,28 @@ enum class VMCallbackValueType : uint8_t {
 ///                         "oop_handle_Test_1") for a given oop id. The
 ///                         returned pointer remains valid for the duration
 ///                         of the compilation.
-///   GetOopKlass        — Returns the actual runtime klass pointer of the
+///   GetOopKlass         — Returns the actual runtime klass pointer of the
 ///                         constant oop with the given oop id, or 0 if it is
 ///                         unavailable. Pure (id -> klass).
+///   IsOkToInline        — Given an inline scope id, call-site BCI, and callee
+///                         Java method pointer, returns whether the VM allows
+///                         this inline attempt.
+///   GetInlineCalleeIR   — Given a callee Java method pointer, materializes its
+///                         LLVM IR into the active module and returns whether
+///                         the definition is available.
+///   GetNewStatepointID  — Given an inlined call site's old statepoint id,
+///                         returns a fresh statepoint id whose JVM callsite
+///                         info is valid in the root method.
+///   RecordInlineSuccess
+///                       — Notifies the VM that an inline scope id / BCI /
+///                         callee Java method pointer was successfully inlined.
+///                         The VM handles failures before returning, so LLVM
+///                         expects a true result.
+///   RecordInliningComplete
+///                       — Notifies the VM that the inline driver has finished
+///                         materializing and inlining callees. The VM handles
+///                         failures before returning, so LLVM expects a true
+///                         result.
 struct VMCallbacks {
   ALL_JEANDLE_VM_CALLBACKS(DEF_VM_CALLBACK_FIELD)
 };

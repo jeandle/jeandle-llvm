@@ -29,6 +29,7 @@
 #ifndef LLVM_TRANSFORMS_JEANDLE_JEANDLEINLINER_H
 #define LLVM_TRANSFORMS_JEANDLE_JEANDLEINLINER_H
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/PassManager.h"
@@ -44,7 +45,6 @@ using JeandleInlineScope = std::pair<Function *, int>;
 
 struct InlineRoundResult {
   PreservedAnalyses PA = PreservedAnalyses::all();
-  bool Changed = false;
   bool ExposedNewCallSites = false;
 };
 
@@ -66,7 +66,8 @@ public:
 
   InlineRoundResult
   runInlineRound(Module &M, ModuleAnalysisManager &MAM,
-                 SmallVectorImpl<JeandleInlineScope> &InlineScopes);
+                 SmallVectorImpl<JeandleInlineScope> &InlineScopes,
+                 SmallDenseSet<uint64_t, 32> &StatepointIDs);
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
 
 private:

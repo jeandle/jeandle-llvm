@@ -15,7 +15,8 @@
 // JeandleInliner has two entry points by design. run() is the standard LLVM
 // pass entry point for standalone use, while runInlineRound() returns
 // InlineRoundResult so JeandleInlineDriver can use it as an iterative driver
-// step and observe whether new call sites were exposed.
+// step and observe whether the round changed IR through PreservedAnalyses and
+// whether new call sites were exposed.
 //
 // Algorithm:
 //   1. Collect all call sites in the single root Jeandle Java method where the
@@ -52,6 +53,7 @@
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -143,6 +145,7 @@ static PreservedAnalyses getInlineRoundPreservedAnalyses(bool Changed) {
   // invalidated eagerly after each inline. Preserve the function-analysis proxy
   // here so the module pass manager does not discard unrelated function
   // analyses.
+  PA.preserve<FunctionAnalysisManagerModuleProxy>();
   PA.preserveSet<AllAnalysesOn<Function>>();
   return PA;
 }
@@ -151,7 +154,6 @@ static InlineRoundResult makeInlineRoundResult(bool Changed,
                                                bool ExposedNewCallSites) {
   InlineRoundResult Result;
   Result.PA = getInlineRoundPreservedAnalyses(Changed);
-  Result.Changed = Changed;
   Result.ExposedNewCallSites = ExposedNewCallSites;
   return Result;
 }
@@ -181,6 +183,72 @@ static int getInlineScopeID(const CallBase &CB) {
     report_fatal_error("JeandleInliner: invalid inline-scope-id metadata");
 
   return static_cast<int>(CI->getSExtValue());
+}
+
+[[noreturn]] static void reportInvalidStatepointID(const CallBase &CB,
+                                                   const char *Reason) {
+  std::string Message;
+  raw_string_ostream OS(Message);
+
+  OS << "JeandleInliner: " << Reason;
+  if (const Function *Caller = CB.getCaller())
+    OS << " in " << Caller->getName();
+  OS << ": " << CB;
+
+  OS.flush();
+  report_fatal_error(StringRef(Message));
+}
+
+static bool getStatepointID(const CallBase &CB, uint64_t &StatepointID) {
+  Attribute Attr =
+      CB.getAttributes().getFnAttr(jeandle::Attribute::StatepointID);
+  if (!Attr.isValid())
+    return false;
+  if (!Attr.isStringAttribute())
+    reportInvalidStatepointID(CB, "invalid statepoint-id attribute");
+  if (Attr.getValueAsString().getAsInteger(10, StatepointID))
+    reportInvalidStatepointID(CB, "invalid statepoint-id attribute");
+  return true;
+}
+
+static void setStatepointID(CallBase &CB, uint64_t StatepointID) {
+  CB.removeFnAttr(jeandle::Attribute::StatepointID);
+  CB.addFnAttr(Attribute::get(CB.getContext(), jeandle::Attribute::StatepointID,
+                              std::to_string(StatepointID)));
+}
+
+static void collectRootStatepointID(const CallBase &CB,
+                                    SmallDenseSet<uint64_t, 32> &IDs) {
+  uint64_t StatepointID = 0;
+  if (!getStatepointID(CB, StatepointID))
+    return;
+  IDs.insert(StatepointID);
+}
+
+static bool ensureUniqueStatepointID(CallBase &CB,
+                                     SmallDenseSet<uint64_t, 32> &IDs,
+                                     const jeandle::VMCallbacks &VC) {
+  uint64_t StatepointID = 0;
+  if (!getStatepointID(CB, StatepointID))
+    return false;
+  if (IDs.insert(StatepointID).second)
+    return false;
+
+  if (StatepointID > uint64_t(std::numeric_limits<int64_t>::max()))
+    reportInvalidStatepointID(
+        CB, "statepoint-id too large for GetNewStatepointID callback");
+
+  int64_t NewStatepointID =
+      VC.GetNewStatepointID(static_cast<int64_t>(StatepointID));
+  if (NewStatepointID < 0)
+    reportInvalidStatepointID(CB, "GetNewStatepointID returned a negative id");
+  uint64_t NewID = static_cast<uint64_t>(NewStatepointID);
+  if (!IDs.insert(NewID).second)
+    reportInvalidStatepointID(
+        CB, "GetNewStatepointID returned a duplicate statepoint-id");
+
+  setStatepointID(CB, NewID);
+  return true;
 }
 
 static void logPassBoundary(const char *Phase, const Function &Root,
@@ -309,7 +377,8 @@ static void logInlineEvent(
 
 InlineRoundResult JeandleInliner::runInlineRound(
     Module &M, ModuleAnalysisManager &MAM,
-    SmallVectorImpl<JeandleInlineScope> &InlineScopes) {
+    SmallVectorImpl<JeandleInlineScope> &InlineScopes,
+    SmallDenseSet<uint64_t, 32> &StatepointIDs) {
   if (!M.getNamedMetadata(jeandle::Metadata::JavaMethodCompilation)) {
     return makeInlineRoundResult(/*Changed=*/false,
                                  /*ExposedNewCallSites=*/false);
@@ -330,6 +399,12 @@ InlineRoundResult JeandleInliner::runInlineRound(
   if (!VC->GetInlineCalleeIR) {
     LLVM_DEBUG(
         dbgs() << "JeandleInliner: no GetInlineCalleeIR callback, skipping\n");
+    return makeInlineRoundResult(/*Changed=*/false,
+                                 /*ExposedNewCallSites=*/false);
+  }
+  if (!VC->GetNewStatepointID) {
+    LLVM_DEBUG(
+        dbgs() << "JeandleInliner: no GetNewStatepointID callback, skipping\n");
     return makeInlineRoundResult(/*Changed=*/false,
                                  /*ExposedNewCallSites=*/false);
   }
@@ -364,6 +439,7 @@ InlineRoundResult JeandleInliner::runInlineRound(
     if (!CB)
       continue;
     KnownCallSites.insert(CB);
+    collectRootStatepointID(*CB, StatepointIDs);
     Function *Callee = CB->getCalledFunction();
     if (!Callee || !isEligibleInlineCallee(*Callee, InlineAccessorsOnly))
       continue;
@@ -397,7 +473,6 @@ InlineRoundResult JeandleInliner::runInlineRound(
     // passes cannot inline them either.
     if (Callee == RootFunction) {
       CB->setIsNoInline();
-      Changed = true;
       continue;
     }
 
@@ -471,10 +546,9 @@ InlineRoundResult JeandleInliner::runInlineRound(
       assertNoNonEntryAlloca(*Caller);
 #endif
       bool Recorded = VC->RecordInlineSuccess(InlineScopeID, BCI, CalleeMethod);
-      if (!Recorded) {
-        logInlineEvent("record-fail", ScopeCaller, BCI, Callee, InlineScopeID,
-                       ThreadID, InlineScopes);
-      }
+      assert(Recorded && "RecordInlineSuccess must succeed or be handled by "
+                         "the JVM before returning");
+      (void)Recorded;
     }
 
     Changed = true;
@@ -522,6 +596,7 @@ InlineRoundResult JeandleInliner::runInlineRound(
     KnownCallSites = std::move(CurrentCallSites);
 
     for (CallBase *NewCB : NewCallSites) {
+      ensureUniqueStatepointID(*NewCB, StatepointIDs, *VC);
       setInlineScopeID(*NewCB, NewScopeID);
       ExposedNewCallSites = true;
 
@@ -533,7 +608,6 @@ InlineRoundResult JeandleInliner::runInlineRound(
       // passes cannot inline them either.
       if (NewCallee == RootFunction) {
         NewCB->setIsNoInline();
-        Changed = true;
         continue;
       }
       if (!NewCallee ||
@@ -544,19 +618,14 @@ InlineRoundResult JeandleInliner::runInlineRound(
     }
   }
 
-  if (!Changed) {
-    logPassBoundary("end", *RootFunction, ThreadID);
-    return makeInlineRoundResult(/*Changed=*/false,
-                                 /*ExposedNewCallSites=*/false);
-  }
-
   logPassBoundary("end", *RootFunction, ThreadID);
-  return makeInlineRoundResult(/*Changed=*/true, ExposedNewCallSites);
+  return makeInlineRoundResult(Changed, ExposedNewCallSites);
 }
 
 PreservedAnalyses JeandleInliner::run(Module &M, ModuleAnalysisManager &MAM) {
   SmallVector<JeandleInlineScope, 16> InlineScopes;
-  return runInlineRound(M, MAM, InlineScopes).PA;
+  SmallDenseSet<uint64_t, 32> StatepointIDs;
+  return runInlineRound(M, MAM, InlineScopes, StatepointIDs).PA;
 }
 
 /* ------------- Inline callee replay support begin ------------- */
