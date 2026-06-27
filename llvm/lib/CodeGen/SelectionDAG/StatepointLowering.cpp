@@ -722,7 +722,8 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
     for (unsigned i = 0; i < SI.Ptrs.size(); ++i) {
       Type *DerivedTy = SI.Ptrs[i]->getType()->getScalarType();
       bool IsNarrowOop = jeandle::isNarrowOopType(DerivedTy);
-      Ops.push_back(Builder.DAG.getTargetConstant(IsNarrowOop ? 1 : 0, L, MVT::i64));
+      Ops.push_back(
+          Builder.DAG.getTargetConstant(IsNarrowOop ? 1 : 0, L, MVT::i64));
     }
   }
 }

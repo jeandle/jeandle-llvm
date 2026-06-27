@@ -173,35 +173,28 @@ bool StatepointOpers::isFoldableReg(const MachineInstr *MI, Register Reg) {
   return StatepointOpers(MI).isFoldableReg(Reg);
 }
 
-
-
-unsigned JeandleNarrowOopOpers::getNarrowOopFlags(
-    SmallVectorImpl<uint64_t> &Flags) {
+unsigned
+JeandleNarrowOopOpers::getNarrowOopFlags(SmallVectorImpl<uint64_t> &Flags) {
   StatepointOpers SO(MI);
   unsigned CurIdx = SO.getNumGcMapEntriesIdx();
   unsigned GCMapSize = getConstMetaVal(*MI, CurIdx - 1);
   CurIdx += 1 + 2 * GCMapSize;
 
-  assert(CurIdx + 1 < MI->getNumOperands() &&
-         "missing jeandle narrow oop map");
+  assert(CurIdx + 1 < MI->getNumOperands() && "missing jeandle narrow oop map");
   assert(MI->getOperand(CurIdx).isImm() &&
          MI->getOperand(CurIdx).getImm() == StackMaps::ConstantOp &&
          "missing jeandle narrow oop map marker");
   ++CurIdx;
 
-  assert(MI->getOperand(CurIdx).isImm() &&
-         "missing jeandle narrow oop map size");
   unsigned FlagCount = MI->getOperand(CurIdx++).getImm();
   assert(FlagCount == GCMapSize &&
          "jeandle narrow oop map must match gc pointer map size");
 
-  for (unsigned I = 0; I < FlagCount; ++I) {
-    assert(CurIdx < MI->getNumOperands() &&
-           "truncated jeandle narrow oop map");
-    assert(MI->getOperand(CurIdx).isImm() &&
-           "jeandle narrow oop flag must be immediate");
+  assert(CurIdx + FlagCount <= MI->getNumOperands() &&
+         "truncated jeandle narrow oop map");
+
+  for (unsigned I = 0; I < FlagCount; ++I)
     Flags.push_back(MI->getOperand(CurIdx++).getImm());
-  }
   return FlagCount;
 }
 
@@ -569,8 +562,8 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
     CurrentIt->second.RecordCount++;
 }
 
-void StackMaps::recordJeandleNarrowOopOpers(
-    const MachineInstr &MI, uint64_t ID) {
+void StackMaps::recordJeandleNarrowOopOpers(const MachineInstr &MI,
+                                            uint64_t ID) {
   StatepointOpers SO(&MI);
   SmallVector<std::pair<unsigned, unsigned>, 8> GCPairs;
   unsigned NumGCPairs = SO.getGCPointerMap(GCPairs);
@@ -587,8 +580,8 @@ void StackMaps::recordJeandleNarrowOopOpers(
     if (NarrowOopFlags[I] != 0)
       NarrowOopMask[I / 64] |= uint64_t(1) << (I % 64);
   }
-  JeandleNarrowOopInfos.emplace_back(CSInfos.back().CSOffsetExpr, ID, NumGCPairs,
-                                      std::move(NarrowOopMask));
+  JeandleNarrowOopInfos.emplace_back(CSInfos.back().CSOffsetExpr, ID,
+                                     NumGCPairs, std::move(NarrowOopMask));
 }
 
 void StackMaps::recordStackMap(const MCSymbol &L, const MachineInstr &MI) {
