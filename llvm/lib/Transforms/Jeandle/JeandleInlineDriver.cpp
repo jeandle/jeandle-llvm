@@ -38,6 +38,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Jeandle/JeandleDevirtualization.h"
+#include "llvm/Transforms/Scalar/InstSimplifyPass.h"
 
 #include <string>
 #include <utility>
@@ -127,6 +128,30 @@ static void updateDriverPreservedAnalyses(Module &M, ModuleAnalysisManager &MAM,
   DriverPA.intersect(std::move(StepPA));
 }
 
+static PreservedAnalyses runRootInstSimplify(Module &M,
+                                             ModuleAnalysisManager &MAM) {
+  Function *RootFunction = getRootJavaMethodFunction(M);
+  if (!RootFunction)
+    return PreservedAnalyses::all();
+
+  FunctionAnalysisManager &FAM =
+      MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
+
+  PreservedAnalyses FunctionPA = InstSimplifyPass().run(*RootFunction, FAM);
+  if (FunctionPA.areAllPreserved())
+    return PreservedAnalyses::all();
+
+  FAM.invalidate(*RootFunction, FunctionPA);
+
+  PreservedAnalyses PA;
+  // InstSimplify only runs on the root function here. Its function analyses
+  // have already been invalidated with the pass result above, so keep the FAM
+  // proxy and unrelated function-analysis caches alive for the module manager.
+  PA.preserve<FunctionAnalysisManagerModuleProxy>();
+  PA.preserveSet<AllAnalysesOn<Function>>();
+  return PA;
+}
+
 PreservedAnalyses JeandleInlineDriver::run(Module &M,
                                            ModuleAnalysisManager &MAM) {
   jeandle::registerInlineCalleeIRReplayMaterializer(
@@ -176,6 +201,14 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
 
     if (!InlineResult.ExposedNewCallSites)
       break;
+
+    // Keep the per-round cleanup conservative: InstSimplify performs local
+    // instruction simplification without introducing new instructions or
+    // rewriting the CFG. Run it before devirtualization so newly exposed call
+    // sites are seen after cheap local folding.
+    PreservedAnalyses SimplifyPA = runRootInstSimplify(M, MAM);
+    Changed |= !SimplifyPA.areAllPreserved();
+    updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(SimplifyPA));
 
     PreservedAnalyses DevirtPA = Devirtualization.runDevirtualization(M, MAM);
     bool AddedMonomorphicTargets = !DevirtPA.areAllPreserved();

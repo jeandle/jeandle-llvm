@@ -47,8 +47,8 @@ attributes #3 = { "monomorphic-target" }
 ; CHECK-NEXT: br label %root_unwind
 ; CHECK: root_unwind:
 ; CHECK: landingpad i64
-; CHECK: phi i64
-; CHECK-SAME: [ 0, %after_landingpad ]
+; CHECK: root_unwind.body1:
+; CHECK-NOT: phi i64
 ; CHECK: ret i32 -1
 ; CHECK-NOT: define available_externally hotspotcc void @callee_resume_landingpad
 ; CHECK-NOT: define available_externally hotspotcc void @callee_resume_zero
