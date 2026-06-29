@@ -63,9 +63,17 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
   PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
   PM.addPass(JavaOperationLower(1));
-  PM.addPass(createModuleToFunctionPassAdaptor(TLSPointerRewrite()));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(level)));
   PM.addPass(RewriteStatepointsForGC());
+  // Phase 9 is reserved for JavaOps that must be lowered after RS4GC. In
+  // particular, G1 barriers can materialize raw addresses derived from oops
+  // (for example card-table addresses). If those addresses are created before
+  // RS4GC and optimized across safepoints, they are not relocated when the
+  // source oop moves. Lower them after RS4GC so the optimizer cannot reuse
+  // stale raw derived addresses across safepoints.
+  PM.addPass(JavaOperationLower(9));
+  PM.addPass(createModuleToFunctionPassAdaptor(TLSPointerRewrite()));
+  PM.addPass(createModuleToFunctionPassAdaptor(InstSimplifyPass()));
   return PM;
 }
 
