@@ -53,7 +53,6 @@
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
 
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -217,38 +216,24 @@ static void setStatepointID(CallBase &CB, uint64_t StatepointID) {
                               std::to_string(StatepointID)));
 }
 
-static void collectRootStatepointID(const CallBase &CB,
-                                    SmallDenseSet<uint64_t, 32> &IDs) {
-  uint64_t StatepointID = 0;
-  if (!getStatepointID(CB, StatepointID))
-    return;
-  IDs.insert(StatepointID);
-}
-
-static bool ensureUniqueStatepointID(CallBase &CB,
-                                     SmallDenseSet<uint64_t, 32> &IDs,
+// A statepoint-id points to JVM-side CallSiteInfo and must not be shared by
+// an inlined copy and the original template call site. Only call sites that
+// already carry statepoint-id need rewriting; helper/runtime calls without the
+// attribute have no JVM state to clone. The VM owns global id allocation, so
+// LLVM only asks for a fresh id and validates the returned value's shape.
+static void ensureUniqueStatepointID(CallBase &CB,
                                      const jeandle::VMCallbacks &VC) {
   uint64_t StatepointID = 0;
   if (!getStatepointID(CB, StatepointID))
-    return false;
-  if (IDs.insert(StatepointID).second)
-    return false;
-
-  if (StatepointID > uint64_t(std::numeric_limits<int64_t>::max()))
-    reportInvalidStatepointID(
-        CB, "statepoint-id too large for GetNewStatepointID callback");
+    return;
+  assert(StatepointID <= uint64_t(std::numeric_limits<int64_t>::max()) &&
+         "statepoint-id too large for GetNewStatepointID callback");
 
   int64_t NewStatepointID =
       VC.GetNewStatepointID(static_cast<int64_t>(StatepointID));
   if (NewStatepointID < 0)
     reportInvalidStatepointID(CB, "GetNewStatepointID returned a negative id");
-  uint64_t NewID = static_cast<uint64_t>(NewStatepointID);
-  if (!IDs.insert(NewID).second)
-    reportInvalidStatepointID(
-        CB, "GetNewStatepointID returned a duplicate statepoint-id");
-
-  setStatepointID(CB, NewID);
-  return true;
+  setStatepointID(CB, static_cast<uint64_t>(NewStatepointID));
 }
 
 static void logPassBoundary(const char *Phase, const Function &Root,
@@ -377,8 +362,7 @@ static void logInlineEvent(
 
 InlineRoundResult JeandleInliner::runInlineRound(
     Module &M, ModuleAnalysisManager &MAM,
-    SmallVectorImpl<JeandleInlineScope> &InlineScopes,
-    SmallDenseSet<uint64_t, 32> &StatepointIDs) {
+    SmallVectorImpl<JeandleInlineScope> &InlineScopes) {
   if (!M.getNamedMetadata(jeandle::Metadata::JavaMethodCompilation)) {
     return makeInlineRoundResult(/*Changed=*/false,
                                  /*ExposedNewCallSites=*/false);
@@ -439,7 +423,6 @@ InlineRoundResult JeandleInliner::runInlineRound(
     if (!CB)
       continue;
     KnownCallSites.insert(CB);
-    collectRootStatepointID(*CB, StatepointIDs);
     Function *Callee = CB->getCalledFunction();
     if (!Callee || !isEligibleInlineCallee(*Callee, InlineAccessorsOnly))
       continue;
@@ -596,7 +579,10 @@ InlineRoundResult JeandleInliner::runInlineRound(
     KnownCallSites = std::move(CurrentCallSites);
 
     for (CallBase *NewCB : NewCallSites) {
-      ensureUniqueStatepointID(*NewCB, StatepointIDs, *VC);
+      // Statepoint ids in callee IR belong to the original template call sites.
+      // Every inlined copy must get a fresh JVM-side id so updating its
+      // CallSiteInfo cannot affect the template or an uninlined call site.
+      ensureUniqueStatepointID(*NewCB, *VC);
       setInlineScopeID(*NewCB, NewScopeID);
       ExposedNewCallSites = true;
 
@@ -624,8 +610,7 @@ InlineRoundResult JeandleInliner::runInlineRound(
 
 PreservedAnalyses JeandleInliner::run(Module &M, ModuleAnalysisManager &MAM) {
   SmallVector<JeandleInlineScope, 16> InlineScopes;
-  SmallDenseSet<uint64_t, 32> StatepointIDs;
-  return runInlineRound(M, MAM, InlineScopes, StatepointIDs).PA;
+  return runInlineRound(M, MAM, InlineScopes).PA;
 }
 
 /* ------------- Inline callee replay support begin ------------- */

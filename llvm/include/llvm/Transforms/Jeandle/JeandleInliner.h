@@ -29,7 +29,6 @@
 #ifndef LLVM_TRANSFORMS_JEANDLE_JEANDLEINLINER_H
 #define LLVM_TRANSFORMS_JEANDLE_JEANDLEINLINER_H
 
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/PassManager.h"
@@ -66,8 +65,7 @@ public:
 
   InlineRoundResult
   runInlineRound(Module &M, ModuleAnalysisManager &MAM,
-                 SmallVectorImpl<JeandleInlineScope> &InlineScopes,
-                 SmallDenseSet<uint64_t, 32> &StatepointIDs);
+                 SmallVectorImpl<JeandleInlineScope> &InlineScopes);
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
 
 private:

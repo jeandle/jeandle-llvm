@@ -1,8 +1,8 @@
 ; RUN: opt -S -passes=jeandle-inline-driver -jeandle-vm-callback-log=%S/Inputs/statepoint-id.cblog %s 2>&1 | FileCheck %s
 
-; Two inlined callees may expose call sites carrying the same statepoint-id.
-; The first id can be kept, but the duplicate must be refreshed through the JVM
-; callback because the id names Java-side callsite info in the root method.
+; Inlined call sites carry statepoint-id attributes cloned from callee template
+; IR. The template call sites keep their original ids, so every inlined copy must
+; get a fresh id before it is attached to the root method.
 
 @jeandle.personality = global ptr null
 
@@ -39,5 +39,5 @@ attributes #4 = { "java-method"="109" }
 ; CHECK-LABEL: define hotspotcc i32 @root(
 ; CHECK: invoke hotspotcc void @leaf_with_duplicate_statepoint() #[[FIRST_ATTR:[0-9]+]]
 ; CHECK: invoke hotspotcc void @leaf_with_duplicate_statepoint() #[[SECOND_ATTR:[0-9]+]]
-; CHECK-DAG: attributes #[[FIRST_ATTR]] = { {{.*}}"statepoint-id"="7"{{.*}} }
-; CHECK-DAG: attributes #[[SECOND_ATTR]] = { {{.*}}"statepoint-id"="1007"{{.*}} }
+; CHECK-DAG: attributes #[[FIRST_ATTR]] = { {{.*}}"statepoint-id"="1007"{{.*}} }
+; CHECK-DAG: attributes #[[SECOND_ATTR]] = { {{.*}}"statepoint-id"="1008"{{.*}} }

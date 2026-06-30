@@ -24,7 +24,6 @@
 
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
 
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -171,7 +170,6 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   JeandleInliner Inliner(InlineAccessorsOnly);
   JeandleDevirtualization Devirtualization;
   SmallVector<JeandleInlineScope, 16> InlineScopes;
-  SmallDenseSet<uint64_t, 32> StatepointIDs;
   PreservedAnalyses DriverPA = PreservedAnalyses::all();
   bool Changed = false;
 
@@ -179,10 +177,6 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   // lets future devirtualization steps preserve JVM callback scope IDs across
   // IR rewrites instead of trying to infer scope from a freshly scanned root
   // body.
-  // StatepointIDs records every statepoint-id already used in the root
-  // compilation. Root call sites may already share an id; the set is not used
-  // to validate them. It only prevents newly inlined call sites from reusing an
-  // id whose Java-side CallSiteInfo already belongs to an existing call site.
   //
   // Loop shape:
   //   1. Run one inline round. The round tags every newly exposed call site
@@ -195,7 +189,7 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   //      in the next inline round.
   for (;;) {
     InlineRoundResult InlineResult =
-        Inliner.runInlineRound(M, MAM, InlineScopes, StatepointIDs);
+        Inliner.runInlineRound(M, MAM, InlineScopes);
     Changed |= !InlineResult.PA.areAllPreserved();
     updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(InlineResult.PA));
 
