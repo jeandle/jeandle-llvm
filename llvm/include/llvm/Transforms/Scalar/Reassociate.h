@@ -25,6 +25,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/ValueHandle.h"
@@ -76,9 +77,11 @@ inline bool operator<(const ValueEntry &LHS, const ValueEntry &RHS) {
   return LHS.Rank > RHS.Rank;
 }
 
-/// Classifies the leaves of one expression. Caches the enclosing loop so we
-/// don't call getLoopFor per leaf. A null loop (no LoopInfo, or code outside
-/// any loop) makes every leaf LoopVariant, i.e. plain rank ordering.
+/// Classifies the leaves of one expression. The constructor precomputes the
+/// set of values on this expression's loop-carried recurrence (see the .cpp);
+/// classify() is then an O(1) membership test. A null loop (no LoopInfo, or
+/// code outside any loop) makes every leaf LoopVariant, i.e. plain rank
+/// ordering.
 class OpClassifier {
 public:
   OpClassifier(const LoopInfo *LI, const Instruction *I);
@@ -86,11 +89,11 @@ public:
 
 private:
   const Loop *EnclosingLoop;
-  // Root of the expression tree being sorted. A header phi is this chain's
-  // recurrence if its backedge value flows back from the root (directly or
-  // through intermediate ops); other header phis (e.g. induction vars, whose
-  // backedge is a different chain) are ordinary loop-variant leaves here.
-  const Instruction *RootI;
+  // Values on this expression's loop-carried recurrence: the forward
+  // intra-iteration slice from each reduction phi whose next-iteration value
+  // the root computes. A leaf in this set sorts to the outermost operand so the
+  // loop carry stays one ALU op; everything else falls back to rank ordering.
+  SmallPtrSet<const Value *, 16> RecurrenceSet;
 };
 
 /// Utility class representing a base and exponent pair which form one

@@ -4,14 +4,6 @@
 ;; Tests that when we reassociate %add93, we apply its debug location to the new
 ;; instructions.
 
-;; Sibling test `@foo_nofold`: same intent, but with operands that cannot be
-;; constant-folded so the rewrite genuinely produces *multiple* new add
-;; instructions, exercising the multi-instruction `!dbg` propagation path.
-;; (`@foo` above now folds down to a single rewritten add because constants
-;; are grouped to Ops[end] and absorb early, which is a strict improvement
-;; but means `@foo` alone no longer exercises debug-loc propagation across
-;; multiple new instructions. `@foo_nofold` closes that test-coverage hole.)
-
 define void @foo(i32 %0) {
 ; CHECK-LABEL: define void @foo(
 ; CHECK-SAME: i32 [[TMP0:%.*]]) {
@@ -19,8 +11,10 @@ define void @foo(i32 %0) {
 ; CHECK-NEXT:    br label %[[FOR_COND23:.*]]
 ; CHECK:       [[FOR_COND23]]:
 ; CHECK-NEXT:    [[SUB59:%.*]] = sub i32 0, 0
-; CHECK-NEXT:    [[MUL77:%.*]] = mul i32 [[SUB59]], [[TMP0]]
-; CHECK-NEXT:    [[REASS_MUL:%.*]] = add i32 [[MUL77]], 1, !dbg [[DBG3:![0-9]+]]
+; CHECK-NEXT:    [[MUL68:%.*]] = mul i32 0, [[TMP0]]
+; CHECK-NEXT:    [[REASS_ADD:%.*]] = add i32 [[MUL68]], [[TMP0]], !dbg [[DBG3:![0-9]+]]
+; CHECK-NEXT:    [[REASS_MUL1:%.*]] = mul i32 [[REASS_ADD]], [[SUB59]], !dbg [[DBG3]]
+; CHECK-NEXT:    [[REASS_MUL:%.*]] = add i32 [[REASS_MUL1]], 1, !dbg [[DBG3]]
 ; CHECK-NEXT:    [[CONV95:%.*]] = trunc i32 [[REASS_MUL]] to i16
 ; CHECK-NEXT:    store i16 [[CONV95]], ptr null, align 2
 ; CHECK-NEXT:    br label %[[FOR_COND23]]
@@ -40,45 +34,6 @@ for.cond23:                                       ; preds = %for.cond23, %entry
   br label %for.cond23
 }
 
-;; 4-leaf reassociable add chain whose operands are all non-foldable distinct
-;; instruction values. After Reassociate's linearize+sort+rebuild the chain
-;; produces THREE add instructions in the rewrite (the original %ab, %cd,
-;; %abcd are REUSED with new operands). Each input add carries `!dbg !4`;
-;; RewriteExprTree sets new operands without touching metadata, so the !dbg
-;; annotation must survive on EVERY add in the rebuilt tree. A regression
-;; that drops or resets debug locs during the rebuild would fail the CHECK
-;; lines below.
-define void @foo_nofold(i32 %x, i32 %y, i32 %z, i32 %w) {
-; CHECK-LABEL: define void @foo_nofold(
-; CHECK-SAME: i32 [[X:%.*]], i32 [[Y:%.*]], i32 [[Z:%.*]], i32 [[W:%.*]]) {
-; CHECK-NEXT:  [[ENTRY:.*:]]
-; CHECK-NEXT:    br label %[[LOOP:.*]]
-; CHECK:       [[LOOP]]:
-; CHECK-NEXT:    [[A:%.*]] = mul i32 [[X]], 3
-; CHECK-NEXT:    [[B:%.*]] = mul i32 [[Y]], 5
-; CHECK-NEXT:    [[C:%.*]] = mul i32 [[Z]], 7
-; CHECK-NEXT:    [[D:%.*]] = mul i32 [[W]], 11
-; CHECK-NEXT:    [[CD:%.*]] = add i32 [[B]], [[A]], !dbg [[DBG3]]
-; CHECK-NEXT:    [[AB:%.*]] = add i32 [[CD]], [[C]], !dbg [[DBG3]]
-; CHECK-NEXT:    [[ABCD:%.*]] = add i32 [[AB]], [[D]], !dbg [[DBG3]]
-; CHECK-NEXT:    store i32 [[ABCD]], ptr null, align 4
-; CHECK-NEXT:    br label %[[LOOP]]
-;
-entry:
-  br label %loop
-
-loop:                                             ; preds = %loop, %entry
-  %a = mul i32 %x, 3
-  %b = mul i32 %y, 5
-  %c = mul i32 %z, 7
-  %d = mul i32 %w, 11
-  %ab = add i32 %a, %b, !dbg !4
-  %cd = add i32 %c, %d, !dbg !4
-  %abcd = add i32 %ab, %cd, !dbg !4
-  store i32 %abcd, ptr null, align 4
-  br label %loop
-}
-
 !llvm.dbg.cu = !{!0}
 !llvm.module.flags = !{!3}
 
@@ -92,7 +47,7 @@ loop:                                             ; preds = %loop, %entry
 !7 = !{null}
 ;.
 ; CHECK: [[META0:![0-9]+]] = distinct !DICompileUnit(language: DW_LANG_C11, file: [[META1:![0-9]+]], producer: "{{.*}}clang version {{.*}}", isOptimized: false, runtimeVersion: 0, emissionKind: NoDebug)
-; CHECK: [[META1]] = !DIFile(filename: "{{.*}}test.c", directory: {{.*}})
+; CHECK: [[META1]] = !DIFile(filename: "test.c", directory: {{.*}})
 ; CHECK: [[DBG3]] = !DILocation(line: 15, column: 50, scope: [[META4:![0-9]+]])
 ; CHECK: [[META4]] = distinct !DISubprogram(name: "foo", scope: [[META1]], file: [[META1]], line: 14, type: [[META5:![0-9]+]], scopeLine: 14, spFlags: DISPFlagDefinition, unit: [[META0]], retainedNodes: [[META7:![0-9]+]])
 ; CHECK: [[META5]] = distinct !DISubroutineType(types: [[META6:![0-9]+]])

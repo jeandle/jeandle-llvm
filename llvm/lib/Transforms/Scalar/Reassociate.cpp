@@ -243,59 +243,89 @@ unsigned ReassociatePass::getRank(Value *V) {
 
 namespace llvm::reassociate {
 
-OpClassifier::OpClassifier(const LoopInfo *LI, const Instruction *I)
-    : EnclosingLoop(LI && I ? LI->getLoopFor(I->getParent()) : nullptr),
-      RootI(I) {}
-
-// Walk backward from `V` through in-loop operands (bounded, not crossing phis)
-// to test whether `RootI` reaches it -- i.e. whether the reassociated root
-// feeds `V`, possibly through intermediate ops such as a clamp or mask. This
-// lets a loop-carried recurrence whose phi closes through such ops be
-// recognised, not only the phi that closes directly on the root.
-static bool rootReaches(const Value *V, const Instruction *RootI,
-                        const Loop *L) {
-  SmallVector<const Value *, 8> Worklist;
-  Worklist.push_back(V);
-  SmallPtrSet<const Value *, 16> Visited;
-  unsigned Steps = 0;
+// Forward, intra-iteration, in-loop def-use slice. Starting from `Seeds`,
+// follow def->use edges (operand -> user) that stay inside `L`, but never enter
+// a loop-header phi through one of its in-loop incomings: that incoming is the
+// value carried from the *previous* iteration, not produced in this one. This
+// applies to ANY loop header reached, including headers of loops nested in `L`
+// (an inner loop's back-edge also crosses an iteration boundary). Merge phis
+// (non-header, e.g. an if/then/else join inside the body) are crossed normally.
+// The reachable values are added to `Out`.
+static void forwardLoopSlice(ArrayRef<const Value *> Seeds, const Loop *L,
+                             const LoopInfo *LI,
+                             SmallPtrSetImpl<const Value *> &Out) {
+  SmallVector<const Value *, 16> Worklist(Seeds.begin(), Seeds.end());
   while (!Worklist.empty()) {
     const Value *Cur = Worklist.pop_back_val();
-    if (Cur == RootI)
-      return true;
-    // Intermediate ops between the root and the backedge are few in practice;
-    // bound the walk so a pathological chain can't cost compile time.
-    if (!Visited.insert(Cur).second || ++Steps > 32)
+    if (!Out.insert(Cur).second)
       continue;
-    const auto *I = dyn_cast<Instruction>(Cur);
-    if (!I || !L->contains(I->getParent()) || isa<PHINode>(I))
-      continue;
-    for (const Value *Op : I->operands())
-      Worklist.push_back(Op);
+    for (const User *U : Cur->users()) {
+      const auto *UI = dyn_cast<Instruction>(U);
+      if (!UI || !L->contains(UI->getParent()))
+        continue;
+      if (const auto *Phi = dyn_cast<PHINode>(UI)) {
+        const Loop *PL = LI->getLoopFor(Phi->getParent());
+        if (PL && PL->getHeader() == Phi->getParent()) {
+          // Cur is a carry if it enters this loop header from inside that loop;
+          // skip that edge and cross the pre-header init only.
+          bool IsCarry = false;
+          for (unsigned i = 0, e = Phi->getNumIncomingValues(); i != e; ++i)
+            if (Phi->getIncomingValue(i) == Cur &&
+                PL->contains(Phi->getIncomingBlock(i)))
+              IsCarry = true;
+          if (IsCarry)
+            continue;
+        }
+      }
+      Worklist.push_back(UI);
+    }
   }
-  return false;
+}
+
+OpClassifier::OpClassifier(const LoopInfo *LI, const Instruction *I)
+    : EnclosingLoop(LI && I ? LI->getLoopFor(I->getParent()) : nullptr) {
+  if (!EnclosingLoop)
+    return;
+  const Loop *L = EnclosingLoop;
+
+  // SeenFromRoot: what this iteration's value of the root feeds into. The root
+  // "closes" a reduction phi P if P's next value (its in-loop incoming) is in
+  // here -- i.e. the root is on the compute path that produces P's next value.
+  SmallPtrSet<const Value *, 16> SeenFromRoot;
+  forwardLoopSlice(I, L, LI, SeenFromRoot);
+
+  SmallVector<const Value *, 4> ClosedPhis;
+  for (const PHINode &Phi : L->getHeader()->phis())
+    for (unsigned i = 0, e = Phi.getNumIncomingValues(); i != e; ++i)
+      if (L->contains(Phi.getIncomingBlock(i)) &&
+          SeenFromRoot.contains(Phi.getIncomingValue(i))) {
+        ClosedPhis.push_back(&Phi);
+        break;
+      }
+
+  // The recurrence is the forward slice from the closed reduction phis: the phi
+  // itself plus everything that depends on this iteration's value of it (a
+  // mask, shift, the add-chain leaves, ...). Those leaves belong at the
+  // outermost operand so the carry stays one ALU op. If the root closes
+  // nothing, no leaf is a recurrence and ordering falls back to rank.
+  if (!ClosedPhis.empty())
+    forwardLoopSlice(ClosedPhis, L, LI, RecurrenceSet);
 }
 
 OpCategory OpClassifier::classify(const Value *V) const {
+  // Scope the reordering to expressions that actually carry a recurrence. With
+  // no enclosing loop (or the flag off, which leaves EnclosingLoop null), or
+  // when this expression closes no reduction phi (RecurrenceSet empty), every
+  // leaf is uniform so the comparator degenerates to rank-only -- exactly
+  // pre-existing behaviour. This keeps the feature to its name: a loop
+  // expression with no recurrence (e.g. a plain `a + b + invariant`) is left at
+  // legacy rank order rather than having its invariants regrouped.
+  if (!EnclosingLoop || RecurrenceSet.empty())
+    return OpCategory::LoopVariant;
+  if (RecurrenceSet.contains(V))
+    return OpCategory::LoopCarriedRecurrence;
   if (isa<Constant>(V))
     return OpCategory::LoopInvariantOrConst;
-  if (!EnclosingLoop)
-    return OpCategory::LoopVariant;
-
-  // The recurrence accumulator of *this* expression is the header phi whose
-  // in-loop incoming value flows back from the root we are reassociating --
-  // directly, or through intermediate ops (a clamp, mask, etc.). Other header
-  // phis (e.g. induction variables, whose backedge is a different chain) do not
-  // reach the root and stay ordinary loop-variant leaves, so they don't steal
-  // the outermost slot. contains() rather than getLoopLatch(), which is null
-  // for multi-latch loops.
-  if (const auto *Phi = dyn_cast<PHINode>(V))
-    if (Phi->getParent() == EnclosingLoop->getHeader())
-      for (BasicBlock *Pred : Phi->blocks())
-        if (EnclosingLoop->contains(Pred) &&
-            rootReaches(Phi->getIncomingValueForBlock(Pred), RootI,
-                        EnclosingLoop))
-          return OpCategory::LoopCarriedRecurrence;
-
   if (EnclosingLoop->isLoopInvariant(V))
     return OpCategory::LoopInvariantOrConst;
   return OpCategory::LoopVariant;
@@ -2000,8 +2030,11 @@ Value *ReassociatePass::OptimizeExpression(BinaryOperator *I,
   if (Cst && Cst != ConstantExpr::getBinOpIdentity(Opcode, I->getType())) {
     if (Cst == ConstantExpr::getBinOpAbsorber(Opcode, I->getType()))
       return Cst;
-    Ops.push_back(
-        ValueEntry(0, Cst, reassociate::OpCategory::LoopInvariantOrConst));
+    // Classify rather than hard-coding LoopInvariantOrConst so that with no
+    // enclosing loop (flag off) the constant shares the uniform category and
+    // ordering stays rank-only.
+    reassociate::OpClassifier Cls(LI, I);
+    Ops.push_back(ValueEntry(0, Cst, Cls.classify(Cst)));
   }
 
   if (Ops.size() == 1) return Ops[0].Op;

@@ -877,3 +877,85 @@ loop:
 exit:
   ret i32 %root
 }
+
+; ---------------------------------------------------------------------------
+; Loop-carried value that is not the phi itself
+; ---------------------------------------------------------------------------
+; The carried leaf is %sscaled = %s << 1, derived from the recurrence phi %s but
+; not the phi. The forward slice from the closed phi reaches %sscaled, so it is
+; classified as the recurrence and sorts to the outermost RHS. A phi-only test
+; would miss this and sink %sscaled inward.
+define i32 @nonphi_carry_leaf(i32 %n, ptr %arr) {
+; CHECK-LABEL: @nonphi_carry_leaf
+; CHECK:         %sscaled = shl i32 %s, 1
+; CHECK:         [[M:%.*]] = mul i32 %v, 7
+; CHECK:         [[R:%.*]] = lshr i32 %v, 2
+; CHECK:         [[ADD1:%.*]] = add i32 [[M]], [[R]]
+; CHECK:         %root = add i32 [[ADD1]], %sscaled
+entry:
+  br label %loop
+
+loop:
+  %s = phi i32 [ 0, %entry ], [ %root, %loop ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
+  %p = getelementptr i32, ptr %arr, i32 %i
+  %v = load i32, ptr %p, align 4
+  %sscaled = shl i32 %s, 1
+  %m = mul i32 %v, 7
+  %r = lshr i32 %v, 2
+  %add1 = add i32 %m, %r
+  %root = add i32 %add1, %sscaled
+  %i.next = add i32 %i, 1
+  %cmp = icmp slt i32 %i.next, %n
+  br i1 %cmp, label %loop, label %exit
+
+exit:
+  ret i32 %root
+}
+
+; ---------------------------------------------------------------------------
+; Recurrence that closes through a non-header merge phi
+; ---------------------------------------------------------------------------
+; %s closes through %merged, a phi in the latch that joins the then/else arms of
+; an in-loop branch. That merge phi is intra-iteration, so the forward slice
+; crosses it (only loop-header back-edge incomings are blocked) and %s is still
+; the recurrence -> outermost RHS. The earlier backward walk stopped at every
+; phi and would have missed this.
+define i32 @recurrence_through_merge_phi(i32 %n, ptr %arr) {
+; CHECK-LABEL: @recurrence_through_merge_phi
+; CHECK:         %s = phi i32 [ 0, %entry ], [ %merged, %latch ]
+; CHECK:         [[M:%.*]] = mul i32 %v, 7
+; CHECK:         [[R:%.*]] = lshr i32 %v, 2
+; CHECK:         [[ADD1:%.*]] = add i32 [[M]], [[R]]
+; CHECK:         %root = add i32 [[ADD1]], %s
+entry:
+  br label %loop
+
+loop:
+  %s = phi i32 [ 0, %entry ], [ %merged, %latch ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %latch ]
+  %p = getelementptr i32, ptr %arr, i32 %i
+  %v = load i32, ptr %p, align 4
+  %m = mul i32 %v, 7
+  %r = lshr i32 %v, 2
+  %add1 = add i32 %m, %r
+  %root = add i32 %add1, %s
+  %cond = icmp slt i32 %v, 100
+  br i1 %cond, label %then, label %else
+
+then:
+  %t = add i32 %root, 1
+  br label %latch
+
+else:
+  br label %latch
+
+latch:
+  %merged = phi i32 [ %t, %then ], [ %root, %else ]
+  %i.next = add i32 %i, 1
+  %cmp = icmp slt i32 %i.next, %n
+  br i1 %cmp, label %loop, label %exit
+
+exit:
+  ret i32 %merged
+}
