@@ -65,12 +65,25 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(JavaOperationLower(1));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(level)));
   PM.addPass(RewriteStatepointsForGC());
-  // Phase 9 is reserved for JavaOps that must be lowered after RS4GC. In
-  // particular, G1 barriers can materialize raw addresses derived from oops
-  // (for example card-table addresses). If those addresses are created before
-  // RS4GC and optimized across safepoints, they are not relocated when the
-  // source oop moves. Lower them after RS4GC so the optimizer cannot reuse
-  // stale raw derived addresses across safepoints.
+  // Phase 9 is reserved for JavaOps that must be lowered after O3/RS4GC.
+  //
+  // Keep the GC barrier pipeline split intentionally:
+  //   1. InsertGCBarriers runs before O3 so the optimizer still sees the
+  //      high-level barrier operations and can optimize the surrounding Java
+  //      IR as much as possible.
+  //   2. JavaOperationLower(9) lowers those barriers only after O3/RS4GC.
+  //      Lowered G1 barriers may compute raw addresses derived from oops, such
+  //      as card-table addresses.
+  //   3. Those raw derived addresses are not oops, are not tracked by RS4GC,
+  //      and the JVM has no mechanism to update them if a safepoint moves the
+  //      source oop.
+  //
+  // The required invariant is that the def-use range of each such raw derived
+  // address must not contain a safepoint. Lowering barriers too early exposes
+  // the raw address computations to O3, which may extend or reuse them across
+  // safepoints and break that invariant. Delaying only the lowering preserves
+  // optimization opportunities while keeping raw derived addresses local to the
+  // final barrier code.
   PM.addPass(JavaOperationLower(9));
   PM.addPass(createModuleToFunctionPassAdaptor(TLSPointerRewrite()));
   PM.addPass(createModuleToFunctionPassAdaptor(InstSimplifyPass()));

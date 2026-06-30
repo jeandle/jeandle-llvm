@@ -127,6 +127,14 @@ static void updateDriverPreservedAnalyses(Module &M, ModuleAnalysisManager &MAM,
   DriverPA.intersect(std::move(StepPA));
 }
 
+// Normal termination is controlled by VM inline policy, such as max inline
+// level, plus whether devirtualization exposes new monomorphic call sites.
+// Keep a large hard cap here only as a last-resort guard against future
+// refinement passes accidentally creating a non-converging driver loop. It is
+// not a normal compile-time or inline-aggressiveness tuning knob; those should
+// stay in the VM policy layer.
+static constexpr unsigned MaxInlineDriverIterations = 512;
+
 static PreservedAnalyses runRootInstSimplify(Module &M,
                                              ModuleAnalysisManager &MAM) {
   Function *RootFunction = getRootJavaMethodFunction(M);
@@ -187,14 +195,18 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   //   4. If devirtualization preserved everything, it did not produce a new
   //      MonomorphicTarget call site and the loop stops; otherwise rescan IR
   //      in the next inline round.
-  for (;;) {
+  bool HitIterationLimit = true;
+  for (unsigned Iteration = 0; Iteration < MaxInlineDriverIterations;
+       ++Iteration) {
     InlineRoundResult InlineResult =
         Inliner.runInlineRound(M, MAM, InlineScopes);
     Changed |= !InlineResult.PA.areAllPreserved();
     updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(InlineResult.PA));
 
-    if (!InlineResult.ExposedNewCallSites)
+    if (!InlineResult.ExposedNewCallSites) {
+      HitIterationLimit = false;
       break;
+    }
 
     // Keep the per-round cleanup conservative: InstSimplify performs local
     // instruction simplification without introducing new instructions or
@@ -214,8 +226,18 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
     // this point; the next inline round rescans the root function and should
     // read the preserved inline-scope-id metadata from surviving/generated call
     // sites.
-    if (!AddedMonomorphicTargets)
+    if (!AddedMonomorphicTargets) {
+      HitIterationLimit = false;
       break;
+    }
+  }
+
+  if (HitIterationLimit) {
+    LLVM_DEBUG(dbgs() << "JeandleInlineDriver: inline loop reached "
+                      << MaxInlineDriverIterations
+                      << " iterations; this indicates an abnormal long inline "
+                         "loop, stopping inline early. Please investigate the "
+                         "inline/devirtualization convergence.\n");
   }
 
   if (!Changed)
