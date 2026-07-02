@@ -61,22 +61,23 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
+  // TODO: InsertGCBarriers currently inserts high-level barrier calls before
+  // O3. This is a conservative placeholder to keep Java heap stores
+  // GC-observable during optimization, but the uninlined barrier calls can
+  // still block useful optimizations. Consider a better representation with
+  // more precise memory effects or another scheme that preserves GC semantics
+  // without exposing heavy calls to the main optimizer.
   PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
   PM.addPass(JavaOperationLower(1));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(level)));
   PM.addPass(RewriteStatepointsForGC());
   // Phase 9 is reserved for JavaOps that must be lowered after O3/RS4GC.
   //
-  // Keep the GC barrier pipeline split intentionally:
-  //   1. InsertGCBarriers runs before O3 so the optimizer still sees the
-  //      high-level barrier operations and can optimize the surrounding Java
-  //      IR as much as possible.
-  //   2. JavaOperationLower(9) lowers those barriers only after O3/RS4GC.
-  //      Lowered G1 barriers may compute raw addresses derived from oops, such
-  //      as card-table addresses.
-  //   3. Those raw derived addresses are not oops, are not tracked by RS4GC,
-  //      and the JVM has no mechanism to update them if a safepoint moves the
-  //      source oop.
+  // JavaOperationLower(9) lowers GC barriers only after O3/RS4GC. Lowered G1
+  // barriers may compute raw addresses derived from oops, such as card-table
+  // addresses. Those raw derived addresses are not oops, are not tracked by
+  // RS4GC, and the JVM has no mechanism to update them if a safepoint moves
+  // the source oop.
   //
   // The required invariant is that the def-use range of each such raw derived
   // address must not contain a safepoint. Lowering barriers too early exposes
