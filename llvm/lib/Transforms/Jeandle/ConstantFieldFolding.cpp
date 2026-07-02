@@ -107,13 +107,10 @@ struct FieldLoadMatch {
   int Offset;
 };
 
-bool isDecodeHeapOopCall(User *U) {
-  auto *CB = dyn_cast<CallBase>(U);
-  if (!CB || !isOopType(CB->getType()))
-    return false;
-
-  Function *Callee = CB->getCalledFunction();
-  return Callee && Callee->getName() == "jeandle.decode_heap_oop";
+bool isDecodeHeapOopUser(User *U) {
+  auto *Cast = dyn_cast<AddrSpaceCastInst>(U);
+  return Cast && isNarrowOopType(Cast->getSrcTy()) &&
+         isJavaOopType(Cast->getDestTy());
 }
 
 // If `LI` is a load from an oop_handle_* global, return its id.
@@ -440,11 +437,11 @@ bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
       LI->replaceAllUsesWith(NewValue);
       LI->eraseFromParent();
     } else if (isNarrowOopType(LI->getType())) {
-      SmallVector<CallBase *, 4> DecodeUsers;
+      SmallVector<Instruction *, 4> DecodeUsers;
       for (User *U : LI->users()) {
-        if (!isDecodeHeapOopCall(U))
+        if (!isDecodeHeapOopUser(U))
           return false;
-        DecodeUsers.push_back(cast<CallBase>(U));
+        DecodeUsers.push_back(cast<Instruction>(U));
       }
       if (DecodeUsers.empty())
         return false;
@@ -459,7 +456,7 @@ bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
         ++NumOopChains;
       }
 
-      for (CallBase *Decode : DecodeUsers) {
+      for (Instruction *Decode : DecodeUsers) {
         Decode->replaceAllUsesWith(NewValue);
         Decode->eraseFromParent();
       }

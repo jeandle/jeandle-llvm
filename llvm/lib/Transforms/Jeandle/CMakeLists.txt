@@ -1,5 +1,6 @@
 add_llvm_component_library(LLVMJeandleTransforms
   ConstantFieldFolding.cpp
+  ExpandNarrowOopCast.cpp
   InsertGCBarriers.cpp
   JavaOperationDeletion.cpp
   JavaOperationLower.cpp

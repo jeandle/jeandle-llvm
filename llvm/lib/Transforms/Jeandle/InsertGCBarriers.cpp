@@ -101,19 +101,13 @@ PreservedAnalyses InsertGCBarriers::run(Function &F,
       if (StoredValue->getType()->isPointerTy() &&
           cast<PointerType>(StoredValue->getType())->getAddressSpace() ==
               jeandle::AddrSpace::NarrowOopAddrSpace) {
-        Function *DecodeFunc = M->getFunction("jeandle.decode_heap_oop");
-        assert(DecodeFunc != nullptr && "jeandle.decode_heap_oop must exist");
-        CallInst *DecodeCall =
-            PostBuilder.CreateCall(DecodeFunc, {StoredValue});
-        DecodeCall->setCallingConv(CallingConv::Hotspot_JIT);
-        BarrierValue = DecodeCall;
+        Type *OopTy = PointerType::get(F.getContext(),
+                                       jeandle::AddrSpace::JavaHeapAddrSpace);
+        BarrierValue = PostBuilder.CreateAddrSpaceCast(StoredValue, OopTy);
       }
 
-      Value *BasePointer = PostBuilder.CreateIntrinsic(
-          Intrinsic::experimental_gc_get_pointer_base, {PointerTy, PointerTy},
-          {DerivedPointer}, {} /* FMFSource */, "base.pointer");
       CallInst *PostCall =
-          PostBuilder.CreateCall(PostBarrierFunc, {BasePointer, BarrierValue});
+          PostBuilder.CreateCall(PostBarrierFunc, {DerivedPointer, BarrierValue});
       PostCall->setCallingConv(CallingConv::Hotspot_JIT);
     }
     Changed = true;

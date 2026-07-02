@@ -10,6 +10,7 @@
 
 #include "llvm/Jeandle/Pipeline.h"
 #include "llvm/Transforms/Jeandle/ConstantFieldFolding.h"
+#include "llvm/Transforms/Jeandle/ExpandNarrowOopCast.h"
 #include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
 #include "llvm/Transforms/Jeandle/JavaOperationDeletion.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
@@ -68,9 +69,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // instructions. But the uninlined barrier calls can still block useful
   // optimizations.
   PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
-  PM.addPass(createModuleToFunctionPassAdaptor(NarrowOopOpt()));
   PM.addPass(JavaOperationLower(1));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(level)));
+  PM.addPass(createModuleToFunctionPassAdaptor(ExpandNarrowOopCast()));
+  PM.addPass(createModuleToFunctionPassAdaptor(NarrowOopOpt()));
   // Expand oop encode/decode and GC barriers after O3 to avoid temporary GC
   // values crossing safepoints during optimization.
   PM.addPass(JavaOperationLower(9));
@@ -99,6 +101,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(InstSimplifyPass()));
   return PM;
 }
+
 
 void Pipeline::run(Module &M) { PM.run(M, MAM); }
 

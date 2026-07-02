@@ -19,7 +19,7 @@ public:
 
   static constexpr const char *StackPointer = "stack-pointer";
 
-  static constexpr const char *HeapBase = "heap_base";
+  static constexpr const char *HeapBase = "heap-base";
 
   static constexpr const char *JavaMethodCompilation =
       "java-method-compilation";
