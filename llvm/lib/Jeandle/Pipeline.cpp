@@ -62,11 +62,9 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
   // TODO: InsertGCBarriers currently inserts high-level barrier calls before
-  // O3. This is a conservative placeholder to keep Java heap stores
-  // GC-observable during optimization, but the uninlined barrier calls can
-  // still block useful optimizations. Consider a better representation with
-  // more precise memory effects or another scheme that preserves GC semantics
-  // without exposing heavy calls to the main optimizer.
+  // O3 because it cannot handle O3 generated memory intrinsics and vector 
+  // instructions. But the uninlined barrier calls can still block useful 
+  // optimizations.
   PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
   PM.addPass(JavaOperationLower(1));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(level)));
