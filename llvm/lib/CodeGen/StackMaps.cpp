@@ -19,11 +19,9 @@
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DataLayout.h"
-#include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCObjectFileInfo.h"
-#include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -45,15 +43,6 @@ static cl::opt<int> StackMapVersion(
     cl::desc("Specify the stackmap encoding version (default = 3)"));
 
 const char *StackMaps::WSMP = "Stack Maps: ";
-
-static bool useJeandleNarrowOopStackMaps(const MachineInstr &MI) {
-  const MachineFunction *MF = MI.getMF();
-  if (!MF)
-    return false;
-
-  return MF->getFunction().hasFnAttribute(
-      jeandle::Attribute::UseCompressedOops);
-}
 
 static uint64_t getConstMetaVal(const MachineInstr &MI, unsigned Idx) {
   assert(MI.getOperand(Idx).isImm() &&
@@ -171,31 +160,6 @@ bool StatepointOpers::isFoldableReg(const MachineInstr *MI, Register Reg) {
   if (MI->getOpcode() != TargetOpcode::STATEPOINT)
     return false;
   return StatepointOpers(MI).isFoldableReg(Reg);
-}
-
-unsigned
-JeandleNarrowOopOpers::getNarrowOopFlags(SmallVectorImpl<uint64_t> &Flags) {
-  StatepointOpers SO(MI);
-  unsigned CurIdx = SO.getNumGcMapEntriesIdx();
-  unsigned GCMapSize = getConstMetaVal(*MI, CurIdx - 1);
-  CurIdx += 1 + 2 * GCMapSize;
-
-  assert(CurIdx + 1 < MI->getNumOperands() && "missing jeandle narrow oop map");
-  assert(MI->getOperand(CurIdx).isImm() &&
-         MI->getOperand(CurIdx).getImm() == StackMaps::ConstantOp &&
-         "missing jeandle narrow oop map marker");
-  ++CurIdx;
-
-  unsigned FlagCount = MI->getOperand(CurIdx++).getImm();
-  assert(FlagCount == GCMapSize &&
-         "jeandle narrow oop map must match gc pointer map size");
-
-  assert(CurIdx + FlagCount <= MI->getNumOperands() &&
-         "truncated jeandle narrow oop map");
-
-  for (unsigned I = 0; I < FlagCount; ++I)
-    Flags.push_back(MI->getOperand(CurIdx++).getImm());
-  return FlagCount;
 }
 
 StackMaps::StackMaps(AsmPrinter &AP) : AP(AP) {
@@ -562,28 +526,6 @@ void StackMaps::recordStackMapOpers(const MCSymbol &MILabel,
     CurrentIt->second.RecordCount++;
 }
 
-void StackMaps::recordJeandleNarrowOopOpers(const MachineInstr &MI,
-                                            uint64_t ID) {
-  StatepointOpers SO(&MI);
-  SmallVector<std::pair<unsigned, unsigned>, 8> GCPairs;
-  unsigned NumGCPairs = SO.getGCPointerMap(GCPairs);
-  SmallVector<uint64_t, 8> NarrowOopFlags;
-  JeandleNarrowOopOpers JNO(&MI);
-  unsigned NumNarrowOopFlags = JNO.getNarrowOopFlags(NarrowOopFlags);
-  assert(NumNarrowOopFlags == NumGCPairs &&
-         "jeandle narrow oop map must match gc pointer map");
-  (void)NumNarrowOopFlags;
-
-  SmallVector<uint64_t, 1> NarrowOopMask;
-  NarrowOopMask.assign((NumGCPairs + 63) / 64, 0);
-  for (unsigned I = 0; I < NarrowOopFlags.size(); ++I) {
-    if (NarrowOopFlags[I] != 0)
-      NarrowOopMask[I / 64] |= uint64_t(1) << (I % 64);
-  }
-  JeandleNarrowOopInfos.emplace_back(CSInfos.back().CSOffsetExpr, ID,
-                                     NumGCPairs, std::move(NarrowOopMask));
-}
-
 void StackMaps::recordStackMap(const MCSymbol &L, const MachineInstr &MI) {
   assert(MI.getOpcode() == TargetOpcode::STACKMAP && "expected stackmap");
 
@@ -622,8 +564,6 @@ void StackMaps::recordStatepoint(const MCSymbol &L, const MachineInstr &MI) {
   const unsigned StartIdx = opers.getVarIdx();
   recordStackMapOpers(L, MI, opers.getID(), MI.operands_begin() + StartIdx,
                       MI.operands_end(), false);
-  if (useJeandleNarrowOopStackMaps(MI))
-    recordJeandleNarrowOopOpers(MI, opers.getID());
 }
 
 /// Emit the stackmap header.
@@ -769,43 +709,6 @@ void StackMaps::emitCallsiteEntries(MCStreamer &OS) {
   }
 }
 
-/// Emit Jeandle narrow-oop side map records for statepoint GC pointer
-/// map entries.
-///
-/// JeandleNarrowOopMap {
-///   uint32 : NumRecords
-///   JeandleNarrowOopRecord[NumRecords] {
-///     uint32 : Instruction Offset
-///     uint32 : Num GC base/derived pairs
-///     uint64 : Statepoint ID
-///     uint32 : Num narrow-oop mask words
-///     uint32 : Padding
-///     uint64[Num narrow-oop mask words] : Narrow-oop mask bits
-///   }
-/// }
-///
-/// Narrow-oop mask bit N corresponds to the Nth Statepoint GC base/derived
-/// pair. A set bit means the derived pointer for that pair is represented as a
-/// narrow oop.
-void StackMaps::emitJeandleNarrowOopMapSection(MCStreamer &OS) {
-  assert(JeandleNarrowOopInfos.size() <= UINT32_MAX &&
-         "too many Jeandle narrow oop records");
-  OS.emitInt32(static_cast<uint32_t>(JeandleNarrowOopInfos.size()));
-
-  for (const JeandleNarrowOopInfo &Info : JeandleNarrowOopInfos) {
-    OS.emitValue(Info.CSOffsetExpr, 4);
-    OS.emitInt32(Info.GCPairCount);
-    OS.emitInt64(Info.ID);
-    assert(Info.NarrowOopMask.size() <= UINT32_MAX &&
-           "too many Jeandle narrow oop mask words");
-    OS.emitInt32(static_cast<uint32_t>(Info.NarrowOopMask.size()));
-    OS.emitInt32(0);
-    for (uint64_t Word : Info.NarrowOopMask)
-      OS.emitInt64(Word);
-  }
-  OS.emitValueToAlignment(Align(8));
-}
-
 /// Serialize the stackmap data.
 void StackMaps::serializeToStackMapSection() {
   (void)WSMP;
@@ -839,31 +742,4 @@ void StackMaps::serializeToStackMapSection() {
   // Clean up.
   CSInfos.clear();
   ConstPool.clear();
-
-  serializeToNarrowOopMapSection();
-}
-
-void StackMaps::serializeToNarrowOopMapSection() {
-  if (JeandleNarrowOopInfos.empty())
-    return;
-
-  MCContext &OutContext = AP.OutStreamer->getContext();
-  MCStreamer &OS = *AP.OutStreamer;
-
-  // Create the narrow oop map section.
-  MCSection *NarrowOopSection = OutContext.getELFSection(
-      ".jeandle_narrowoop_maps", ELF::SHT_PROGBITS, ELF::SHF_ALLOC);
-  OS.switchSection(NarrowOopSection);
-
-  // Emit a dummy symbol to force section inclusion.
-  OS.emitLabel(OutContext.getOrCreateSymbol(Twine("__Jeandle_NarrowOopMaps")));
-
-  // Serialize data.
-  LLVM_DEBUG(dbgs() << "********** Narrow Oop Map Output **********\n");
-
-  emitJeandleNarrowOopMapSection(OS);
-  OS.addBlankLine();
-
-  // Clean up.
-  JeandleNarrowOopInfos.clear();
 }

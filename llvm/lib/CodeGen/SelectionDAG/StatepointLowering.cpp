@@ -37,8 +37,6 @@
 #include "llvm/IR/GCStrategy.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/Jeandle/Attributes.h"
-#include "llvm/IR/Jeandle/JeandleUtils.hpp"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Type.h"
@@ -511,15 +509,6 @@ static bool isGCValue(const Value *V, SelectionDAGBuilder &Builder) {
   return true; // conservative
 }
 
-static bool useJeandleNarrowOopStackMaps(
-    const SelectionDAGBuilder::StatepointLoweringInfo &SI) {
-  if (!SI.StatepointInstr)
-    return false;
-
-  const Function *F = SI.StatepointInstr->getFunction();
-  return F && F->hasFnAttribute(jeandle::Attribute::UseCompressedOops);
-}
-
 /// Lower deopt state and gc pointer arguments of the statepoint.  The actual
 /// lowering is described in lowerIncomingStatepointValue.  This function is
 /// responsible for lowering everything in the right position and playing some
@@ -712,19 +701,6 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
     assert(GCPtrIndexMap.count(Derived) && "derived not found in index map");
     Ops.push_back(
         Builder.DAG.getTargetConstant(GCPtrIndexMap[Derived], L, MVT::i64));
-  }
-
-  // Jeandle-owned side metadata. Keep the native GC pointer map layout as
-  // base/derived pairs; this independent block records the value shape for
-  // each pair in the same SI.Ptrs enumeration order.
-  if (useJeandleNarrowOopStackMaps(SI)) {
-    pushStackMapConstant(Ops, Builder, SI.Ptrs.size());
-    for (unsigned i = 0; i < SI.Ptrs.size(); ++i) {
-      Type *DerivedTy = SI.Ptrs[i]->getType()->getScalarType();
-      bool IsNarrowOop = jeandle::isNarrowOopType(DerivedTy);
-      Ops.push_back(
-          Builder.DAG.getTargetConstant(IsNarrowOop ? 1 : 0, L, MVT::i64));
-    }
   }
 }
 

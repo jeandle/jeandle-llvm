@@ -7,7 +7,6 @@ add_llvm_component_library(LLVMJeandleTransforms
   JeandleDevirtualization.cpp
   JeandleInlineDriver.cpp
   JeandleInliner.cpp
-  NarrowOopOpt.cpp
   RepeatedConstantFolding.cpp
   TLSPointerRewrite.cpp
   TypeCheckElimination.cpp

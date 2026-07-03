@@ -257,27 +257,6 @@ private:
   unsigned NumDefs;
 };
 
-/// MI-level Jeandle narrow-oop operands.
-///
-/// Jeandle narrow-oop operands are appended after the Statepoint GC pointer map
-/// and take the form:
-///   <StackMaps::ConstantOp>, <num narrow oop flags>, [narrow oop flags...]
-///
-/// The narrow oop flags are in the same order as StatepointOpers GC map
-/// base/derived pairs. A non-zero flag means the corresponding derived pointer
-/// is represented as a narrow oop.
-class JeandleNarrowOopOpers {
-public:
-  explicit JeandleNarrowOopOpers(const MachineInstr *MI) : MI(MI) {}
-
-  /// Get Jeandle-owned narrow-oop flags for GC pointer map entries.
-  /// Returns number of elements in Flags.
-  LLVM_ABI unsigned getNarrowOopFlags(SmallVectorImpl<uint64_t> &Flags);
-
-private:
-  const MachineInstr *MI;
-};
-
 class StackMaps {
 public:
   struct Location {
@@ -325,7 +304,6 @@ public:
     CSInfos.clear();
     ConstPool.clear();
     FnInfos.clear();
-    JeandleNarrowOopInfos.clear();
   }
 
   using LocationVec = SmallVector<Location, 8>;
@@ -353,23 +331,8 @@ public:
           LiveOuts(std::move(LiveOuts)) {}
   };
 
-  struct JeandleNarrowOopInfo {
-    const MCExpr *CSOffsetExpr = nullptr;
-    uint64_t ID = 0;
-    uint32_t GCPairCount = 0;
-    SmallVector<uint64_t, 1> NarrowOopMask;
-
-    JeandleNarrowOopInfo() = default;
-    JeandleNarrowOopInfo(const MCExpr *CSOffsetExpr, uint64_t ID,
-                         uint32_t GCPairCount,
-                         SmallVector<uint64_t, 1> &&NarrowOopMask)
-        : CSOffsetExpr(CSOffsetExpr), ID(ID), GCPairCount(GCPairCount),
-          NarrowOopMask(std::move(NarrowOopMask)) {}
-  };
-
   using FnInfoMap = MapVector<const MCSymbol *, FunctionInfo>;
   using CallsiteInfoList = std::vector<CallsiteInfo>;
-  using JeandleNarrowOopInfoList = std::vector<JeandleNarrowOopInfo>;
 
   /// Generate a stackmap record for a stackmap instruction.
   ///
@@ -400,7 +363,6 @@ private:
   CallsiteInfoList CSInfos;
   ConstantPool ConstPool;
   FnInfoMap FnInfos;
-  JeandleNarrowOopInfoList JeandleNarrowOopInfos;
 
   MachineInstr::const_mop_iterator
   parseOperand(MachineInstr::const_mop_iterator MOI,
@@ -435,9 +397,6 @@ private:
                            MachineInstr::const_mop_iterator MOE,
                            bool recordResult = false);
 
-  /// Record Jeandle-owned narrow-oop side metadata for a statepoint.
-  void recordJeandleNarrowOopOpers(const MachineInstr &MI, uint64_t ID);
-
   /// Emit the stackmap header.
   void emitStackmapHeader(MCStreamer &OS);
 
@@ -449,12 +408,6 @@ private:
 
   /// Emit the callsite info for each stackmap/patchpoint intrinsic call.
   void emitCallsiteEntries(MCStreamer &OS);
-
-  /// Emit Jeandle-owned narrow-oop side metadata for statepoints.
-  void emitJeandleNarrowOopMapSection(MCStreamer &OS);
-
-  /// Serialize Jeandle-owned narrow-oop side metadata.
-  void serializeToNarrowOopMapSection();
 
   LLVM_ABI void print(raw_ostream &OS);
   void debug() { print(dbgs()); }

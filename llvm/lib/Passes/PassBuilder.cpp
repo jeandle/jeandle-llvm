@@ -272,7 +272,6 @@
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
 #include "llvm/Transforms/Jeandle/JeandleDevirtualization.h"
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
-#include "llvm/Transforms/Jeandle/NarrowOopOpt.h"
 #include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"

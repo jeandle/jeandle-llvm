@@ -1,4 +1,4 @@
-//===- NarrowOopOpt.cpp - Optimization Narrow Oop -------------------------===//
+//===- JeandleNarrowOopMarker.h - Mark narrow oop GC roots -----*- C++ -*-===//
 //
 // Copyright (c) 2026, the Jeandle-LLVM Authors. All Rights Reserved.
 //
@@ -8,19 +8,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_NARROW_OOP_OPT_H
-#define LLVM_NARROW_OOP_OPT_H
+#ifndef LLVM_TRANSFORMS_JEANDLE_JEANDLENARROWOOPMARKER_H
+#define LLVM_TRANSFORMS_JEANDLE_JEANDLENARROWOOPMARKER_H
 
 #include "llvm/IR/PassManager.h"
 
 namespace llvm {
 
-class NarrowOopOpt : public PassInfoMixin<NarrowOopOpt> {
+class Module;
+
+class JeandleNarrowOopMarker : public PassInfoMixin<JeandleNarrowOopMarker> {
 public:
-  NarrowOopOpt() {}
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &MAM);
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
 };
 
 } // namespace llvm
 
-#endif // LLVM_NARROW_OOP_OPT_H
+#endif // LLVM_TRANSFORMS_JEANDLE_JEANDLENARROWOOPMARKER_H
