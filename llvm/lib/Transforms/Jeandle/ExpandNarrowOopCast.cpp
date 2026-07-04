@@ -14,6 +14,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
@@ -35,8 +36,8 @@ PreservedAnalyses ExpandNarrowOopCast::run(Function &F,
                                           FunctionAnalysisManager &) {
   Module *M = F.getParent();
 
-  // Only java method compilations need gc barriers.
-  if (!M->getNamedMetadata(jeandle::Metadata::JavaMethodCompilation))
+  // Avoid scanning functions that were not compiled in compressed-oops mode.
+  if (!F.hasFnAttribute(jeandle::Attribute::UseCompressedOops))
     return PreservedAnalyses::all();
 
   SmallVector<AddrSpaceCastInst *, 16> Casts;

@@ -15,11 +15,11 @@
 
 namespace llvm {
 
-class Module;
+class Function;
 
 class JeandleNarrowOopMarker : public PassInfoMixin<JeandleNarrowOopMarker> {
 public:
-  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
 };
 
 } // namespace llvm

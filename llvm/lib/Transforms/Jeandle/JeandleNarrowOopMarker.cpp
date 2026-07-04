@@ -15,6 +15,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Jeandle/JeandleUtils.hpp"
+#include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Statepoint.h"
@@ -23,7 +24,7 @@ using namespace llvm;
 
 namespace {
 
-constexpr uint64_t NarrowOopMarkerType = 6;
+constexpr uint64_t NarrowOopMarkerType = 7;
 constexpr uint64_t HotSpotTNarrowOop = 16;
 
 uint64_t getNarrowOopMarkerEncoding() {
@@ -35,24 +36,22 @@ uint64_t getNarrowOopMarkerEncoding() {
 
 } // end anonymous namespace
 
-PreservedAnalyses JeandleNarrowOopMarker::run(Module &M,
-                                              ModuleAnalysisManager &) {
-  if (!M.getNamedMetadata(jeandle::Metadata::JavaMethodCompilation))
+PreservedAnalyses JeandleNarrowOopMarker::run(Function &F,
+                                              FunctionAnalysisManager &) {
+  Module *M = F.getParent();
+
+  if (!F.hasFnAttribute(jeandle::Attribute::UseCompressedOops))
     return PreservedAnalyses::all();
 
   SmallVector<CallBase *, 16> Statepoints;
-  for (Function &F : M) {
-    if (F.isDeclaration())
-      continue;
-    for (Instruction &I : instructions(F)) {
-      auto *CB = dyn_cast<CallBase>(&I);
-      if (CB && isa<GCStatepointInst>(CB))
-        Statepoints.push_back(CB);
-    }
+  for (Instruction &I : instructions(F)) {
+    auto *CB = dyn_cast<CallBase>(&I);
+    if (CB && isa<GCStatepointInst>(CB))
+      Statepoints.push_back(CB);
   }
 
   bool Changed = false;
-  LLVMContext &Ctx = M.getContext();
+  LLVMContext &Ctx = M->getContext();
   uint64_t Marker = getNarrowOopMarkerEncoding();
 
   for (CallBase *CB : Statepoints) {
@@ -80,9 +79,12 @@ PreservedAnalyses JeandleNarrowOopMarker::run(Module &M,
     if (Seen.empty())
       continue;
 
-    if (NeedSyntheticBci)
-      DeoptInputs.insert(DeoptInputs.begin(),
-                         ConstantInt::get(Type::getInt32Ty(Ctx), -1));
+    if (NeedSyntheticBci) {
+      // Jeandle stackmap parsing consumes duplicated BCI operands before
+      // walking the remaining deopt payload.
+      Value *SyntheticBci = ConstantInt::get(Type::getInt32Ty(Ctx), -1);
+      DeoptInputs.insert(DeoptInputs.begin(), {SyntheticBci, SyntheticBci});
+    }
 
     OperandBundleDef NewDeopt("deopt", DeoptInputs);
     CallBase *NewCB = CallBase::Create(CB, NewDeopt, CB->getIterator());
