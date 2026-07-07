@@ -36,10 +36,10 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/Jeandle/JeandleDevirtualization.h"
-#include "llvm/Transforms/Jeandle/JavaOperationLower.h"
-#include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Jeandle/JavaOperationLower.h"
+#include "llvm/Transforms/Jeandle/JeandleDevirtualization.h"
+#include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/InstSimplifyPass.h"
@@ -231,7 +231,8 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
     Changed |= RoundChanged;
 
     if (RoundChanged) {
-      updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(InlineResult.PA));
+      updateDriverPreservedAnalyses(M, MAM, DriverPA,
+                                    std::move(InlineResult.PA));
 
       // Lower phase-0 JavaOp call sites exposed by the previous inline round's
       // inlining.

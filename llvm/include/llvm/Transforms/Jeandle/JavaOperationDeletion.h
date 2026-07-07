@@ -1,4 +1,4 @@
-//===- JavaOperationDeletion.h - Erase lowered JavaOps ---------------------------===//
+//===- JavaOperationDeletion.h - Erase lowered JavaOps --------------------===//
 //
 // Copyright (c) 2026, the Jeandle-LLVM Authors. All Rights Reserved.
 //

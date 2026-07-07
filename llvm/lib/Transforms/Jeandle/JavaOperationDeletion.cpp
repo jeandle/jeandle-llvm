@@ -1,4 +1,4 @@
-//===- JavaOperationDeletion.cpp - Erase lowered JavaOps -------------------------===//
+//===- JavaOperationDeletion.cpp - Erase lowered JavaOps ------------------===//
 //
 // Copyright (c) 2026, the Jeandle-LLVM Authors. All Rights Reserved.
 //
@@ -73,7 +73,8 @@ static bool removeFunctionFromLLVMUsed(Module &M, Function &F) {
 
 } // end anonymous namespace
 
-PreservedAnalyses JavaOperationDeletion::run(Module &M, ModuleAnalysisManager &MAM) {
+PreservedAnalyses JavaOperationDeletion::run(Module &M,
+                                             ModuleAnalysisManager &MAM) {
   bool Changed = false;
   FunctionAnalysisManager &FAM =
       MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
@@ -89,10 +90,10 @@ PreservedAnalyses JavaOperationDeletion::run(Module &M, ModuleAnalysisManager &M
 
     // Strip @llvm.used first: a lowered JavaOp that no longer has any caller is
     // still referenced by the @llvm.used global, so user_empty() is false until
-    // that reference is removed. This mirrors the order the old JavaOperationLower
-    // used (strip, then check emptiness, then erase). If F survives (it still has
-    // real users) it does not need @llvm.used protection, since real callers keep
-    // it alive against DCE on their own.
+    // that reference is removed. This mirrors the order the old
+    // JavaOperationLower used (strip, then check emptiness, then erase). If F
+    // survives (it still has real users) it does not need @llvm.used
+    // protection, since real callers keep it alive against DCE on their own.
     bool Stripped = removeFunctionFromLLVMUsed(M, F);
     F.removeDeadConstantUsers();
 
