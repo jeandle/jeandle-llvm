@@ -110,7 +110,7 @@ struct FieldLoadMatch {
 bool isDecodeHeapOopUser(User *U) {
   auto *Cast = dyn_cast<AddrSpaceCastInst>(U);
   return Cast && isNarrowOopType(Cast->getSrcTy()) &&
-         isJavaOopType(Cast->getDestTy());
+         isOopType(Cast->getDestTy());
 }
 
 // If `LI` is a load from an oop_handle_* global, return its id.
@@ -130,8 +130,10 @@ bool isForwarder(Instruction &I) {
   if (!isOopType(I.getType()))
     return false;
   if (isa<PHINode>(&I) || isa<SelectInst>(&I) || isa<BitCastInst>(&I) ||
-      isa<AddrSpaceCastInst>(&I) || isa<FreezeInst>(&I))
+      isa<FreezeInst>(&I))
     return true;
+  if (auto *Cast = dyn_cast<AddrSpaceCastInst>(&I))
+    return !isNarrowOopType(Cast->getSrcTy());
   if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
     return GEP->hasAllZeroIndices();
   if (auto *II = dyn_cast<IntrinsicInst>(&I))
