@@ -169,11 +169,8 @@ static PreservedAnalyses runRootInstSimplify(Module &M,
   FPM.addPass(InstCombinePass());
   FPM.addPass(SimplifyCFGPass());
   FPM.addPass(ADCEPass());
+
   PreservedAnalyses RootPA = FPM.run(*RootFunction, FAM);
-  // FPM.run already invalidated root's analyses per-pass internally, so
-  // RootPA is consumed only for the Changed flag; the combined PA returned
-  // below relies on that per-pass invalidation plus JavaOpLower's eager
-  // per-caller invalidation.
   Changed |= !RootPA.areAllPreserved();
 
   if (!Changed)
