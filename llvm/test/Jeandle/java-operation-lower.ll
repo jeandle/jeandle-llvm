@@ -1,4 +1,4 @@
-; RUN: opt -S -passes="java-operation-lower<phase=0>" %s 2>&1 | FileCheck %s
+; RUN: opt -S -passes="java-operation-lower<phase=0>,java-operation-deletion" %s 2>&1 | FileCheck %s
 
 ; CHECK-NOT: call i32 @test0(i32 7, ptr addrspace(1) %0)
 ; CHECK-NOT: define i32 @test0

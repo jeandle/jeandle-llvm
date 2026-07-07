@@ -11,6 +11,7 @@
 #include "llvm/Jeandle/Pipeline.h"
 #include "llvm/Transforms/Jeandle/ConstantFieldFolding.h"
 #include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
+#include "llvm/Transforms/Jeandle/JavaOperationDeletion.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
 #include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"
@@ -43,6 +44,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
                                                  OptimizationLevel level,
                                                  PipelineOptions Options) {
   ModulePassManager PM;
+  PM.addPass(JavaOperationLower(0));
   // JeandleInlineDriver owns the inline-specific loop. Devirtualization
   // refinement between inline rounds should be wired inside the driver so
   // inline-scope state can be preserved across IR rewrites.
@@ -56,14 +58,13 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     PM.addPass(JeandleInlineDriver(/*InlineAccessorsOnly=*/true));
     break;
   }
-  PM.addPass(JavaOperationLower(0));
   PM.addPass(createModuleToFunctionPassAdaptor(InstSimplifyPass()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
   // TODO: InsertGCBarriers currently inserts high-level barrier calls before
-  // O3 because it cannot handle O3 generated memory intrinsics and vector 
-  // instructions. But the uninlined barrier calls can still block useful 
+  // O3 because it cannot handle O3 generated memory intrinsics and vector
+  // instructions. But the uninlined barrier calls can still block useful
   // optimizations.
   PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
   PM.addPass(JavaOperationLower(1));
@@ -84,6 +85,11 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // optimization opportunities while keeping raw derived addresses local to the
   // final barrier code.
   PM.addPass(JavaOperationLower(9));
+  // Erase JavaOp definitions that have been fully lowered (user-empty) and are
+  // no longer referenced. This must run after the inline driver and all
+  // JavaOperationLower phases: every JavaOp must stay alive while replayed
+  // callee bodies may still resolve them by name during inlining.
+  PM.addPass(JavaOperationDeletion());
   PM.addPass(createModuleToFunctionPassAdaptor(TLSPointerRewrite()));
   PM.addPass(createModuleToFunctionPassAdaptor(InstSimplifyPass()));
   return PM;
