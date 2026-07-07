@@ -360,6 +360,16 @@ static void logInlineEvent(
                     << Callee->getName() << "\n");
 }
 
+static void recordInlineResult(const jeandle::VMCallbacks &VC,
+                               int InlineScopeID, int BCI,
+                               uintptr_t CalleeMethod,
+                               jeandle::JeandleInlineReason Reason) {
+  bool Recorded = VC.RecordInlineResult(InlineScopeID, BCI, CalleeMethod,
+                                        static_cast<int>(Reason));
+  assert(Recorded && "RecordInlineResult must succeed");
+  (void)Recorded;
+}
+
 InlineRoundResult JeandleInliner::runInlineRound(
     Module &M, ModuleAnalysisManager &MAM,
     SmallVectorImpl<JeandleInlineScope> &InlineScopes) {
@@ -392,10 +402,9 @@ InlineRoundResult JeandleInliner::runInlineRound(
     return makeInlineRoundResult(/*Changed=*/false,
                                  /*ExposedNewCallSites=*/false);
   }
-  if (!VC->RecordInlineSuccess) {
+  if (!VC->RecordInlineResult) {
     LLVM_DEBUG(
-        dbgs()
-        << "JeandleInliner: no RecordInlineSuccess callback, skipping\n");
+        dbgs() << "JeandleInliner: no RecordInlineResult callback, skipping\n");
     return makeInlineRoundResult(/*Changed=*/false,
                                  /*ExposedNewCallSites=*/false);
   }
@@ -449,16 +458,6 @@ InlineRoundResult JeandleInliner::runInlineRound(
     Function *Caller = CB->getCaller();
     Function *Callee = CB->getCalledFunction();
 
-    // TODO: Support inlining the root method as a callee once root/caller IR
-    // and callee IR use the same unwind model. The root emits real unwind
-    // operations, while an inlined callee forwards unwind edges to the
-    // caller's landingpad. Mark root callees noinline so later LLVM inline
-    // passes cannot inline them either.
-    if (Callee == RootFunction) {
-      CB->setIsNoInline();
-      continue;
-    }
-
     if (!Callee || !isEligibleInlineCallee(*Callee, InlineAccessorsOnly))
       continue;
     if (!isMonomorphicTargetCall(*CB))
@@ -471,6 +470,19 @@ InlineRoundResult JeandleInliner::runInlineRound(
         getInlineScopeCaller(RootFunction, InlineScopeID, InlineScopes);
 
     uintptr_t CalleeMethod = getJavaMethodPointer(*Callee);
+
+    // TODO: Support inlining the root method as a callee once root/caller IR
+    // and callee IR use the same unwind model. The root emits real unwind
+    // operations, while an inlined callee forwards unwind edges to the
+    // caller's landingpad. Mark root callees noinline so later LLVM inline
+    // passes cannot inline them either.
+    if (Callee == RootFunction) {
+      CB->setIsNoInline();
+      recordInlineResult(*VC, InlineScopeID, BCI, CalleeMethod,
+                         jeandle::JeandleInlineReason::RootCalleeUnsupported);
+      continue;
+    }
+
     bool IsOkToInline = VC->IsOkToInline(InlineScopeID, BCI, CalleeMethod);
 
     if (!IsOkToInline) {
@@ -486,12 +498,18 @@ InlineRoundResult JeandleInliner::runInlineRound(
       if (!GotCalleeIR) {
         logInlineEvent("missing-ir", ScopeCaller, BCI, Callee, InlineScopeID,
                        ThreadID, InlineScopes);
+        recordInlineResult(
+            *VC, InlineScopeID, BCI, CalleeMethod,
+            jeandle::JeandleInlineReason::GetInlineCalleeIRFailed);
         continue;
       }
       Changed = true;
       if (Callee->isDeclaration()) {
         logInlineEvent("missing-def", ScopeCaller, BCI, Callee, InlineScopeID,
                        ThreadID, InlineScopes);
+        recordInlineResult(
+            *VC, InlineScopeID, BCI, CalleeMethod,
+            jeandle::JeandleInlineReason::MissingInlineCalleeDefinition);
         continue;
       }
     }
@@ -504,6 +522,8 @@ InlineRoundResult JeandleInliner::runInlineRound(
                         << ScopeCaller->getName() << " @" << BCI << " -> "
                         << Callee->getName() << ": "
                         << inlineResult.getFailureReason() << "\n");
+      recordInlineResult(*VC, InlineScopeID, BCI, CalleeMethod,
+                         jeandle::JeandleInlineReason::NotInlineViable);
       continue;
     }
 
@@ -520,6 +540,8 @@ InlineRoundResult JeandleInliner::runInlineRound(
                         << ScopeCaller->getName() << " @" << BCI << " -> "
                         << Callee->getName() << ": " << IR.getFailureReason()
                         << "\n");
+      recordInlineResult(*VC, InlineScopeID, BCI, CalleeMethod,
+                         jeandle::JeandleInlineReason::LLVMInlineFailed);
       continue;
     } else {
 #ifndef NDEBUG
@@ -528,10 +550,8 @@ InlineRoundResult JeandleInliner::runInlineRound(
       // that invariant in debug builds.
       assertNoNonEntryAlloca(*Caller);
 #endif
-      bool Recorded = VC->RecordInlineSuccess(InlineScopeID, BCI, CalleeMethod);
-      assert(Recorded && "RecordInlineSuccess must succeed or be handled by "
-                         "the JVM before returning");
-      (void)Recorded;
+      recordInlineResult(*VC, InlineScopeID, BCI, CalleeMethod,
+                         jeandle::JeandleInlineReason::InlineSuccess);
     }
 
     Changed = true;

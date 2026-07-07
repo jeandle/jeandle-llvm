@@ -34,6 +34,17 @@ enum class VMCallbackValueType : uint8_t {
   String,  // const char* (NUL-terminated)
 };
 
+/// Result reported for an inline attempt after LLVM starts processing it.
+/// Keep the numeric values stable because the JVM records them.
+enum class JeandleInlineReason : int {
+  InlineSuccess = 0,
+  RootCalleeUnsupported,
+  GetInlineCalleeIRFailed,
+  MissingInlineCalleeDefinition,
+  NotInlineViable,
+  LLVMInlineFailed,
+};
+
 // =============================================================================
 // Master callback list — add new callbacks here
 // =============================================================================
@@ -152,10 +163,10 @@ enum class VMCallbackValueType : uint8_t {
   def(GetNewStatepointID, int64_t, Long,                                         \
       (int64_t a1), (a1),                                                        \
       (VMCallbackValueType::Long), 1)                                            \
-  def(RecordInlineSuccess, bool, Bool,                                           \
-      (int a1, int a2, uintptr_t a3), (a1, a2, a3),                              \
+  def(RecordInlineResult, bool, Bool,                                            \
+      (int a1, int a2, uintptr_t a3, int a4), (a1, a2, a3, a4),                  \
       (VMCallbackValueType::Int, VMCallbackValueType::Int,                       \
-       VMCallbackValueType::Uintptr), 3)                                         \
+       VMCallbackValueType::Uintptr, VMCallbackValueType::Int), 4)               \
   def(RecordInliningComplete, bool, Bool,                                        \
       (), (), (), 0)
 // clang-format on
@@ -212,11 +223,15 @@ enum class VMCallbackValueType : uint8_t {
 ///   GetNewStatepointID  — Given an inlined call site's old statepoint id,
 ///                         returns a fresh statepoint id whose JVM callsite
 ///                         info is valid in the root method.
-///   RecordInlineSuccess
+///   RecordInlineResult
 ///                       — Notifies the VM that an inline scope id / BCI /
-///                         callee Java method pointer was successfully inlined.
-///                         The VM handles failures before returning, so LLVM
-///                         expects a true result.
+///                         callee Java method pointer reached an LLVM inline
+///                         result. The fourth argument is a
+///                         JeandleInlineReason value: InlineSuccess means the
+///                         inline completed, and the remaining values describe
+///                         LLVM-side failure reasons. The VM handles callback
+///                         failures before returning, so LLVM expects a true
+///                         result.
 ///   RecordInliningComplete
 ///                       — Notifies the VM that the inline driver has finished
 ///                         materializing and inlining callees. The VM handles
