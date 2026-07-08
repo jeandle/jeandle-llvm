@@ -86,6 +86,19 @@ static cl::opt<bool> ReassociateLoopCarriedRecurrence(
              "reassociated expression, shortening the loop-carried dependency"),
     cl::init(true), cl::Hidden);
 
+// The classifier is rebuilt per optimized expression and each build walks
+// forward slices of the loop body plus a scan of the header phis, so any
+// unbudgeted part is quadratic over a huge chain or phi-heavy header. One
+// budget, counted in def-use edges examined (not values inserted: one value
+// can have arbitrarily many uses), is shared across the whole build; past it
+// the classification is abandoned and the expression keeps legacy rank order
+// -- a sort-key fallback, never a correctness issue.
+static cl::opt<unsigned> ReassociateRecurrenceSliceLimit(
+    DEBUG_TYPE "-loop-carried-recurrence-slice-limit",
+    cl::desc("Fall back to rank-only ordering when computing a loop's forward "
+             "slice would examine more than this many def-use edges"),
+    cl::init(512), cl::Hidden);
+
 #ifndef NDEBUG
 /// Print out the expression identified in the Ops list.
 static void PrintOps(Instruction *I, const SmallVectorImpl<ValueEntry> &Ops) {
@@ -250,16 +263,22 @@ namespace llvm::reassociate {
 // applies to ANY loop header reached, including headers of loops nested in `L`
 // (an inner loop's back-edge also crosses an iteration boundary). Merge phis
 // (non-header, e.g. an if/then/else join inside the body) are crossed normally.
-// The reachable values are added to `Out`.
-static void forwardLoopSlice(ArrayRef<const Value *> Seeds, const Loop *L,
+// The reachable values are added to `Out`. Charges every def-use edge examined
+// against `Budget` (shared across one classifier build) and returns false,
+// leaving `Out` partial, when examining another edge would exceed it.
+static bool forwardLoopSlice(ArrayRef<const Value *> Seeds, const Loop *L,
                              const LoopInfo *LI,
-                             SmallPtrSetImpl<const Value *> &Out) {
+                             SmallPtrSetImpl<const Value *> &Out,
+                             unsigned &Budget) {
   SmallVector<const Value *, 16> Worklist(Seeds.begin(), Seeds.end());
   while (!Worklist.empty()) {
     const Value *Cur = Worklist.pop_back_val();
     if (!Out.insert(Cur).second)
       continue;
     for (const User *U : Cur->users()) {
+      if (Budget == 0)
+        return false;
+      --Budget;
       const auto *UI = dyn_cast<Instruction>(U);
       if (!UI || !L->contains(UI->getParent()))
         continue;
@@ -280,6 +299,7 @@ static void forwardLoopSlice(ArrayRef<const Value *> Seeds, const Loop *L,
       Worklist.push_back(UI);
     }
   }
+  return true;
 }
 
 OpClassifier::OpClassifier(const LoopInfo *LI, const Instruction *I)
@@ -288,28 +308,40 @@ OpClassifier::OpClassifier(const LoopInfo *LI, const Instruction *I)
     return;
   const Loop *L = EnclosingLoop;
 
+  // One budget bounds the whole build -- root slice, header-phi scan, and
+  // recurrence slice -- so a single build is O(limit) regardless of loop
+  // size, header phi count, or fanout. Exhausting it anywhere leaves
+  // RecurrenceSet empty, i.e. legacy rank order.
+  unsigned Budget = ReassociateRecurrenceSliceLimit;
+
   // SeenFromRoot: what this iteration's value of the root feeds into. The root
   // "closes" a reduction phi P if P's next value (its in-loop incoming) is in
   // here -- i.e. the root is on the compute path that produces P's next value.
   SmallPtrSet<const Value *, 16> SeenFromRoot;
-  forwardLoopSlice(I, L, LI, SeenFromRoot);
+  if (!forwardLoopSlice(I, L, LI, SeenFromRoot, Budget))
+    return;
 
   SmallVector<const Value *, 4> ClosedPhis;
   for (const PHINode &Phi : L->getHeader()->phis())
-    for (unsigned i = 0, e = Phi.getNumIncomingValues(); i != e; ++i)
+    for (unsigned i = 0, e = Phi.getNumIncomingValues(); i != e; ++i) {
+      if (Budget == 0)
+        return;
+      --Budget;
       if (L->contains(Phi.getIncomingBlock(i)) &&
           SeenFromRoot.contains(Phi.getIncomingValue(i))) {
         ClosedPhis.push_back(&Phi);
         break;
       }
+    }
 
   // The recurrence is the forward slice from the closed reduction phis: the phi
   // itself plus everything that depends on this iteration's value of it (a
   // mask, shift, the add-chain leaves, ...). Those leaves belong at the
   // outermost operand so the carry stays one ALU op. If the root closes
   // nothing, no leaf is a recurrence and ordering falls back to rank.
-  if (!ClosedPhis.empty())
-    forwardLoopSlice(ClosedPhis, L, LI, RecurrenceSet);
+  if (!ClosedPhis.empty() &&
+      !forwardLoopSlice(ClosedPhis, L, LI, RecurrenceSet, Budget))
+    RecurrenceSet.clear(); // Partial set could mislabel; keep legacy order.
 }
 
 OpCategory OpClassifier::classify(const Value *V) const {

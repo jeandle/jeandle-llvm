@@ -1,10 +1,16 @@
 ; RUN: opt < %s -passes=reassociate -S | FileCheck %s --check-prefix=ON
 ; RUN: opt < %s -passes=reassociate -reassociate-loop-carried-recurrence=false -S | FileCheck %s --check-prefix=OFF
+; RUN: opt < %s -passes=reassociate -reassociate-loop-carried-recurrence-slice-limit=1 -S | FileCheck %s --check-prefix=OFF
+; RUN: opt < %s -passes=reassociate -reassociate-loop-carried-recurrence-slice-limit=7 -S | FileCheck %s --check-prefix=OFF
 
 ; The hidden -reassociate-loop-carried-recurrence flag (default on) gates whether
 ; a loop-carried recurrence phi is placed at the outermost operand. With it off,
 ; ordering falls back to the legacy rank-only behavior (phi sunk into the inner
 ; add). Same recurrence as loop-carried-phi.ll's first case.
+; The limit RUNs exhaust the classifier's shared def-use edge budget at
+; different stages -- limit=1 inside the root slice, limit=7 midway through the
+; recurrence slice (whose partial set must be discarded) -- and each must fall
+; back to the same legacy order, never classify from a partial slice.
 
 define i32 @flag(i32 %n, ptr %arr) {
 ; ON-LABEL: @flag
