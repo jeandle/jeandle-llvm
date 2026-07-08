@@ -237,8 +237,8 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
       // Lower phase-0 JavaOp call sites exposed by the previous inline round's
       // inlining.
       PreservedAnalyses JavaOpLowerPA = JavaOperationLower(0).run(M, MAM);
-      updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(JavaOpLowerPA));
       Changed |= !JavaOpLowerPA.areAllPreserved();
+      updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(JavaOpLowerPA));
 
       // Per-round cleanup.
       PreservedAnalyses CleanupPA = runRootInstSimplify(M, MAM);

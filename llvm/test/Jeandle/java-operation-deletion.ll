@@ -1,5 +1,9 @@
 ; RUN: opt -S -passes="java-operation-lower<phase=0>,java-operation-deletion" %s 2>&1 | FileCheck %s
 
+; This is just a test to verify JavaOperationDeletion can delete all unused JavaOps.
+; In the real Jeandle pipeline, we run JavaOperationDeletion after the last JavaOperationLower,
+; so it can delete all JavaOps.
+
 ; Verify JavaOperationDeletion:
 ;   - erases fully-lowered (user-empty) phase-0 JavaOps (gone0, gone1),
 ;   - strips them from @llvm.used and removes the now-empty @llvm.used global,
@@ -21,7 +25,7 @@ define i32 @gone0(i32 %x, ptr addrspace(1) %p) #1 {
   ret i32 %x
 }
 
-; gone1 is phase=0, called by gone0. phase=0 lowering transitively inlines gone0
+; gone1 is phase=0 and calls gone0. phase=0 lowering transitively inlines gone0
 ; into gone1; gone1 itself has no callers. Deletion erases it.
 define i32 @gone1(i32 %x, ptr addrspace(1) %p) #1 {
   %y = call i32 @gone0(i32 %x, ptr addrspace(1) %p)
