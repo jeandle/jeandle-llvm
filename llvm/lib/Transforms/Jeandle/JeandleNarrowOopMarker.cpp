@@ -82,8 +82,10 @@ PreservedAnalyses JeandleNarrowOopMarker::run(Function &F,
       continue;
 
     if (NeedSyntheticBci) {
-      // Jeandle stackmap parsing consumes duplicated BCI operands before
-      // walking the remaining deopt payload.
+      // TODO: BCI -1 is valid here: only routine call sites may lack a
+      // deopt bundle, and JeandleCompiledCode::resolve_reloc_info treats
+      // routine call sites as bci == -1. Remove this path once routine
+      // calls carry real deopt bundles.
       Value *SyntheticBci = ConstantInt::get(Type::getInt32Ty(Ctx), -1);
       DeoptInputs.insert(DeoptInputs.begin(), {SyntheticBci, SyntheticBci});
     }
