@@ -21,18 +21,16 @@ using namespace llvm;
 namespace {
 
 // Strip \p F from the @llvm.used global array so it can be erased without
-// leaving a dangling Constant reference that would trip the verifier. Returns
-// true if @llvm.used was modified. Moved here from JavaOperationLower: lowering
-// no longer erases JavaOps, so only this deletion pass needs the helper.
-static bool removeFunctionFromLLVMUsed(Module &M, Function &F) {
+// leaving a dangling Constant reference that would trip the verifier.
+static void removeFunctionFromLLVMUsed(Module &M, Function &F) {
   GlobalVariable *UsedArray = M.getGlobalVariable("llvm.used");
   if (!UsedArray)
-    return false;
+    return;
 
   ConstantArray *InitArray = cast<ConstantArray>(UsedArray->getInitializer());
   if (!InitArray) {
     UsedArray->eraseFromParent();
-    return false;
+    return;
   }
 
   std::vector<Constant *> NewElements;
@@ -51,13 +49,13 @@ static bool removeFunctionFromLLVMUsed(Module &M, Function &F) {
   }
 
   if (!found)
-    return false;
+    return;
 
   UsedArray->eraseFromParent();
 
   // Erase the empty llvm.used directly.
   if (NewElements.empty())
-    return true;
+    return;
 
   // Create a new llvm.used with the preserved elements.
   auto *NewArrayTy = ArrayType::get(InitArray->getType()->getElementType(),
@@ -67,8 +65,6 @@ static bool removeFunctionFromLLVMUsed(Module &M, Function &F) {
       M, NewArrayTy, false, GlobalValue::AppendingLinkage,
       ConstantArray::get(NewArrayTy, NewElements), "llvm.used");
   NewUsedArray->setSection("llvm.metadata");
-
-  return true;
 }
 
 } // end anonymous namespace
@@ -90,20 +86,11 @@ PreservedAnalyses JavaOperationDeletion::run(Module &M,
 
     // Strip @llvm.used first: a lowered JavaOp that no longer has any caller is
     // still referenced by the @llvm.used global, so user_empty() is false until
-    // that reference is removed. This mirrors the order the old
-    // JavaOperationLower used (strip, then check emptiness, then erase). If F
-    // survives (it still has real users) it does not need @llvm.used
-    // protection, since real callers keep it alive against DCE on their own.
-    bool Stripped = removeFunctionFromLLVMUsed(M, F);
+    // that reference is removed.
+    removeFunctionFromLLVMUsed(M, F);
     F.removeDeadConstantUsers();
 
-    // A JavaOp that still has real users (e.g. an un-driven phase, or residual
-    // non-call ConstantExpr/metadata uses) has not been fully lowered. Leave it
-    // in place so we never delete a definition that is still referenced.
-    if (!F.user_empty()) {
-      Changed |= Stripped;
-      continue;
-    }
+    assert(F.user_empty() && "All JavaOps should have no users");
 
     LLVM_DEBUG(dbgs() << "erase lowered JavaOp: " << F.getName() << "\n");
 
