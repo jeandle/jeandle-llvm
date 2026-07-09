@@ -18,7 +18,7 @@ namespace llvm {
 class ExpandNarrowOopCast : public PassInfoMixin<ExpandNarrowOopCast> {
 public:
   ExpandNarrowOopCast() {}
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM);
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
 };
 
 } // namespace llvm

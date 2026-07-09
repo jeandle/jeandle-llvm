@@ -30,27 +30,38 @@ static unsigned getPointerAddressSpace(Type *Ty) {
   return PT ? PT->getAddressSpace() : ~0U;
 }
 
+static bool moduleUsesCompressedOops(Module &M) {
+  if (!M.getNamedMetadata(jeandle::Metadata::JavaMethodCompilation))
+    return false;
+
+  for (Function &F : M) {
+    if (F.hasFnAttribute(jeandle::Attribute::JavaMethod) &&
+        F.hasFnAttribute(jeandle::Attribute::UseCompressedOops))
+      return true;
+  }
+  return false;
+}
+
 } // end anonymous namespace
 
-PreservedAnalyses ExpandNarrowOopCast::run(Function &F,
-                                          FunctionAnalysisManager &) {
-  Module *M = F.getParent();
+PreservedAnalyses ExpandNarrowOopCast::run(Module &M, ModuleAnalysisManager &) {
 
-  // Avoid scanning functions that were not compiled in compressed-oops mode.
-  if (!F.hasFnAttribute(jeandle::Attribute::UseCompressedOops))
+  if (!moduleUsesCompressedOops(M))
     return PreservedAnalyses::all();
 
   SmallVector<AddrSpaceCastInst *, 16> Casts;
-  for (Instruction &I : instructions(F))
-    if (auto *Cast = dyn_cast<AddrSpaceCastInst>(&I))
-      Casts.push_back(Cast);
+  for (Function &F : M) {
+    for (Instruction &I : instructions(F))
+      if (auto *Cast = dyn_cast<AddrSpaceCastInst>(&I))
+        Casts.push_back(Cast);
+  }
 
   if (Casts.empty())
     return PreservedAnalyses::all();
 
-  Function *Encode = M->getFunction("jeandle.encode_heap_oop");
+  Function *Encode = M.getFunction("jeandle.encode_heap_oop");
   assert(Encode != nullptr && "jeandle.encode_heap_oop must exist");
-  Function *Decode = M->getFunction("jeandle.decode_heap_oop");
+  Function *Decode = M.getFunction("jeandle.decode_heap_oop");
   assert(Decode != nullptr && "jeandle.decode_heap_oop must exist");
 
   bool Changed = false;

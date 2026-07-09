@@ -47,7 +47,7 @@ using llvm::jeandle::getOopHandleId;
 using llvm::jeandle::HotspotBasicType;
 using llvm::jeandle::isJavaOopType;
 using llvm::jeandle::isNarrowOopType;
-using llvm::jeandle::isOopType;
+using llvm::jeandle::isWideOopType;
 using llvm::jeandle::T_ARRAY;
 using llvm::jeandle::T_BOOLEAN;
 using llvm::jeandle::T_BYTE;
@@ -454,7 +454,7 @@ bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
     SmallVector<AddrSpaceCastInst *, 4> DecodeCasts;
     for (User *U : LI->users())
       if (auto *Cast = dyn_cast<AddrSpaceCastInst>(U))
-        if (isOopType(Cast->getType()))
+        if (isWideOopType(Cast->getType()))
           DecodeCasts.push_back(Cast);
 
     Value *WideC = nullptr;

@@ -99,6 +99,7 @@ MODULE_PASS("inliner-ml-advisor-release",
 MODULE_PASS("inliner-wrapper", ModuleInlinerWrapperPass())
 MODULE_PASS("inliner-wrapper-no-mandatory-first",
             ModuleInlinerWrapperPass(getInlineParams(), false))
+MODULE_PASS("expand-narrow-oop-cast", ExpandNarrowOopCast())
 MODULE_PASS("jeandle-devirtualization", JeandleDevirtualization())
 MODULE_PASS("jeandle-inline-driver", JeandleInlineDriver())
 MODULE_PASS("jeandle-inliner", JeandleInliner())
@@ -458,7 +459,6 @@ FUNCTION_PASS("dse", DSEPass())
 FUNCTION_PASS("dwarf-eh-prepare", DwarfEHPreparePass(*TM))
 FUNCTION_PASS("expand-large-div-rem", ExpandLargeDivRemPass(*TM))
 FUNCTION_PASS("expand-memcmp", ExpandMemCmpPass(*TM))
-FUNCTION_PASS("expand-narrow-oop-cast", ExpandNarrowOopCast())
 FUNCTION_PASS("expand-reductions", ExpandReductionsPass())
 FUNCTION_PASS("extra-vector-passes",
               ExtraFunctionPassManager<ShouldRunExtraVectorPasses>())

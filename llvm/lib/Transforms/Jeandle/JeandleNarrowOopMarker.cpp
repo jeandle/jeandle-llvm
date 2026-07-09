@@ -12,10 +12,10 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/InstIterator.h"
-#include "llvm/IR/Jeandle/JeandleUtils.hpp"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/Attributes.h"
+#include "llvm/IR/Jeandle/JeandleUtils.hpp"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Statepoint.h"
@@ -27,9 +27,11 @@ namespace {
 constexpr uint64_t NarrowOopMarkerType = 7;
 constexpr uint64_t HotSpotTNarrowOop = 16;
 
+// TODO: Update it when DeoptValueEncoding is moved to LLVM side and BasicType
+// mirror is added.
 uint64_t getNarrowOopMarkerEncoding() {
-  // Keep this layout in sync with HotSpot DeoptValueEncoding::encode(). 
-  // The marker has no slot index, so index is zero and the basic type 
+  // Keep this layout in sync with HotSpot DeoptValueEncoding::encode().
+  // The marker has no slot index, so index is zero and the basic type
   // records T_NARROWOOP.
   return (NarrowOopMarkerType << 16) | HotSpotTNarrowOop;
 }

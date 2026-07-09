@@ -37,7 +37,7 @@ enum HotspotBasicType {
 
 /// Returns true if \p Ty is a pointer in the Java heap address space,
 /// i.e., it represents a uncompressed Java object reference (oop).
-inline bool isOopType(Type *Ty) {
+inline bool isWideOopType(Type *Ty) {
   auto *PT = dyn_cast<PointerType>(Ty);
   return PT && PT->getAddressSpace() == jeandle::AddrSpace::JavaHeapAddrSpace;
 }
@@ -51,7 +51,7 @@ inline bool isNarrowOopType(Type *Ty) {
 
 /// Returns true for either uncompressed or compressed oop values.
 inline bool isJavaOopType(Type *Ty) {
-  return isOopType(Ty) || isNarrowOopType(Ty);
+  return isWideOopType(Ty) || isNarrowOopType(Ty);
 }
 
 /// Constant oop handle naming convention.

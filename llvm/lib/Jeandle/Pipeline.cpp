@@ -71,7 +71,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
   PM.addPass(JavaOperationLower(1));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(level)));
-  PM.addPass(createModuleToFunctionPassAdaptor(ExpandNarrowOopCast()));
+  PM.addPass(ExpandNarrowOopCast());
   PM.addPass(RewriteStatepointsForGC());
   PM.addPass(createModuleToFunctionPassAdaptor(JeandleNarrowOopMarker()));
   // Phase 9 is reserved for JavaOps that must be lowered after O3/RS4GC.
