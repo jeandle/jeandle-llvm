@@ -196,6 +196,17 @@ DenseMap<Value *, int> computeConstOops(Function &F) {
   DenseMap<Value *, ConstOopLattice> States;
   SmallVector<Value *, 32> Worklist;
 
+  // Oop-typed arguments are opaque producers. Do not rely only on
+  // getLattice's fallback for them: arguments have users, and pushing them is
+  // what forces forwarders such as freeze/cast/select/phi to re-evaluate from
+  // Top to Bottom when their source is an argument.
+  for (Argument &Arg : F.args()) {
+    if (isJavaOopType(Arg.getType())) {
+      States[&Arg] = ConstOopLattice::bottom();
+      Worklist.push_back(&Arg);
+    }
+  }
+
   // Seed three categories of oop-typed Instructions:
   //   source     — load from oop_handle_*  → Constant{Id}, pushed
   //   forwarder  — PHI / Select / cast / freeze / zero-GEP / invariant.group
@@ -204,8 +215,9 @@ DenseMap<Value *, int> computeConstOops(Function &F) {
   //   opaque     — any other oop-typed instruction (calls, non-source loads,
   //                atomic ops, etc.)       → Bottom, pushed
   //
-  // Non-Instruction oop values (Argument, Constant) remain implicitly Bottom
-  // via getLattice's fallback — they have no def site to push from.
+  // Other non-instruction oop values (e.g. Constants) remain implicitly Bottom
+  // via getLattice's fallback; unlike Arguments, they do not need a def-site
+  // worklist seed for this analysis.
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
       if (auto *LI = dyn_cast<LoadInst>(&I)) {
