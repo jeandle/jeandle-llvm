@@ -120,9 +120,8 @@ bool optimizeCallSite(InvokeInst &CB, DominatorTree &DT, DomTreeUpdater &DTU,
   if (CHAOptInfo.Constraint == 0)
     return false;
 
-  std::optional<int> BCI = getDeoptBCI(CB);
-  std::string Prefix =
-      BCI ? "bci_cha_" + std::to_string(*BCI) : "bci_cha_unknown";
+  int BCI = getDeoptBCI(CB);
+  std::string Prefix = "bci_cha_" + std::to_string(BCI);
 
   std::optional<OperandBundleDef> PreCallDeopt = createPreCallDeoptBundle(CB);
   if (!PreCallDeopt)

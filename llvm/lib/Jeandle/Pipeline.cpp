@@ -10,6 +10,7 @@
 
 #include "llvm/Jeandle/Pipeline.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
 #include "llvm/Transforms/Jeandle/ConstantFieldFolding.h"
 #include "llvm/Transforms/Jeandle/ExpandNarrowOopCast.h"
@@ -21,8 +22,11 @@
 #include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
+#include "llvm/Transforms/Scalar/ADCE.h"
+#include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/InstSimplifyPass.h"
 #include "llvm/Transforms/Scalar/RewriteStatepointsForGC.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
 
 namespace llvm::jeandle {
 
@@ -49,6 +53,15 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
                                                  PipelineOptions Options) {
   ModulePassManager PM;
   PM.addPass(JavaOperationLower(0));
+  FunctionPassManager PreCHACleanup;
+  PreCHACleanup.addPass(InstSimplifyPass());
+  PreCHACleanup.addPass(TypeCheckElimination());
+  PreCHACleanup.addPass(RepeatedConstantFolding());
+  PreCHACleanup.addPass(EarlyCSEPass());
+  PreCHACleanup.addPass(InstCombinePass());
+  PreCHACleanup.addPass(SimplifyCFGPass());
+  PreCHACleanup.addPass(ADCEPass());
+  PM.addPass(createModuleToFunctionPassAdaptor(std::move(PreCHACleanup)));
   PM.addPass(createModuleToFunctionPassAdaptor(CHADevirtualization()));
   // JeandleInlineDriver owns the inline-specific loop. Devirtualization
   // refinement between inline rounds should be wired inside the driver so

@@ -107,8 +107,7 @@ BasicBlock *insertCheckInstanceOf(Instruction &Inst, Value *Receiver,
   BasicBlock *BB = Inst.getParent();
   Module *M = Inst.getModule();
   Function *CheckFn = M->getFunction("jeandle.check_instanceof");
-  if (!CheckFn)
-    return nullptr;
+  assert(CheckFn && "jeandle.check_instanceof not found");
 
   LLVMContext &Context = Inst.getContext();
 
@@ -119,7 +118,6 @@ BasicBlock *insertCheckInstanceOf(Instruction &Inst, Value *Receiver,
 
   BB->getTerminator()->eraseFromParent();
   IRBuilder<> BuilderOrigin(BB);
-  // IRBuilder<> BuilderFail(CheckcastFail);
   CallInst *Checkcast =
       createConstraintInst(Receiver, Constraint, BuilderOrigin, CheckFn);
 
@@ -149,11 +147,11 @@ static std::pair<unsigned, unsigned> computeDeoptStackLayout(CallBase &CB) {
     if (DeoptInfo.valueType() == jeandle::DeoptValueEncoding::StackType) {
       assert(Slots == DeoptInfo.index() && "Stack index should be in order.");
       Slots += jeandle::isDoubleWordType(DeoptInfo.basicType()) ? 2 : 1;
-    } else if (DeoptInfo.valueType() !=
+    } else if (DeoptInfo.valueType() ==
                jeandle::DeoptValueEncoding::LocalType) {
-      break;
+      InsertPos += 2;
     }
-    InsertPos += 2;
+    break;
   }
 
   return {InsertPos, Slots};
