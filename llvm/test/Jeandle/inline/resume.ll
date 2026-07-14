@@ -39,16 +39,11 @@ attributes #3 = { "monomorphic-target" }
 ; CHECK-NOT: @callee_resume_landingpad
 ; CHECK: invoke hotspotcc void @leaf_resume_landingpad()
 ; CHECK-NEXT: to label %{{.*}} unwind label %[[INNER_UNWIND:.*]]
-; CHECK-NOT: @callee_resume_landingpad
 ; CHECK: [[INNER_UNWIND]]:
-; CHECK: landingpad i64
-; CHECK: br label %root_unwind
-; CHECK: after_landingpad:
-; CHECK-NEXT: br label %root_unwind
-; CHECK: root_unwind:
-; CHECK: landingpad i64
-; CHECK: root_unwind.body1:
-; CHECK-NOT: phi i64
+; CHECK-NEXT: %{{.*}} = landingpad i64
+; CHECK: br label %{{.*}}
 ; CHECK: ret i32 -1
+; CHECK-NOT: @callee_resume_landingpad
+; CHECK-NOT: @callee_resume_zero
 ; CHECK-NOT: define available_externally hotspotcc void @callee_resume_landingpad
 ; CHECK-NOT: define available_externally hotspotcc void @callee_resume_zero

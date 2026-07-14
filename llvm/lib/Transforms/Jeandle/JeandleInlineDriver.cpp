@@ -36,8 +36,14 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Jeandle/JavaOperationLower.h"
 #include "llvm/Transforms/Jeandle/JeandleDevirtualization.h"
+#include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
+#include "llvm/Transforms/Scalar/ADCE.h"
+#include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/InstSimplifyPass.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
 
 #include <string>
 #include <utility>
@@ -137,26 +143,41 @@ static constexpr unsigned MaxInlineDriverIterations = 512;
 
 static PreservedAnalyses runRootInstSimplify(Module &M,
                                              ModuleAnalysisManager &MAM) {
+  bool Changed = false;
   Function *RootFunction = getRootJavaMethodFunction(M);
-  if (!RootFunction)
+  if (!RootFunction) {
     return PreservedAnalyses::all();
+  }
 
   FunctionAnalysisManager &FAM =
       MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
 
-  PreservedAnalyses FunctionPA = InstSimplifyPass().run(*RootFunction, FAM);
-  if (FunctionPA.areAllPreserved())
+  // Per-round root cleanup, mirroring the O3 "simplify after inline" cleanup.
+  //   - InstSimplify: cheap local instruction folding, no CFG rewrite.
+  //   - TypeCheckElimination: fold jeandle.check_instanceof to constants,
+  //     exposing monomorphic call sites for the next devirtualization round.
+  //   - EarlyCSE: common-subexpression elimination (also load CSE), removes
+  //     redundant computation.
+  //   - InstCombine: instruction simplification + constant folding/
+  //     propagation, and removal of dead instructions.
+  //   - SimplifyCFG: remove unreachable blocks, merge blocks, fold branches.
+  //   - ADCE: aggressive dead-code elimination.
+  FunctionPassManager FPM;
+  FPM.addPass(InstSimplifyPass());
+  FPM.addPass(TypeCheckElimination());
+  FPM.addPass(EarlyCSEPass());
+  FPM.addPass(InstCombinePass());
+  FPM.addPass(SimplifyCFGPass());
+  FPM.addPass(ADCEPass());
+
+  PreservedAnalyses RootPA = FPM.run(*RootFunction, FAM);
+  Changed |= !RootPA.areAllPreserved();
+
+  if (!Changed)
     return PreservedAnalyses::all();
 
-  FAM.invalidate(*RootFunction, FunctionPA);
-
-  PreservedAnalyses PA;
-  // InstSimplify only runs on the root function here. Its function analyses
-  // have already been invalidated with the pass result above, so keep the FAM
-  // proxy and unrelated function-analysis caches alive for the module manager.
-  PA.preserve<FunctionAnalysisManagerModuleProxy>();
-  PA.preserveSet<AllAnalysesOn<Function>>();
-  return PA;
+  RootPA.preserve<FunctionAnalysisManagerModuleProxy>();
+  return RootPA;
 }
 
 PreservedAnalyses JeandleInlineDriver::run(Module &M,
@@ -189,32 +210,46 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   // Loop shape:
   //   1. Run one inline round. The round tags every newly exposed call site
   //      with inline-scope-id metadata.
-  //   2. If the inline round did not expose any new call sites, stop.
-  //   3. Run devirtualization refinement. It must propagate inline-scope-id
+  //   2. Per-round cleanup (runRootInstSimplify): lower the phase-0 JavaOp
+  //      calls exposed by this round and simplify the root. Runs even when the
+  //      round exposed no new *monomorphic* call sites, so a callee body that
+  //      only brought in phase-0 JavaOp calls still gets them lowered.
+  //   3. If the inline round did not expose any new call sites, stop.
+  //   4. Run devirtualization refinement. It must propagate inline-scope-id
   //      and deopt/BCI information when it clones or replaces calls.
-  //   4. If devirtualization preserved everything, it did not produce a new
+  //   5. If devirtualization preserved everything, it did not produce a new
   //      MonomorphicTarget call site and the loop stops; otherwise rescan IR
   //      in the next inline round.
   bool HitIterationLimit = true;
   for (unsigned Iteration = 0; Iteration < MaxInlineDriverIterations;
        ++Iteration) {
+
+    // Inline one round.
     InlineRoundResult InlineResult =
         Inliner.runInlineRound(M, MAM, InlineScopes);
-    Changed |= !InlineResult.PA.areAllPreserved();
-    updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(InlineResult.PA));
+    bool RoundChanged = !InlineResult.PA.areAllPreserved();
+    Changed |= RoundChanged;
+
+    if (RoundChanged) {
+      updateDriverPreservedAnalyses(M, MAM, DriverPA,
+                                    std::move(InlineResult.PA));
+
+      // Lower phase-0 JavaOp call sites exposed by the previous inline round's
+      // inlining.
+      PreservedAnalyses JavaOpLowerPA = JavaOperationLower(0).run(M, MAM);
+      Changed |= !JavaOpLowerPA.areAllPreserved();
+      updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(JavaOpLowerPA));
+
+      // Per-round cleanup.
+      PreservedAnalyses CleanupPA = runRootInstSimplify(M, MAM);
+      Changed |= !CleanupPA.areAllPreserved();
+      updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(CleanupPA));
+    }
 
     if (!InlineResult.ExposedNewCallSites) {
       HitIterationLimit = false;
       break;
     }
-
-    // Keep the per-round cleanup conservative: InstSimplify performs local
-    // instruction simplification without introducing new instructions or
-    // rewriting the CFG. Run it before devirtualization so newly exposed call
-    // sites are seen after cheap local folding.
-    PreservedAnalyses SimplifyPA = runRootInstSimplify(M, MAM);
-    Changed |= !SimplifyPA.areAllPreserved();
-    updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(SimplifyPA));
 
     PreservedAnalyses DevirtPA = Devirtualization.runDevirtualization(M, MAM);
     bool AddedMonomorphicTargets = !DevirtPA.areAllPreserved();

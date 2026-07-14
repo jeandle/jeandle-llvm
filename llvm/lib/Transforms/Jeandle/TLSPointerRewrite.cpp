@@ -104,8 +104,11 @@ PreservedAnalyses TLSPointerRewrite::run(Function &F,
         Builder.CreatePtrToInt(Val, IntptrType, Val->getName() + ".tls.offset");
     Value *NewPtr = Builder.CreateInBoundsPtrAdd(TLSBasePtr, PtrToInt,
                                                  Val->getName() + ".tls.ptr");
-    Val->replaceUsesWithIf(
-        NewPtr, [PtrToInt](Use &U) { return U.getUser() != PtrToInt; });
+    Val->replaceUsesWithIf(NewPtr, [PtrToInt, &F](Use &U) {
+      auto *UserInst = dyn_cast<Instruction>(U.getUser());
+      return U.getUser() != PtrToInt && UserInst &&
+             UserInst->getFunction() == &F;
+    });
   }
 
   PreservedAnalyses PA;

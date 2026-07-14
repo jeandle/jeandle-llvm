@@ -46,6 +46,8 @@ namespace {
 using llvm::jeandle::getOopHandleId;
 using llvm::jeandle::HotspotBasicType;
 using llvm::jeandle::isJavaOopType;
+using llvm::jeandle::isNarrowOopType;
+using llvm::jeandle::isWideOopType;
 using llvm::jeandle::T_ARRAY;
 using llvm::jeandle::T_BOOLEAN;
 using llvm::jeandle::T_BYTE;
@@ -194,6 +196,17 @@ DenseMap<Value *, int> computeConstOops(Function &F) {
   DenseMap<Value *, ConstOopLattice> States;
   SmallVector<Value *, 32> Worklist;
 
+  // Oop-typed arguments are opaque producers. Do not rely only on
+  // getLattice's fallback for them: arguments have users, and pushing them is
+  // what forces forwarders such as freeze/cast/select/phi to re-evaluate from
+  // Top to Bottom when their source is an argument.
+  for (Argument &Arg : F.args()) {
+    if (isJavaOopType(Arg.getType())) {
+      States[&Arg] = ConstOopLattice::bottom();
+      Worklist.push_back(&Arg);
+    }
+  }
+
   // Seed three categories of oop-typed Instructions:
   //   source     — load from oop_handle_*  → Constant{Id}, pushed
   //   forwarder  — PHI / Select / cast / freeze / zero-GEP / invariant.group
@@ -202,8 +215,9 @@ DenseMap<Value *, int> computeConstOops(Function &F) {
   //   opaque     — any other oop-typed instruction (calls, non-source loads,
   //                atomic ops, etc.)       → Bottom, pushed
   //
-  // Non-Instruction oop values (Argument, Constant) remain implicitly Bottom
-  // via getLattice's fallback — they have no def site to push from.
+  // Other non-instruction oop values (e.g. Constants) remain implicitly Bottom
+  // via getLattice's fallback; unlike Arguments, they do not need a def-site
+  // worklist seed for this analysis.
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
       if (auto *LI = dyn_cast<LoadInst>(&I)) {
@@ -418,15 +432,74 @@ bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
     if (!isJavaOopType(LI->getType()))
       return false;
     int NewOopId = static_cast<int>(RawValue);
-    Value *NewValue = nullptr;
-    if (NewOopId < 0) {
-      NewValue = ConstantPointerNull::get(cast<PointerType>(LI->getType()));
-    } else {
-      NewValue = createConstOopLoad(M, Builder, NewOopId);
-      ++NumOopChains;
+
+    // The constant oop id is address-space-agnostic: the lattice has already
+    // propagated it across any addrspacecast, so we only need to re-materialise
+    // the constant at the type each user expects.
+    if (!isNarrowOopType(LI->getType())) {
+      // Wide (uncompressed) field load: replace with the wide constant.
+      Value *NewValue = nullptr;
+      if (NewOopId < 0) {
+        NewValue = ConstantPointerNull::get(cast<PointerType>(LI->getType()));
+      } else {
+        NewValue = createConstOopLoad(M, Builder, NewOopId);
+        ++NumOopChains;
+      }
+      LI->replaceAllUsesWith(NewValue);
+      LI->eraseFromParent();
+      return true;
     }
-    LI->replaceAllUsesWith(NewValue);
-    LI->eraseFromParent();
+
+    // Narrow (compressed) field load. Its decode-cast users
+    // (addrspacecast AS3 -> AS1) are replaced by the *wide* constant directly,
+    // which drops the cast. This is essential: LLVM cannot fold an
+    // addrspacecast between the narrow and wide address spaces (it is a
+    // target-defined encode/decode), so leaving `decode(constant)` in place
+    // would stop value-dependent uses from folding -- e.g. a null reference
+    // compared against null, or a known oop used as a downstream field base.
+    // Any remaining (non-decode) user is rewritten to the *narrow* constant.
+    // Relies on CFF running before ExpandNarrowOopCast, which is the pass that
+    // would lower a surviving cast into a jeandle.encode/decode_heap_oop call.
+    Type *WideTy =
+        PointerType::get(M.getContext(), jeandle::AddrSpace::JavaHeapAddrSpace);
+
+    SmallVector<AddrSpaceCastInst *, 4> DecodeCasts;
+    for (User *U : LI->users())
+      if (auto *Cast = dyn_cast<AddrSpaceCastInst>(U))
+        if (isWideOopType(Cast->getType()))
+          DecodeCasts.push_back(Cast);
+
+    Value *WideC = nullptr;
+    if (!DecodeCasts.empty()) {
+      if (NewOopId < 0) {
+        WideC = ConstantPointerNull::get(cast<PointerType>(WideTy));
+      } else {
+        WideC = createConstOopLoad(M, Builder, NewOopId);
+        ++NumOopChains;
+      }
+      for (AddrSpaceCastInst *Cast : DecodeCasts) {
+        Cast->replaceAllUsesWith(WideC);
+        Cast->eraseFromParent();
+      }
+    }
+
+    if (!LI->use_empty()) {
+      // Remaining users want the narrow value.
+      Value *NarrowC;
+      if (NewOopId < 0) {
+        NarrowC = ConstantPointerNull::get(cast<PointerType>(LI->getType()));
+      } else {
+        if (!WideC) {
+          WideC = createConstOopLoad(M, Builder, NewOopId);
+          ++NumOopChains;
+        }
+        NarrowC = Builder.CreateAddrSpaceCast(WideC, LI->getType(),
+                                              "folded.narrow.oop");
+      }
+      LI->replaceAllUsesWith(NarrowC);
+    }
+    if (LI->use_empty())
+      LI->eraseFromParent();
     return true;
   }
 

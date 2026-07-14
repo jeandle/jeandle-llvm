@@ -26,53 +26,6 @@ using namespace llvm;
 
 namespace {
 
-static bool removeFunctionFromLLVMUsed(Module &M, Function &F) {
-  GlobalVariable *UsedArray = M.getGlobalVariable("llvm.used");
-  if (!UsedArray)
-    return false;
-
-  ConstantArray *InitArray = cast<ConstantArray>(UsedArray->getInitializer());
-  if (!InitArray) {
-    UsedArray->eraseFromParent();
-    return false;
-  }
-
-  std::vector<Constant *> NewElements;
-  bool found = false;
-
-  // Find all elements to be preserved.
-  for (unsigned i = 0; i < InitArray->getNumOperands(); i++) {
-    Constant *Element = InitArray->getOperand(i);
-    if (Function *Func = dyn_cast<Function>(Element)) {
-      if (Func == &F) {
-        found = true;
-        continue;
-      }
-    }
-    NewElements.push_back(Element);
-  }
-
-  if (!found)
-    return false;
-
-  UsedArray->eraseFromParent();
-
-  // Erase the empty llvm.used directly.
-  if (NewElements.empty())
-    return true;
-
-  // Create a new llvm.used with the preserved elements.
-  auto *NewArrayTy = ArrayType::get(InitArray->getType()->getElementType(),
-                                    NewElements.size());
-
-  auto *NewUsedArray = new GlobalVariable(
-      M, NewArrayTy, false, GlobalValue::AppendingLinkage,
-      ConstantArray::get(NewArrayTy, NewElements), "llvm.used");
-  NewUsedArray->setSection("llvm.metadata");
-
-  return true;
-}
-
 static bool
 runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
         function_ref<AAResults &(Function &)> GetAAR, ProfileSummaryInfo &PSI,
@@ -95,17 +48,19 @@ runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
     if (!shouldInline(F))
       continue;
 
+    // Already lowered by a prior JavaOperationLower run: it has no remaining
+    // call sites to inline. Skip it so repeated in-driver invocations do not
+    // re-iterate already-lowered JavaOps. The JavaOp definition itself is left
+    // in the module for a later JavaOperationDeletion pass to erase.
+    if (F.user_empty())
+      continue;
+
     assert(!F.isPresplitCoroutine() &&
            "A presplit coroutine function should not be a JavaOp");
     assert(!F.isDeclaration() &&
            "A function declaration should not be a JavaOp");
     assert(isInlineViable(F).isSuccess() &&
            "Function should be viable for inlining");
-
-    if (removeFunctionFromLLVMUsed(M, F)) {
-      LLVM_DEBUG(dbgs() << "remove function:" << F.getName() << "from llvm.used"
-                        << " in lower phase: " << Phase << "\n");
-    }
 
     Calls.clear();
     for (User *U : F.users())
@@ -125,22 +80,11 @@ runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
         continue;
       }
 
+      Changed = true;
+
       if (FAM)
         FAM->invalidate(*Caller, PreservedAnalyses::none());
     }
-
-    F.removeDeadConstantUsers();
-
-    assert(F.user_empty() && "JavaOp should not be used after lowering");
-
-    if (FAM)
-      FAM->clear(F, F.getName());
-    M.getFunctionList().erase(F);
-
-    LLVM_DEBUG(dbgs() << "remove lowered JavaOp: " << F.getName()
-                      << " in lower phase: " << Phase << "\n");
-
-    Changed = true;
   }
   return Changed;
 }
@@ -165,7 +109,12 @@ PreservedAnalyses JavaOperationLower::run(Module &M,
     return PreservedAnalyses::all();
 
   PreservedAnalyses PA;
-  // We have already invalidated all analyses on modified functions.
+  // runImpl eagerly invalidated every caller it inlined a JavaOp into, so keep
+  // the FAM proxy alive (mirrors ModuleToFunctionPassAdaptor and the inline
+  // round) instead of letting the outer module manager nuke all function
+  // analyses. The proxy's deferred outer-invalidation still propagates any
+  // module-analysis invalidation to dependent function analyses.
+  PA.preserve<FunctionAnalysisManagerModuleProxy>();
   PA.preserveSet<AllAnalysesOn<Function>>();
   return PA;
 }

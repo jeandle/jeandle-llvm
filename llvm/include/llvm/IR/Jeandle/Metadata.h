@@ -19,6 +19,8 @@ public:
 
   static constexpr const char *StackPointer = "stack-pointer";
 
+  static constexpr const char *HeapBase = "heap-base";
+
   static constexpr const char *JavaMethodCompilation =
       "java-method-compilation";
 
@@ -32,7 +34,8 @@ public:
 enum AddrSpace : unsigned {
   CHeapAddrSpace = 0,
   JavaHeapAddrSpace = 1,
-  TLSAddrSpace = 2
+  TLSAddrSpace = 2,
+  NarrowOopAddrSpace = 3
 };
 
 } // namespace llvm::jeandle

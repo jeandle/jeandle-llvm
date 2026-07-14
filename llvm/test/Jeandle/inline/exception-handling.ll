@@ -35,8 +35,10 @@ attributes #2 = { "monomorphic-target" }
 ; CHECK-NEXT: to label %{{.*}} unwind label %[[UNWIND:.*]]
 ; CHECK-NOT: @callee_with_eh
 ; CHECK: [[UNWIND]]:
-; CHECK: landingpad i64
-; CHECK: ret i32 42
-; CHECK: unwind.body:
-; CHECK: ret i32 -1
+; CHECK-NEXT: %{{.*}} = landingpad i64
+; CHECK: br label %{{.*}}
+; CHECK: phi i32 [ -1, %{{.*}} ], [ 42, %{{.*}} ]
+; CHECK: ret i32
+; CHECK: declare hotspotcc void @leaf_may_throw()
+; CHECK-NOT: @callee_with_eh
 ; CHECK-NOT: define available_externally hotspotcc i32 @callee_with_eh

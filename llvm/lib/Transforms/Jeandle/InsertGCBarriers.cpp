@@ -43,8 +43,10 @@ bool isJavaHeapStore(Instruction *I) {
   PointerType *StoredValueTy = dyn_cast<PointerType>(StoredValue->getType());
   PointerType *StoreAddressTy = dyn_cast<PointerType>(StoreAddress->getType());
 
-  if (StoredValueTy->getAddressSpace() !=
-          jeandle::AddrSpace::JavaHeapAddrSpace ||
+  if ((StoredValueTy->getAddressSpace() !=
+           jeandle::AddrSpace::JavaHeapAddrSpace &&
+       StoredValueTy->getAddressSpace() !=
+           jeandle::AddrSpace::NarrowOopAddrSpace) ||
       StoreAddressTy->getAddressSpace() !=
           jeandle::AddrSpace::JavaHeapAddrSpace) {
     return false;
@@ -94,11 +96,21 @@ PreservedAnalyses InsertGCBarriers::run(Function &F,
     // Insert post-barrier after the store.
     if (!isa<ConstantPointerNull>(StoredValue)) {
       IRBuilder<> PostBuilder(SI->getNextNode());
+
+      Value *BarrierValue = StoredValue;
+      if (StoredValue->getType()->isPointerTy() &&
+          cast<PointerType>(StoredValue->getType())->getAddressSpace() ==
+              jeandle::AddrSpace::NarrowOopAddrSpace) {
+        Type *OopTy = PointerType::get(F.getContext(),
+                                       jeandle::AddrSpace::JavaHeapAddrSpace);
+        BarrierValue = PostBuilder.CreateAddrSpaceCast(StoredValue, OopTy);
+      }
+
       Value *BasePointer = PostBuilder.CreateIntrinsic(
           Intrinsic::experimental_gc_get_pointer_base, {PointerTy, PointerTy},
           {DerivedPointer}, {} /* FMFSource */, "base.pointer");
       CallInst *PostCall =
-          PostBuilder.CreateCall(PostBarrierFunc, {BasePointer, StoredValue});
+          PostBuilder.CreateCall(PostBarrierFunc, {BasePointer, BarrierValue});
       PostCall->setCallingConv(CallingConv::Hotspot_JIT);
     }
     Changed = true;
