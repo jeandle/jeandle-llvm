@@ -173,7 +173,8 @@ OperandBundleDef createPreCallDeoptBundle(InvokeInst &CB) {
     Args.push_back(Deopt.Inputs[I].get());
 
   for (Value *Arg : CB.args()) {
-    jeandle::HotspotBasicType TypeKind = jeandle::llvm2java(Arg->getType());
+    jeandle::HotspotBasicType TypeKind =
+        jeandle::LLVM2JavaComputational(Arg->getType());
     assert(TypeKind != jeandle::T_ILLEGAL);
 
     uint64_t Encoding =
