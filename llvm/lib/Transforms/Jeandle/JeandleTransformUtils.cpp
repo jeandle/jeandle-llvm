@@ -147,11 +147,13 @@ static std::pair<unsigned, unsigned> computeDeoptStackLayout(CallBase &CB) {
     if (DeoptInfo.valueType() == jeandle::DeoptValueEncoding::StackType) {
       assert(Slots == DeoptInfo.index() && "Stack index should be in order.");
       Slots += jeandle::isDoubleWordType(DeoptInfo.basicType()) ? 2 : 1;
+      InsertPos += 2;
     } else if (DeoptInfo.valueType() ==
                jeandle::DeoptValueEncoding::LocalType) {
       InsertPos += 2;
+    } else {
+      break;
     }
-    break;
   }
 
   return {InsertPos, Slots};

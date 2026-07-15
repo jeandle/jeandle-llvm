@@ -262,9 +262,8 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
     bool AddedMonomorphicTargets = !DevirtPA.areAllPreserved();
     Changed |= AddedMonomorphicTargets;
     FAM.invalidate(*RootFunction, DevirtPA);
-    PreservedAnalyses DevirtModulePA = AddedMonomorphicTargets
-                                           ? PreservedAnalyses::none()
-                                           : PreservedAnalyses::all();
+    PreservedAnalyses DevirtModulePA = PreservedAnalyses::all();
+    DevirtModulePA.intersect(std::move(DevirtPA));
     DevirtModulePA.preserveSet<AllAnalysesOn<Function>>();
     DevirtModulePA.preserve<FunctionAnalysisManagerModuleProxy>();
     updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(DevirtModulePA));
