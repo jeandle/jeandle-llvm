@@ -129,8 +129,7 @@ bool optimizeCallSite(InvokeInst &CB, DominatorTree &DT, DomTreeUpdater &DTU,
 
   BasicBlock *CheckInstanceofFail =
       insertCheckInstanceOf(CB, Receiver, CHAOptInfo.Constraint, Prefix, &DTU);
-  if (!CheckInstanceofFail)
-    return false;
+  assert(CheckInstanceofFail && "failed to insert check_instanceof");
 
   IRBuilder<> BuilderFail(CheckInstanceofFail);
   buildDeoptimize(BuilderFail, *CB.getModule(), CHAOptInfo.DeoptReason,
