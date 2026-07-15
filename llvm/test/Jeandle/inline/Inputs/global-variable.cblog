@@ -1,4 +1,4 @@
 IsOkToInline -1 0 101 = true
 GetInlineCalleeIR 101 = true
-RecordInlineSuccess -1 0 101 = true
+RecordInlineResult -1 0 101 0 = true
 RecordInliningComplete = true
