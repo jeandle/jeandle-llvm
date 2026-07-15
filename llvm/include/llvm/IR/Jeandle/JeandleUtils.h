@@ -49,9 +49,17 @@ inline bool isDoubleWordType(HotspotBasicType BasicTy) {
 }
 
 // Transform llvm::Type to HotspotBasicType.
-inline HotspotBasicType llvm2java(Type *Ty) {
-  if (Ty->isPointerTy())
-    return T_OBJECT;
+// Note that the return value is the computational type.
+// A single LLVM Type may correspond to multiple actual Hotspot BasicTypes.
+// See JeandleType::actual2computational and JeandleType::java2llvm in
+// Jeandle-JDK.
+inline HotspotBasicType LLVM2JavaComputational(Type *Ty) {
+  if (Ty->isPointerTy()) {
+    if (Ty->getPointerAddressSpace() == jeandle::AddrSpace::JavaHeapAddrSpace)
+      return T_OBJECT;
+    if (Ty->getPointerAddressSpace() == jeandle::AddrSpace::NarrowOopAddrSpace)
+      return T_NARROWOOP;
+  }
   if (Ty->isIntegerTy(32))
     return jeandle::T_INT;
   if (Ty->isIntegerTy(64))
