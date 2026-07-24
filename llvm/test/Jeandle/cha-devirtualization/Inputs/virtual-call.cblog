@@ -1,2 +1,2 @@
-GetCHAOptInfo 100 200 300 500 false 0 = "600#700#25#Optimized_target"
-UpdateToStaticOptVirtualCall 42 = true
+GetCHAOptInfo 100 200 300 500 false 0 -1 = "600#700#50#Optimized_target"
+UpdateCallSite 42 2 0 = true

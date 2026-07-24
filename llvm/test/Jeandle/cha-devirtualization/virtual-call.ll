@@ -32,11 +32,11 @@ unwind:
 ; CHECK: invoke hotspotcc ptr addrspace(1) @jeandle.new_array(i32 1)
 ; CHECK: call hotspotcc i1 @jeandle.check_instanceof(ptr inttoptr (i64 600 to ptr), ptr addrspace(1) %recv)
 ; CHECK: br i1
-; CHECK-LABEL: bci_cha_7_check_receiver_fail:
+; CHECK-LABEL: cha_bci_7_check_receiver_fail:
 ; CHECK: call hotspotcc i32 (...) @llvm.experimental.deoptimize.i32(i32 -201)
 ; CHECK: ret i32
-; CHECK-LABEL: bci_cha_7_check_receiver_pass:
-; CHECK: invoke hotspotcc i32 @Optimized_target(ptr addrspace(1) %recv) #[[CALLATTR:[0-9]+]]
+; CHECK-LABEL: cha_bci_7_check_receiver_pass:
+; CHECK: invoke hotspotcc i32 @Optimized_target(ptr addrspace(1) noundef "runtime-live" %recv) #[[CALLATTR:[0-9]+]]
 ; CHECK-SAME: [ "deopt"(
 ; CHECK: declare hotspotcc i32 @Optimized_target(ptr addrspace(1)) #[[TARGETATTR:[0-9]+]] gc "hotspotgc"
 ; CHECK: attributes #[[TARGETATTR]] = { "java-method"="700" }
@@ -48,5 +48,7 @@ attributes #2 = { "bytecode"="invokevirtual" "call-site"="900" "declared-holder"
 
 !java-method-compilation = !{}
 !static-call-patch-size = !{!0}
+!dynamic-call-patch-size = !{!1}
 
 !0 = !{i32 5}
+!1 = !{i32 15}

@@ -29,8 +29,10 @@ attributes #2 = { "monomorphic-target" }
 
 !java-method-compilation = !{}
 !static-call-patch-size = !{!0}
+!dynamic-call-patch-size = !{!1}
 
 !0 = !{i32 5}
+!1 = !{i32 15}
 
 ; CHECK-LABEL: define hotspotcc i32 @root(
 ; CHECK-NOT: @callee_with_eh

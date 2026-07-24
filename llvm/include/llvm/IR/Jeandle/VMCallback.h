@@ -175,13 +175,30 @@ enum class JeandleInlineReason : int {
       (), (), (), 0)                                                             \
   def(GetCHAOptInfo, std::string, String,                                        \
       (uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4,                   \
-       bool a5, int a6), (a1, a2, a3, a4, a5, a6),                               \
+       bool a5, int a6, int a7), (a1, a2, a3, a4, a5, a6, a7),                   \
       (VMCallbackValueType::Uintptr, VMCallbackValueType::Uintptr,               \
        VMCallbackValueType::Uintptr, VMCallbackValueType::Uintptr,               \
-       VMCallbackValueType::Bool, VMCallbackValueType::Int), 6)                  \
-  def(UpdateToStaticOptVirtualCall, bool, Bool,                                  \
-      (int64_t a1), (a1),                                                        \
-      (VMCallbackValueType::Long), 1)
+       VMCallbackValueType::Bool, VMCallbackValueType::Int,                      \
+       VMCallbackValueType::Int), 7)                                             \
+  def(GetProfileDevirtInfo, std::string, String,                                 \
+      (uintptr_t a1, uintptr_t a2, uintptr_t a3, int a4, int a5),                \
+      (a1, a2, a3, a4, a5),                                                      \
+      (VMCallbackValueType::Uintptr, VMCallbackValueType::Uintptr,               \
+       VMCallbackValueType::Uintptr, VMCallbackValueType::Int,                   \
+       VMCallbackValueType::Int), 5)                                             \
+  def(UpdateCallSite, bool, Bool,                                                \
+      (int64_t a1, int a2, uintptr_t a3), (a1, a2, a3),                          \
+      (VMCallbackValueType::Long, VMCallbackValueType::Int,                      \
+       VMCallbackValueType::Uintptr), 3)                                         \
+  def(GetSignatureAccessingKlass, uintptr_t, Uintptr,                            \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetSignatureArgType, int64_t, Long,                                        \
+      (uintptr_t a1, int a2), (a1, a2),                                          \
+      (VMCallbackValueType::Uintptr, VMCallbackValueType::Int), 2)               \
+  def(GetSignatureArgTypeKlass, uintptr_t, Uintptr,                              \
+      (uintptr_t a1, int a2), (a1, a2),                                          \
+      (VMCallbackValueType::Uintptr, VMCallbackValueType::Int), 2)
 // clang-format on
 
 // =============================================================================
@@ -265,12 +282,33 @@ enum class JeandleInlineReason : int {
 ///                         constant oop with the given oop id, or 0 if it is
 ///                         unavailable. Pure (id -> klass).
 ///   GetCHAOptInfo       — Returns the CHA analysis info for CHA
+///                         devirtualization, or empty if the call site cannot
+///                         be optimized.
 ///                         devirtualization, or 0 if the call site cannot
 ///                         be optimized. The JVM implementation also keeps
 ///                         CallSiteInfo in sync for normal compilation.
-///   UpdateToStaticOptVirtualCall
-///                       — Updates the call site to a static opt virtual call.
+///   UpdateCallSite
+///                       — Updates the call site to given destination.
 ///                         This callback has side effects on jvm side.
+///   GetSignatureAccessingKlass
+///                       — Returns the signature accessing klass as a Klass
+///                         pointer. This is the class-loader/access context
+///                         used to esolve reference types in the method
+///                         signature. It is not necessarily the same as the
+///                         method holder.
+///   GetSignatureArgType — Returns the HotSpot BasicType tag as int64_t.
+///                         For index -1: the method return type.
+///                         For index >= 0: the argument type at the zero-based
+///                         ciSignature parameter index.
+///                         The index excludes the receiver and is not a JVM
+///                         stack-slot index.
+///   GetSignatureArgTypeKlass
+///                       — Returns the declared Klass pointer of a reference
+///                         argument in the method signature.
+///                         The index is a zero-based ciSignature parameter
+///                         index, excluding the receiver and not a JVM
+///                         stack-slot index.
+///                         Callers must only query reference parameters.
 
 struct VMCallbacks {
   ALL_JEANDLE_VM_CALLBACKS(DEF_VM_CALLBACK_FIELD)

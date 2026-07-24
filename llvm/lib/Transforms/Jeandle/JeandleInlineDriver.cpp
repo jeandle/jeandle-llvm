@@ -48,7 +48,6 @@
 #include "llvm/Transforms/Scalar/InstSimplifyPass.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
 
-#include <string>
 #include <utility>
 
 #define DEBUG_TYPE "jeandle-inline-driver"

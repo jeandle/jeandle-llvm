@@ -130,6 +130,14 @@ bool jeandle::areKlassesIncompatible(uintptr_t Klass, bool KlassExact,
          (!CB->IsSubtype(OtherKlass, Klass) && !CB->IsInterface(OtherKlass));
 }
 
+static bool isJavaTypeAssumeFn(const Function *F) {
+  return F && F->getName() == "jeandle.assume_java_type";
+}
+
+static bool isJavaTypeAssumeCall(const CallBase *CB) {
+  return isJavaTypeAssumeFn(CB->getCalledFunction()) && CB->arg_size() == 1;
+}
+
 /// Return true if F is jeandle.check_instanceof.
 static bool isCheckInstanceofFn(const Function *F) {
   return F && F->getName() == "jeandle.check_instanceof";
@@ -318,6 +326,21 @@ JavaType jeandle::typeIntersect(JavaType A, JavaType B) {
   return Result;
 }
 
+static JavaType getCallRetJavaType(const CallBase *CB) {
+  const AttributeList &AL = CB->getAttributes();
+  if (AL.hasRetAttr(jeandle::Attribute::JavaKlass)) {
+    StringRef KlassStr = AL.getAttributeAtIndex(AttributeList::ReturnIndex,
+                                                jeandle::Attribute::JavaKlass)
+                             .getValueAsString();
+    uintptr_t Klass = 0;
+    if (!KlassStr.getAsInteger(10, Klass) && Klass != 0) {
+      bool Exact = AL.hasRetAttr(jeandle::Attribute::JavaKlassExact);
+      return {Klass, Exact};
+    }
+  }
+  return {};
+}
+
 // =============================================================================
 // Context-insensitive type query
 // =============================================================================
@@ -344,18 +367,7 @@ static JavaType getBaseJavaType(Value *V,
 
   // Call / Invoke: check return attributes.
   if (auto *CB = dyn_cast<CallBase>(V)) {
-    const AttributeList &AL = CB->getAttributes();
-    if (AL.hasRetAttr(jeandle::Attribute::JavaKlass)) {
-      StringRef KlassStr = AL.getAttributeAtIndex(AttributeList::ReturnIndex,
-                                                  jeandle::Attribute::JavaKlass)
-                               .getValueAsString();
-      uintptr_t Klass = 0;
-      if (!KlassStr.getAsInteger(10, Klass) && Klass != 0) {
-        bool Exact = AL.hasRetAttr(jeandle::Attribute::JavaKlassExact);
-        return {Klass, Exact};
-      }
-    }
-    return {};
+    return getCallRetJavaType(CB);
   }
 
   // Load: check !java-klass metadata.
@@ -1098,6 +1110,23 @@ static JavaType getJavaTypeImpl(Value *V, DominatorTree &DT,
                                 Instruction *Context,
                                 SmallPtrSetImpl<const PHINode *> &Visited,
                                 BasicBlock *DestBB) {
+  // Java type assume is an identity marker used to preserve a narrowed JavaType
+  // on the same oop value, especially after inlining maps a callee argument to
+  // a caller value.  Query the input with the current context, intersect it
+  // with the assumed return JavaType, then also apply any dominating checks on
+  // the assume result itself.
+  if (auto *CB = dyn_cast<CallBase>(V)) {
+    if (isJavaTypeAssumeCall(CB) && Context) {
+      JavaType Input =
+          getJavaTypeImpl(CB->getArgOperand(0), DT, Context, Visited, DestBB);
+      JavaType Assumed = getCallRetJavaType(CB);
+      JavaType Result = typeIntersect(Input, Assumed);
+      JavaType Sharpened = sharpenFromDominators(V, Context, DT, DestBB);
+      Result = typeIntersect(Result, Sharpened);
+      return Result;
+    }
+  }
+
   // Context-sensitive PHI handling: compute per-incoming types via
   // getPhiJavaType, then also sharpen from dominators of the Context.
   // The PHI's incoming analysis gives the base type; dominator checks at

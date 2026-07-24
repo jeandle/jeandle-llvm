@@ -52,6 +52,13 @@ struct JavaType {
   bool isUnknown() const { return Klass == 0 && ExcludedKlasses.empty(); }
   bool isKnown() const { return Klass != 0; }
   bool hasExclusions() const { return !ExcludedKlasses.empty(); }
+
+  bool operator==(const JavaType &Other) const {
+    return Klass == Other.Klass && Exact == Other.Exact &&
+           ExcludedKlasses == Other.ExcludedKlasses;
+  }
+
+  bool operator!=(const JavaType &Other) const { return !(*this == Other); }
 };
 
 /// Get the Java type of a value.

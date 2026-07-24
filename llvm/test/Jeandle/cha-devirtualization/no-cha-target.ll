@@ -33,5 +33,7 @@ attributes #2 = { "bytecode"="invokevirtual" "call-site"="900" "declared-holder"
 
 !java-method-compilation = !{}
 !static-call-patch-size = !{!0}
+!dynamic-call-patch-size = !{!1}
 
 !0 = !{i32 5}
+!1 = !{i32 15}

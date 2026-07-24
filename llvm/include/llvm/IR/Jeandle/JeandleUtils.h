@@ -18,11 +18,14 @@
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <optional>
 #include <string>
+
+#define DEBUG_TYPE "jeandle-utils"
 
 namespace llvm::jeandle {
 
@@ -54,6 +57,36 @@ inline bool isDoubleWordType(HotspotBasicType BasicTy) {
   return (BasicTy == T_DOUBLE || BasicTy == T_LONG);
 }
 
+// Convert a Java type to computational type
+// Reference:
+// https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-2.html#jvms-2.11.1-320
+inline HotspotBasicType actual2computational(HotspotBasicType BT) {
+  switch (BT) {
+  case T_BYTE:
+  case T_CHAR:
+  case T_SHORT:
+  case T_BOOLEAN:
+  case T_INT:
+    return T_INT;
+  case T_VOID:
+  case T_LONG:
+  case T_FLOAT:
+  case T_DOUBLE:
+    return BT;
+  case T_ARRAY:
+  case T_OBJECT:
+    return T_OBJECT;
+  case T_ADDRESS:
+    return T_ADDRESS;
+  case T_NARROWOOP:
+    return T_NARROWOOP;
+  case T_NARROWKLASS:
+    return T_NARROWKLASS;
+  default:
+    llvm_unreachable("Should not reach here");
+  }
+}
+
 // Transform llvm::Type to HotspotBasicType.
 // Note that the return value is the computational type.
 // A single LLVM Type may correspond to multiple actual Hotspot BasicTypes.
@@ -75,6 +108,49 @@ inline HotspotBasicType LLVM2JavaComputational(Type *Ty) {
   if (Ty->isDoubleTy())
     return jeandle::T_DOUBLE;
   return T_ILLEGAL;
+}
+
+// Transform HotspotBasicType to llvm::Type.
+inline Type *java2llvm(HotspotBasicType JavaType, LLVMContext &Context) {
+  // Make sure java2llvm(type) == java2llvm(actual2computational(type))
+  HotspotBasicType ComputationalType = actual2computational(JavaType);
+  switch (ComputationalType) {
+  case T_BOOLEAN:
+  case T_CHAR:
+  case T_BYTE:
+  case T_SHORT:
+  case T_INT:
+    return llvm::Type::getInt32Ty(Context);
+  case T_FLOAT:
+    return llvm::Type::getFloatTy(Context);
+  case T_DOUBLE:
+    return llvm::Type::getDoubleTy(Context);
+  case T_LONG:
+    return llvm::Type::getInt64Ty(Context);
+  case T_OBJECT:
+    return llvm::PointerType::get(Context,
+                                  llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
+  case T_ARRAY:
+    return llvm::PointerType::get(Context,
+                                  llvm::jeandle::AddrSpace::JavaHeapAddrSpace);
+  case T_VOID:
+    return llvm::Type::getVoidTy(Context);
+  case T_ADDRESS:
+    return llvm::PointerType::get(Context,
+                                  llvm::jeandle::AddrSpace::CHeapAddrSpace);
+  case T_NARROWOOP:
+    return llvm::PointerType::get(Context,
+                                  llvm::jeandle::AddrSpace::NarrowOopAddrSpace);
+  case T_NARROWKLASS:
+    return llvm::Type::getInt32Ty(Context);
+  case T_METADATA:
+  case T_CONFLICT:
+  case T_ILLEGAL:
+    LLVM_DEBUG(dbgs() << "Unsupported type: " << JavaType << "\n");
+    return nullptr;
+  }
+  LLVM_DEBUG(dbgs() << "Unsupported type: " << JavaType << "\n");
+  return nullptr;
 }
 
 /// Returns true if \p Ty is a pointer in the Java heap address space,
@@ -172,6 +248,8 @@ inline Function *getRootJavaMethodFunction(Module &M) {
   }
   return RootFunction;
 }
+// CHADestKind that represents the destination type of a call site.
+enum CHADestKind { StaticCall, VirtualCall, OptVirtualCall, Illegal };
 
 } // namespace llvm::jeandle
 
