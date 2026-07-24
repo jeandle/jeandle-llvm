@@ -1,0 +1,14 @@
+# Regression replay for intersect-exact.ll.
+#
+# Fix path: the dominating check_instanceof(500, %recv) sharpens %recv to exact
+# because klass 500 is effectively final; typeIntersect then yields {500, true}.
+IsEffectivelyFinal 500 = true
+# Bug path: the unfixed typeIntersect takes the reflexive IsSubtype(500, 500)
+# branch instead of the explicit equality check.
+IsSubtype 500 500 = true
+# Fix: Exact=true  -> CHA returns the unique target -> the invoke devirtualizes.
+GetCHAOptInfo 100 200 300 500 true 0 = "600#700#25#Optimized_target"
+# Bug: Exact=false -> CHA returns no target -> the invoke stays virtual.
+# (This entry is what makes the test fail without the typeIntersect fix.)
+GetCHAOptInfo 100 200 300 500 false 0 = ""
+UpdateToStaticOptVirtualCall 42 = true
