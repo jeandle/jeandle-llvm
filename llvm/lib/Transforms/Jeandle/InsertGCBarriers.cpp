@@ -106,8 +106,8 @@ PreservedAnalyses InsertGCBarriers::run(Function &F,
         BarrierValue = PostBuilder.CreateAddrSpaceCast(StoredValue, OopTy);
       }
 
-      CallInst *PostCall =
-          PostBuilder.CreateCall(PostBarrierFunc, {DerivedPointer, BarrierValue});
+      CallInst *PostCall = PostBuilder.CreateCall(
+          PostBarrierFunc, {DerivedPointer, BarrierValue});
       PostCall->setCallingConv(CallingConv::Hotspot_JIT);
     }
     Changed = true;
