@@ -1017,9 +1017,10 @@ static JavaType sharpenFromDominators(Value *V, Instruction *Context,
       assert(CB->IsEffectivelyFinal && "IsEffectivelyFinal must be set");
       // Exact is a pure function of the klass (IsEffectivelyFinal), not carried
       // in from an independent source. So when Klass == Best.Klass — the
-      // reflexive IsSubtype branch below — IsExact already equals Best.Exact and
-      // the assignment is a no-op. Contrast typeIntersect, whose operands' Exact
-      // come from different provenances and can diverge for the same klass.
+      // reflexive IsSubtype branch below — IsExact already equals Best.Exact
+      // and the assignment is a no-op. Contrast typeIntersect, whose operands'
+      // Exact come from different provenances and can diverge for the same
+      // klass.
       bool IsExact = CB->IsEffectivelyFinal(Klass);
       if (!Best.isKnown()) {
         Best.Klass = Klass;
