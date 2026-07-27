@@ -187,7 +187,6 @@ CallInst *insertJavaTypeAssume(Value *V, jeandle::JavaType T, Instruction *I) {
   return Assume;
 }
 
-
 Function *getOrInsertJavaMethodFunction(Module &M, StringRef Name,
                                         FunctionType *Type, uintptr_t Method,
                                         bool IsAccessor) {
