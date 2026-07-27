@@ -4,8 +4,7 @@
 ; CHECK-USE: @llvm.used = appending global
 ; CHECK-USE: define hotspotcc void @test_gc_write_barrier
 ; CHECK-USE: store atomic ptr addrspace(1) %src, ptr addrspace(1) %derived.pointer
-; CHECK-USE-NEXT: %base.pointer = call ptr addrspace(1) @llvm.experimental.gc.get.pointer.base.p1.p1(ptr addrspace(1) %derived.pointer)
-; CHECK-USE-NEXT: call hotspotcc void @jeandle.post_barrier(ptr addrspace(1) %base.pointer, ptr addrspace(1) %src)
+; CHECK-USE-NEXT: call hotspotcc void @jeandle.post_barrier(ptr addrspace(1) %derived.pointer, ptr addrspace(1) %src)
 
 ; CHECK-ERASE-NOT: @llvm.used = appending global
 ; CHECK-ERASE-NOT: @jeandle.card_table_barrier

@@ -106,11 +106,8 @@ PreservedAnalyses InsertGCBarriers::run(Function &F,
         BarrierValue = PostBuilder.CreateAddrSpaceCast(StoredValue, OopTy);
       }
 
-      Value *BasePointer = PostBuilder.CreateIntrinsic(
-          Intrinsic::experimental_gc_get_pointer_base, {PointerTy, PointerTy},
-          {DerivedPointer}, {} /* FMFSource */, "base.pointer");
-      CallInst *PostCall =
-          PostBuilder.CreateCall(PostBarrierFunc, {BasePointer, BarrierValue});
+      CallInst *PostCall = PostBuilder.CreateCall(
+          PostBarrierFunc, {DerivedPointer, BarrierValue});
       PostCall->setCallingConv(CallingConv::Hotspot_JIT);
     }
     Changed = true;
