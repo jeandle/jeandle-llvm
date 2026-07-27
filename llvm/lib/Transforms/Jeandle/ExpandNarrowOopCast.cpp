@@ -93,6 +93,17 @@ PreservedAnalyses ExpandNarrowOopCast::run(Module &M, ModuleAnalysisManager &) {
 
   bool Changed = false;
 
+  // ConstantExpr(null) with a addrspacecast opcode
+  for (Use *Op : ConstCastOps) {
+    auto *CE = cast<ConstantExpr>(Op->get());
+    if (!isa<ConstantPointerNull>(CE->getOperand(0)))
+      continue;
+    Constant *NullInDst =
+        ConstantPointerNull::get(cast<PointerType>(CE->getType()));
+    Op->set(NullInDst);
+    Changed = true;
+  }
+
   // AddrSpaceCast instruction
   for (AddrSpaceCastInst *Cast : Casts) {
     unsigned SrcAS = getPointerAddressSpace(Cast->getOperand(0)->getType());
@@ -114,17 +125,6 @@ PreservedAnalyses ExpandNarrowOopCast::run(Module &M, ModuleAnalysisManager &) {
     Call->setCallingConv(CallingConv::Hotspot_JIT);
     Cast->replaceAllUsesWith(Call);
     Cast->eraseFromParent();
-    Changed = true;
-  }
-
-  // ConstantExpr(null) with a addrspacecast opcode
-  for (Use *Op : ConstCastOps) {
-    auto *CE = cast<ConstantExpr>(Op->get());
-    if (!isa<ConstantPointerNull>(CE->getOperand(0)))
-      continue;
-    Constant *NullInDst =
-        ConstantPointerNull::get(cast<PointerType>(CE->getType()));
-    Op->set(NullInDst);
     Changed = true;
   }
 
