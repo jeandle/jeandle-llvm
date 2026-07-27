@@ -75,6 +75,9 @@ int getPatchSize(const Module *M, const char *PatchType) {
 }
 
 void updateStaticOptVirtualCallAttrs(InvokeInst &CB, int PatchSize) {
+  CB.addParamAttr(0, Attribute::NoUndef);
+  CB.addParamAttr(
+      0, Attribute::get(CB.getContext(), jeandle::Attribute::RuntimeLive));
   CB.removeFnAttr(jeandle::Attribute::StatepointNumPatchBytes);
   CB.addFnAttr(Attribute::get(CB.getContext(),
                               jeandle::Attribute::StatepointNumPatchBytes,
