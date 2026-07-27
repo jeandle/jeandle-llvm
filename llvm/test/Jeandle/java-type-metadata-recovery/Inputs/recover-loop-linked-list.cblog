@@ -1,0 +1,5 @@
+# Node (klass 5). .next field at offset 16 is also declared Node (klass 5).
+# lca(5,5) never needs GetCommonSuperKlass (same klass shortcut).
+GetFieldType 5 16 = 5
+IsUnverifiedInterface 5 = false
+IsEffectivelyFinal 5 = false

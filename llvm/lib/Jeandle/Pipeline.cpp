@@ -19,6 +19,7 @@
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
 #include "llvm/Transforms/Jeandle/JeandleNarrowOopMarker.h"
+#include "llvm/Transforms/Jeandle/RecoverTypeInfo.h"
 #include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
@@ -55,6 +56,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(JavaOperationLower(0));
   FunctionPassManager PreCHACleanup;
   PreCHACleanup.addPass(InstSimplifyPass());
+  PreCHACleanup.addPass(RecoverTypeInfo());
   PreCHACleanup.addPass(TypeCheckElimination());
   PreCHACleanup.addPass(RepeatedConstantFolding());
   PreCHACleanup.addPass(EarlyCSEPass());
@@ -62,6 +64,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PreCHACleanup.addPass(SimplifyCFGPass());
   PreCHACleanup.addPass(ADCEPass());
   PM.addPass(createModuleToFunctionPassAdaptor(std::move(PreCHACleanup)));
+  PM.addPass(createModuleToFunctionPassAdaptor(RecoverTypeInfo()));
   PM.addPass(createModuleToFunctionPassAdaptor(CHADevirtualization()));
   // JeandleInlineDriver owns the inline-specific loop. Devirtualization
   // refinement between inline rounds should be wired inside the driver so
@@ -77,6 +80,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     break;
   }
   PM.addPass(createModuleToFunctionPassAdaptor(InstSimplifyPass()));
+  // RecoverTypeInfo re-attaches !java-klass metadata stripped by the inline
+  // driver's load CSE (EarlyCSE/InstCombine) before each TypeCheckElimination
+  // round so TCE sees the recovered declared field types.
+  PM.addPass(createModuleToFunctionPassAdaptor(RecoverTypeInfo()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));

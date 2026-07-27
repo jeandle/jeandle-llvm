@@ -12,11 +12,17 @@
 #define JEANDLE_UTILS_HPP
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/Metadata.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <optional>
+#include <string>
 
 namespace llvm::jeandle {
 
@@ -126,6 +132,45 @@ inline std::optional<int> getOopHandleId(Value *V) {
   if (!GV)
     return std::nullopt;
   return parseOopHandleId(GV->getName());
+}
+
+/// Returns true if \p F carries the "java-method" attribute — i.e. it
+/// represents a Java method (the compiled root method, or an inlined callee
+/// body / declaration).
+inline bool isJeandleJavaMethod(const Function &F) {
+  return F.hasFnAttribute(jeandle::Attribute::JavaMethod);
+}
+
+/// Returns true if \p F is the root Java method being compiled: it carries the
+/// "java-method" attribute and has a real body (not a declaration and not
+/// available_externally). Used to scope intra-procedural passes to the single
+/// compiled method — only this function is ever emitted.
+inline bool isRootJavaMethodFunction(const Function &F) {
+  return isJeandleJavaMethod(F) && !F.isDeclaration() &&
+         !F.hasAvailableExternallyLinkage();
+}
+
+/// Finds the root Java method in \p M (see isRootJavaMethodFunction). There is
+/// expected to be at most one such function per module; finding more than one
+/// is a fatal error.
+inline Function *getRootJavaMethodFunction(Module &M) {
+  Function *RootFunction = nullptr;
+  for (Function &F : M) {
+    if (!isRootJavaMethodFunction(F))
+      continue;
+    if (!RootFunction) {
+      RootFunction = &F;
+    } else {
+      std::string Message;
+      raw_string_ostream OS(Message);
+      OS << "Jeandle: expected at most one root Java method function, "
+         << "found '" << RootFunction->getName() << "' and '" << F.getName()
+         << "'";
+      OS.flush();
+      report_fatal_error(StringRef(Message));
+    }
+  }
+  return RootFunction;
 }
 
 } // namespace llvm::jeandle

@@ -28,6 +28,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/Attributes.h"
+#include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/IR/Jeandle/VMCallbackLog.h"
@@ -39,6 +40,7 @@
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
+#include "llvm/Transforms/Jeandle/RecoverTypeInfo.h"
 #include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
@@ -53,34 +55,9 @@
 
 using namespace llvm;
 
-static bool isJeandleJavaMethod(const Function &F) {
-  return F.hasFnAttribute(jeandle::Attribute::JavaMethod);
-}
-
-static bool isRootJavaMethodFunction(const Function &F) {
-  return isJeandleJavaMethod(F) && !F.isDeclaration() &&
-         !F.hasAvailableExternallyLinkage();
-}
-
-static Function *getRootJavaMethodFunction(Module &M) {
-  Function *RootFunction = nullptr;
-  for (Function &F : M) {
-    if (!isRootJavaMethodFunction(F))
-      continue;
-    if (!RootFunction) {
-      RootFunction = &F;
-    } else {
-      std::string Message;
-      raw_string_ostream OS(Message);
-      OS << "JeandleInliner: expected at most one root Java method function, "
-         << "found '" << RootFunction->getName() << "' and '" << F.getName()
-         << "'";
-      OS.flush();
-      report_fatal_error(StringRef(Message));
-    }
-  }
-  return RootFunction;
-}
+using llvm::jeandle::getRootJavaMethodFunction;
+using llvm::jeandle::isJeandleJavaMethod;
+using llvm::jeandle::isRootJavaMethodFunction;
 
 static void eraseInlineScopeIDs(Function &RootFunction) {
   // inline-scope-id is private scheduling metadata produced and consumed only
@@ -155,6 +132,9 @@ static PreservedAnalyses runRootInstSimplify(Module &M,
 
   // Per-round root cleanup, mirroring the O3 "simplify after inline" cleanup.
   //   - InstSimplify: cheap local instruction folding, no CFG rewrite.
+  //   - RecoverTypeInfo: re-attach !java-klass metadata that the previous
+  //     round's EarlyCSE/InstCombine load CSE stripped, so this round's
+  //     TypeCheckElimination still sees declared field types.
   //   - TypeCheckElimination: fold jeandle.check_instanceof to constants,
   //     exposing monomorphic call sites for the next devirtualization round.
   //   - RepeatedConstantFolding: fold constant fields to a fixed point,
@@ -167,12 +147,14 @@ static PreservedAnalyses runRootInstSimplify(Module &M,
   //   - ADCE: aggressive dead-code elimination.
   FunctionPassManager FPM;
   FPM.addPass(InstSimplifyPass());
+  FPM.addPass(RecoverTypeInfo());
   FPM.addPass(TypeCheckElimination());
   FPM.addPass(RepeatedConstantFolding());
   FPM.addPass(EarlyCSEPass());
   FPM.addPass(InstCombinePass());
   FPM.addPass(SimplifyCFGPass());
   FPM.addPass(ADCEPass());
+  FPM.addPass(RecoverTypeInfo()); // Recover type information in the end.
 
   PreservedAnalyses RootPA = FPM.run(*RootFunction, FAM);
   Changed |= !RootPA.areAllPreserved();

@@ -23,6 +23,7 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 1
+          allow-unsafe-pr-checkout: true
 
       - name: build and test
         env:
@@ -51,6 +52,7 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 1
+          allow-unsafe-pr-checkout: true
       - name: clang-format
         run : |
           wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -

@@ -67,6 +67,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/Attributes.h"
+#include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/IR/Metadata.h"
@@ -91,9 +92,9 @@
 
 using namespace llvm;
 
-static bool isJeandleJavaMethod(const Function &F) {
-  return F.hasFnAttribute(jeandle::Attribute::JavaMethod);
-}
+using llvm::jeandle::getRootJavaMethodFunction;
+using llvm::jeandle::isJeandleJavaMethod;
+using llvm::jeandle::isRootJavaMethodFunction;
 
 static bool isJeandleJavaAccessorMethod(const Function &F) {
   return F.hasFnAttribute(jeandle::Attribute::JavaAccessorMethod);
@@ -108,31 +109,6 @@ static bool isEligibleInlineCallee(const Function &F,
 
 static bool isMonomorphicTargetCall(const CallBase &CB) {
   return CB.getAttributes().hasFnAttr(jeandle::Attribute::MonomorphicTarget);
-}
-
-static bool isRootJavaMethodFunction(const Function &F) {
-  return isJeandleJavaMethod(F) && !F.isDeclaration() &&
-         !F.hasAvailableExternallyLinkage();
-}
-
-static Function *getRootJavaMethodFunction(Module &M) {
-  Function *RootFunction = nullptr;
-  for (Function &F : M) {
-    if (!isRootJavaMethodFunction(F))
-      continue;
-    if (!RootFunction) {
-      RootFunction = &F;
-    } else {
-      std::string Message;
-      raw_string_ostream OS(Message);
-      OS << "JeandleInliner: expected at most one root Java method function, "
-         << "found '" << RootFunction->getName() << "' and '" << F.getName()
-         << "'";
-      OS.flush();
-      report_fatal_error(StringRef(Message));
-    }
-  }
-  return RootFunction;
 }
 
 static PreservedAnalyses getInlineRoundPreservedAnalyses(bool Changed) {

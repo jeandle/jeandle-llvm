@@ -1,0 +1,5 @@
+# Only %recovered (field@24 of klass 5) needs recovery -> 7.
+# %kept already has !java-klass (42) and is used as a seed; not overwritten.
+GetFieldType 5 24 = 7
+IsUnverifiedInterface 7 = false
+IsEffectivelyFinal 7 = false

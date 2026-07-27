@@ -1,0 +1,13 @@
+# a (klass 5) .field@16 -> 7 ; b (klass 6) .field@16 -> 8
+# select merges 7 and 8 -> LCA 10 (computed in one snapshot round, no transient).
+# field@24 of 10 -> 11.
+GetFieldType 5 16 = 7
+IsUnverifiedInterface 7 = false
+IsEffectivelyFinal 7 = false
+GetFieldType 6 16 = 8
+IsUnverifiedInterface 8 = false
+IsEffectivelyFinal 8 = false
+GetCommonSuperKlass 7 8 = 10
+GetFieldType 10 24 = 11
+IsUnverifiedInterface 11 = false
+IsEffectivelyFinal 11 = false
