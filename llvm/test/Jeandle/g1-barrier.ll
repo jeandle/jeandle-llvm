@@ -4,8 +4,7 @@
 ; CHECK-NEXT: %0 = load atomic ptr addrspace(1), ptr addrspace(1) %derived.pointer unordered, align 8
 ; CHECK-NEXT: store ptr addrspace(1) %0, ptr @satb_log
 ; CHECK-NEXT: store atomic ptr addrspace(1) %src, ptr addrspace(1) %derived.pointer unordered, align 8
-; CHECK-NEXT: %base.pointer = call ptr addrspace(1) @llvm.experimental.gc.get.pointer.base.p1.p1(ptr addrspace(1) %derived.pointer)
-; CHECK-NEXT: %1 = ptrtoint ptr addrspace(1) %base.pointer to i64
+; CHECK-NEXT: %1 = ptrtoint ptr addrspace(1) %derived.pointer to i64
 ; CHECK-NEXT: %2 = lshr i64 %1, 9
 ; CHECK-NEXT: %3 = getelementptr inbounds i8, ptr inttoptr (i64 139709660639232 to ptr), i64 %2
 ; CHECK-NEXT: store atomic i8 0, ptr %3 unordered, align 1
