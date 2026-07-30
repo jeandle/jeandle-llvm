@@ -58,13 +58,6 @@ using jeandle::JavaType;
 
 namespace {
 
-int getDeoptBCI(const InvokeInst &CB) {
-  std::optional<OperandBundleUse> Deopt =
-      CB.getOperandBundle(LLVMContext::OB_deopt);
-  auto *BCI = dyn_cast<ConstantInt>(Deopt->Inputs[0].get());
-  return static_cast<int>(BCI->getSExtValue());
-}
-
 int getPatchSize(const Module *M, const char *PatchType) {
   NamedMDNode *NMD = M->getNamedMetadata(PatchType);
   assert(NMD && NMD->getNumOperands() == 1 && "expected patch size metadata");
@@ -162,7 +155,7 @@ InvokeInst *createNewCB(InvokeInst &CB, bool IsMonomorphicTarget, int PatchSize,
                         FunctionType *FuncType, uintptr_t Method,
                         const StringRef &MethodName,
                         const StringRef &ByteCodeName, uintptr_t Holder,
-                        uint64_t Id) {
+                        uint64_t Id, jeandle::CHADestKind DestKind) {
   SmallVector<OperandBundleDef, 4> Bundles;
   CB.getOperandBundlesAsDefs(Bundles);
   SmallVector<Value *, 8> NewArgs;
@@ -186,6 +179,16 @@ InvokeInst *createNewCB(InvokeInst &CB, bool IsMonomorphicTarget, int PatchSize,
     NewCB->addFnAttr(
         Attribute::get(CB.getContext(), jeandle::Attribute::MonomorphicTarget));
   }
+
+  if (DestKind != jeandle::StaticCall) {
+    NewCB->removeParamAttr(0, Attribute::NoUndef);
+    NewCB->removeParamAttr(0, jeandle::Attribute::RuntimeLive);
+  }
+  if (DestKind == jeandle::OptVirtualCall) {
+    NewCB->addParamAttr(0, Attribute::NoUndef);
+    NewCB->addParamAttr(
+        0, Attribute::get(CB.getContext(), jeandle::Attribute::RuntimeLive));
+  }
   return NewCB;
 }
 
@@ -202,7 +205,7 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
                                 uintptr_t Caller,
                                 const StringRef &IntrinsicName) {
   assert(IntrinsicName != "_invokeBasic" &&
-         "_invokeBaisc is treated in normal path.");
+         "_invokeBasic is treated in normal path.");
   const bool CanBeOptimizedIntrinsic =
       StringSwitch<bool>(IntrinsicName)
           .Cases({"_linkToVirtual", "_linkToStatic", "_linkToSpecial",
@@ -298,6 +301,10 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
       PatchSize =
           getPatchSize(CB.getModule(), jeandle::Metadata::DynamicCallPatchSize);
     }
+  } else if (IntrinsicName == "_linkToSpecial") {
+    DestKind = jeandle::OptVirtualCall;
+    PatchSize =
+        getPatchSize(CB.getModule(), jeandle::Metadata::StaticCallPatchSize);
   } else {
     DestKind = jeandle::StaticCall;
     PatchSize =
@@ -311,7 +318,7 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
     std::optional<OperandBundleDef> PreCallDeopt = createPreCallDeoptBundle(CB);
     if (!PreCallDeopt)
       return nullptr;
-    int BCI = getDeoptBCI(CB);
+    int BCI = getCurrentDeoptBCI(CB);
     std::string Prefix = "null_check_bci_" + std::to_string(BCI);
 
     BasicBlock *NullCheckFail =
@@ -327,7 +334,7 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
 
   return createNewCB(CB, DestKind != jeandle::VirtualCall, PatchSize, FuncType,
                      CHAOptInfo.Method, CHAOptInfo.MethodName, NewBCName,
-                     CHAOptInfo.holder(), Id);
+                     CHAOptInfo.holder(), Id, DestKind);
 }
 
 bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
@@ -344,7 +351,8 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
       if (NewCB) {
         CB.replaceAllUsesWith(NewCB);
         CB.eraseFromParent();
-        return optimizeCallSite(*NewCB, F, DT, DTU, Callbacks, Caller);
+        optimizeCallSite(*NewCB, F, DT, DTU, Callbacks, Caller);
+        return true;
       }
       return false;
     }
@@ -391,13 +399,14 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
     }
   }
 
+  uintptr_t ScopeCaller = getCurrentDeoptMethod(CB, Caller);
   auto CHAOptInfo = jeandle::CHAOptInfo::decode(
-      Callbacks.GetCHAOptInfo(Caller, Callee, Holder, ReceiverType.Klass,
+      Callbacks.GetCHAOptInfo(ScopeCaller, Callee, Holder, ReceiverType.Klass,
                               ReceiverType.Exact, InvokeKind, OopId));
   if (CHAOptInfo.constraint() == 0)
     return false;
 
-  int BCI = getDeoptBCI(CB);
+  int BCI = getCurrentDeoptBCI(CB);
   std::string Prefix = "cha_bci_" + std::to_string(BCI);
 
   if (!IsInvokeBasic) {
@@ -421,7 +430,9 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
       CHAOptInfo.Method, CHAOptInfo.isAccessor()));
 
   if (!Callbacks.UpdateCallSite(static_cast<int64_t>(Id),
-                                jeandle::OptVirtualCall, 0)) {
+                                CHAOptInfo.isStatic() ? jeandle::StaticCall
+                                                      : jeandle::OptVirtualCall,
+                                IsInvokeBasic ? CHAOptInfo.Method : 0)) {
     return false;
   }
   LLVM_DEBUG(dbgs() << "CHA: devirtualized " << CB << "\n");
@@ -436,7 +447,7 @@ PreservedAnalyses CHADevirtualization::run(Function &F,
   Module *M = F.getParent();
   if (!M->getNamedMetadata(jeandle::Metadata::JavaMethodCompilation))
     return PreservedAnalyses::all();
-  if (F.hasAvailableExternallyLinkage())
+  if (!jeandle::isRootJavaMethodFunction(F))
     return PreservedAnalyses::all();
 
   const jeandle::VMCallbacks *Callbacks = jeandle::getVMCallbacks();

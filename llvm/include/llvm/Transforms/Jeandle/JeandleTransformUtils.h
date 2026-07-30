@@ -164,6 +164,18 @@ inline bool getUIntFnAttr(const CallBase &CB, StringRef Name, uint64_t &Out) {
   return parseUInt(A.getValueAsString(), Out);
 }
 
+/// Reads the current Java call-site BCI from a deoptimization operand bundle.
+///
+/// Jeandle deopt bundles are encoded scope by scope. Each scope starts with two
+/// adjacent i32 BCI operands; inlined callee scopes are appended after caller
+/// scopes and are preceded by a MethodType marker. The current call-site BCI is
+/// therefore the last adjacent i32 BCI pair in the bundle.
+int getCurrentDeoptBCI(const CallBase &CB);
+
+/// Reads the current Java method from a deoptimization operand bundle.
+/// Root scopes omit the MethodType marker and use \p RootMethod instead.
+uintptr_t getCurrentDeoptMethod(const CallBase &CB, uintptr_t RootMethod);
+
 /// Compute the pre called deoptimization operand bundle for a Java invoke.
 ///
 /// \param CB Java invoke. With deoptimization operand bundle present.

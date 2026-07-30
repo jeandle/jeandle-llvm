@@ -38,8 +38,9 @@ namespace jeandle {
 //     target.
 //   Method: optimized target method, ciMethod*.
 //   DeoptReasonOrTargetInfo: packed info.
-//      Bit 0: method->is_accessor()
-//      Bits 1..31: Deoptimization::DeoptReason for the uncommon-trap path.
+//      Bit 0: method->is_static()
+//      Bit 1: method->is_accessor()
+//      Bits 2..31: Deoptimization::DeoptReason for the uncommon-trap path.
 //
 // MethodName is method_name_with_signature(Method) in both forms.
 struct CHAOptInfo {
@@ -52,12 +53,12 @@ struct CHAOptInfo {
   Deoptimization::DeoptReason deoptReason() const {
     assert(!isMethodHandle() && "should be regular invoke");
     return static_cast<Deoptimization::DeoptReason>(DeoptReasonOrTargetInfo >>
-                                                    1);
+                                                    2);
   }
 
   bool isAccessor() const {
     assert(!isMethodHandle() && "should be regular invoke");
-    return DeoptReasonOrTargetInfo & 1;
+    return DeoptReasonOrTargetInfo & 2;
   }
 
   uintptr_t constraint() const {
@@ -71,10 +72,7 @@ struct CHAOptInfo {
     return ConstraintOrHolder ^ 1;
   }
 
-  bool isStatic() const {
-    assert(isMethodHandle() && "should be method handle intrinsic invoke");
-    return DeoptReasonOrTargetInfo & 1;
-  }
+  bool isStatic() const { return DeoptReasonOrTargetInfo & 1; }
 
   bool canBeStaticallyBound() const {
     assert(isMethodHandle() && "should be method handle intrinsic invoke");
@@ -91,9 +89,9 @@ struct CHAOptInfo {
     return IsStatic | (CanBeStaticallyBound << 1) | (ArgsNum << 2);
   }
 
-  static uintptr_t packDeoptreasonInfo(bool IsAccessor,
+  static uintptr_t packDeoptreasonInfo(bool IsStatic, bool IsAccessor,
                                        Deoptimization::DeoptReason Reason) {
-    return IsAccessor | (Reason << 1);
+    return IsStatic | (IsAccessor << 1) | (Reason << 2);
   }
 
   static CHAOptInfo decode(const std::string &Encoding) {

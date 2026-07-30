@@ -22,7 +22,7 @@ entry:
   br i1 %ck, label %do_call, label %no_call
 
 do_call:
-  %ret = invoke hotspotcc i32 @Virtual_target(ptr addrspace(1) %recv) #2 [ "deopt"(i32 7, i32 7) ]
+  %ret = invoke hotspotcc i32 @Virtual_target(ptr addrspace(1) %recv) #2 [ "deopt"(i64 0, i32 7, i32 7) ]
           to label %normal unwind label %unwind
 
 no_call:
@@ -40,7 +40,7 @@ unwind:
 ; Devirtualization happens only when Exact=true is propagated through typeIntersect.
 ; CHECK-LABEL: define hotspotcc i32 @caller(
 ; CHECK: call hotspotcc i1 @jeandle.check_instanceof(ptr inttoptr (i64 600 to ptr), ptr addrspace(1) %recv)
-; CHECK: invoke hotspotcc i32 @Optimized_target(ptr addrspace(1) %recv)
+; CHECK: invoke hotspotcc i32 @Optimized_target(ptr addrspace(1) noundef "runtime-live" %recv)
 ; CHECK: "monomorphic-target"
 
 attributes #0 = { "java-method"="100" }

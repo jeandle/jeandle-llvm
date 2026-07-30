@@ -12,11 +12,11 @@ declare hotspotcc i32 @Virtual_target(ptr addrspace(1)) #1 gc "hotspotgc"
 
 define hotspotcc i32 @caller(ptr addrspace(1) "java-klass"="500" %recv) #0 gc "hotspotgc" personality ptr @jeandle.personality {
 entry:
-  %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(i32 1) [ "deopt"(i32 0, i32 0) ]
+  %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(i32 1) [ "deopt"(i64 0, i32 0, i32 0) ]
           to label %after_alloc unwind label %unwind
 
 after_alloc:
-  %ret = invoke hotspotcc i32 @Virtual_target(ptr addrspace(1) %recv) #2 [ "deopt"(i32 7, i32 7) ]
+  %ret = invoke hotspotcc i32 @Virtual_target(ptr addrspace(1) %recv) #2 [ "deopt"(i64 0, i32 7, i32 7) ]
           to label %normal unwind label %unwind
 
 normal:

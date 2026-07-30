@@ -15,7 +15,7 @@ declare hotspotcc ptr addrspace(1) @"java_lang_invoke_MethodHandle_linkToVirtual
 define hotspotcc ptr addrspace(1) @caller(ptr addrspace(1) "java-klass"="2148289576" %recv) #0 gc "hotspotgc" personality ptr @jeandle.personality {
 entry:
   %member_name = load ptr addrspace(1), ptr @oop_handle_java.lang.invoke.MemberName_5, align 8
-  %ret = invoke hotspotcc ptr addrspace(1) @"java_lang_invoke_MethodHandle_linkToVirtual(Ljava/lang/Object;Ljava/lang/invoke/MemberName;)Ljava/lang/Object;"(ptr addrspace(1) %recv, ptr addrspace(1) %member_name) #2 [ "deopt"(i32 17, i32 17) ]
+  %ret = invoke hotspotcc ptr addrspace(1) @"java_lang_invoke_MethodHandle_linkToVirtual(Ljava/lang/Object;Ljava/lang/invoke/MemberName;)Ljava/lang/Object;"(ptr addrspace(1) %recv, ptr addrspace(1) %member_name) #2 [ "deopt"(i64 0, i32 17, i32 17) ]
           to label %normal unwind label %unwind
 
 normal:

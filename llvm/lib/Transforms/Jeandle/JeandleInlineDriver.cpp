@@ -138,10 +138,6 @@ static PreservedAnalyses runRootInstSimplify(Module &M,
   //     exposing monomorphic call sites for the next devirtualization round.
   //   - RepeatedConstantFolding: fold constant fields to a fixed point,
   //     pruning newly dead paths between iterations.
-  //   - EarlyCSE: common-subexpression elimination (also load CSE), removes
-  //     redundant computation.
-  //   - InstCombine: instruction simplification + constant folding/
-  //     propagation, and removal of dead instructions.
   //   - SimplifyCFG: remove unreachable blocks, merge blocks, fold branches.
   //   - ADCE: aggressive dead-code elimination.
   FunctionPassManager FPM;

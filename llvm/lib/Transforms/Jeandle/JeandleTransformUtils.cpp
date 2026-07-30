@@ -187,6 +187,10 @@ CallInst *insertJavaTypeAssume(Value *V, jeandle::JavaType T, Instruction *I) {
   return Assume;
 }
 
+int getCurrentDeoptBCI(const CallBase &CB) {
+  return findCurrentDeoptScope(CB).BCI;
+}
+
 Function *getOrInsertJavaMethodFunction(Module &M, StringRef Name,
                                         FunctionType *Type, uintptr_t Method,
                                         bool IsAccessor) {
@@ -203,6 +207,34 @@ Function *getOrInsertJavaMethodFunction(Module &M, StringRef Name,
         Attribute::get(M.getContext(), jeandle::Attribute::JavaAccessorMethod));
   }
   return Func;
+}
+
+uintptr_t getCurrentDeoptMethod(const CallBase &CB, uintptr_t RootMethod) {
+  DeoptScopeInfo Scope = findCurrentDeoptScope(CB);
+  if (Scope.BCIPairStart == 1)
+    return RootMethod;
+
+  if (Scope.BCIPairStart < 3)
+    reportInvalidDeoptBundle(CB, "missing inlinee method before bci");
+
+  OperandBundleUse Deopt = *CB.getOperandBundle(LLVMContext::OB_deopt);
+  auto *Encoding =
+      dyn_cast<ConstantInt>(Deopt.Inputs[Scope.BCIPairStart - 3].get());
+  auto *Method =
+      dyn_cast<ConstantInt>(Deopt.Inputs[Scope.BCIPairStart - 2].get());
+  if (!Encoding || !Encoding->getType()->isIntegerTy(64) || !Method ||
+      !Method->getType()->isIntegerTy(64))
+    reportInvalidDeoptBundle(CB, "invalid inlinee method encoding");
+
+  jeandle::DeoptValueEncoding DeoptInfo =
+      jeandle::DeoptValueEncoding::decode(Encoding->getZExtValue());
+  if (DeoptInfo.valueType() != jeandle::DeoptValueEncoding::MethodType)
+    reportInvalidDeoptBundle(CB, "missing MethodType marker before bci");
+
+  uintptr_t MethodValue = static_cast<uintptr_t>(Method->getZExtValue());
+  if (MethodValue == 0)
+    reportInvalidDeoptBundle(CB, "null inlinee method");
+  return MethodValue;
 }
 
 static std::pair<unsigned, unsigned> computeDeoptStackLayout(CallBase &CB) {

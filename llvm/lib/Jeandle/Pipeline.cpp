@@ -30,7 +30,7 @@
 
 namespace llvm::jeandle {
 
-Pipeline::Pipeline(OptimizationLevel level, LLVMContext &Ctx,
+Pipeline::Pipeline(OptimizationLevel Level, LLVMContext &Ctx,
                    PipelineOptions Options)
     : SI(Ctx, /*DebugLogging=*/false) {
   SI.registerCallbacks(PIC, &MAM);
@@ -44,12 +44,12 @@ Pipeline::Pipeline(OptimizationLevel level, LLVMContext &Ctx,
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
-  PM = buildJeandlePipeline(PB, level, Options);
+  PM = buildJeandlePipeline(PB, Level, Options);
 }
 
 // TODO: The pass selection/ordering is not optimal. We need to improve it.
 ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
-                                                 OptimizationLevel level,
+                                                 OptimizationLevel Level,
                                                  PipelineOptions Options) {
   ModulePassManager PM;
   PM.addPass(JavaOperationLower(0));
@@ -92,7 +92,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // optimizations.
   PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
   PM.addPass(JavaOperationLower(1));
-  PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(level)));
+  PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(Level)));
   PM.addPass(ExpandNarrowOopCast());
   PM.addPass(RewriteStatepointsForGC());
   PM.addPass(createModuleToFunctionPassAdaptor(JeandleNarrowOopMarker()));
