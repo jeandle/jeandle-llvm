@@ -10,6 +10,7 @@ set(LLVM_LINK_COMPONENTS
   )
 
 add_llvm_unittest(IRTests
+  PARTIAL_SOURCES_INTENDED
   AbstractCallSiteTest.cpp
   AsmWriterTest.cpp
   AttributesTest.cpp
@@ -57,7 +58,15 @@ add_llvm_unittest(IRTests
   VerifierTest.cpp
   VFABIDemanglerTest.cpp
   VPIntrinsicTest.cpp
+  VMCallbackLogTest.cpp
   CoreBindings.cpp
   )
 
 target_link_libraries(IRTests PRIVATE LLVMTestingSupport)
+
+add_llvm_unittest(VMCallbackLogRecordReplayTests
+  PARTIAL_SOURCES_INTENDED
+  VMCallbackLogRecordReplayTest.cpp
+  )
+
+target_link_libraries(VMCallbackLogRecordReplayTests PRIVATE LLVMTestingSupport)

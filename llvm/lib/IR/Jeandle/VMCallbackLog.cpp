@@ -49,23 +49,67 @@ static llvm::ArrayRef<CallbackInfo> getCallbackTable() {
 // Helpers for formatting CallbackValue in error messages
 // =============================================================================
 
+static void formatString(raw_ostream &OS, StringRef S) {
+  static constexpr char Hex[] = "0123456789abcdef";
+  OS << '"';
+  for (unsigned char C : S.bytes()) {
+    switch (C) {
+    case '\\':
+      OS << "\\\\";
+      break;
+    case '"':
+      OS << "\\\"";
+      break;
+    case '\n':
+      OS << "\\n";
+      break;
+    case '\r':
+      OS << "\\r";
+      break;
+    case '\t':
+      OS << "\\t";
+      break;
+    default:
+      if (C < 0x20 || C == 0x7f)
+        OS << "\\x" << Hex[C >> 4] << Hex[C & 0x0f];
+      else
+        OS << static_cast<char>(C);
+    }
+  }
+  OS << '"';
+}
+
+static void formatValue(raw_ostream &OS, const CallbackValue &V) {
+  if (V.isNumber()) {
+    OS << V.number();
+  } else if (V.isString()) {
+    formatString(OS, V.string());
+  } else if (V.isArray()) {
+    OS << "[";
+    for (size_t I = 0; I < V.array().size(); ++I) {
+      if (I != 0)
+        OS << ", ";
+      formatValue(OS, V.array()[I]);
+    }
+    OS << "]";
+  } else {
+    OS << "(";
+    for (size_t I = 0; I < V.tuple().size(); ++I) {
+      if (I != 0)
+        OS << ", ";
+      formatValue(OS, V.tuple()[I]);
+    }
+    OS << ")";
+  }
+}
+
 static void formatArgList(raw_string_ostream &OS,
                           ArrayRef<CallbackValue> Args) {
   for (size_t I = 0; I < Args.size(); ++I) {
     if (I > 0)
       OS << ", ";
-    if (Args[I].IsString)
-      OS << "\"" << Args[I].StrVal << "\"";
-    else
-      OS << Args[I].NumVal;
+    formatValue(OS, Args[I]);
   }
-}
-
-static void formatValue(raw_string_ostream &OS, const CallbackValue &V) {
-  if (V.IsString)
-    OS << "\"" << V.StrVal << "\"";
-  else
-    OS << V.NumVal;
 }
 
 // =============================================================================
@@ -134,43 +178,58 @@ Error VMCallbackLogRecorder::dump(StringRef FilePath) {
     for (unsigned I = 0; I < Info.ArgTypes.size(); ++I) {
       OS << " ";
       switch (Info.ArgTypes[I]) {
-      case VMCallbackValueType::Uintptr:
-        OS << static_cast<uintptr_t>(Key.Args[I].NumVal);
+      case VMCallbackValueType::Bool:
+        OS << (Key.Args[I].number() ? "true" : "false");
         break;
       case VMCallbackValueType::Int:
-        OS << static_cast<int>(Key.Args[I].NumVal);
+        OS << static_cast<int>(Key.Args[I].number());
         break;
       case VMCallbackValueType::Long:
-        OS << static_cast<int64_t>(Key.Args[I].NumVal);
+        OS << static_cast<int64_t>(Key.Args[I].number());
         break;
-      case VMCallbackValueType::Bool:
-        OS << (Key.Args[I].NumVal ? "true" : "false");
+      case VMCallbackValueType::Uintptr:
+        OS << static_cast<uintptr_t>(Key.Args[I].number());
         break;
       case VMCallbackValueType::String:
-        OS << "\"" << Key.Args[I].StrVal << "\"";
+        formatString(OS, Key.Args[I].string());
+        break;
+      case VMCallbackValueType::Array:
+        formatValue(OS, Key.Args[I]);
+        break;
+      case VMCallbackValueType::Tuple:
+        formatValue(OS, Key.Args[I]);
         break;
       }
     }
     OS << " = ";
-    if (Val.IsString) {
-      OS << "\"" << Val.StrVal << "\"";
-    } else {
+    if (Val.isNumber()) {
       switch (Info.ResType) {
       case VMCallbackValueType::Bool:
-        OS << (Val.NumVal ? "true" : "false");
-        break;
-      case VMCallbackValueType::Uintptr:
-        OS << static_cast<uintptr_t>(Val.NumVal);
+        OS << (Val.number() ? "true" : "false");
         break;
       case VMCallbackValueType::Int:
-        OS << static_cast<int>(Val.NumVal);
+        OS << static_cast<int>(Val.number());
         break;
       case VMCallbackValueType::Long:
-        OS << static_cast<int64_t>(Val.NumVal);
+        OS << static_cast<int64_t>(Val.number());
+        break;
+      case VMCallbackValueType::Uintptr:
+        OS << static_cast<uintptr_t>(Val.number());
         break;
       case VMCallbackValueType::String:
         break;
+      case VMCallbackValueType::Array:
+        llvm_unreachable("array result must have array CallbackValue");
+      case VMCallbackValueType::Tuple:
+        llvm_unreachable("tuple result must have tuple CallbackValue");
       }
+    } else if (Val.isString()) {
+      formatString(OS, Val.string());
+    } else if (Val.isArray()) {
+      formatValue(OS, Val);
+    } else {
+      assert(Val.isTuple());
+      formatValue(OS, Val);
     }
     OS << "\n";
   }
@@ -196,7 +255,7 @@ static VMCallbacks RealCallbacks;
     RetType Result = RealCallbacks.Name(JEANDLE_STRIP_PARENS Args);            \
     if (auto *R = VMCallbackLogRecorder::getActiveRecorder())                  \
       R->recordIfNew(CK_##Name, encodeArgs(JEANDLE_STRIP_PARENS Args),         \
-                     encodeVMCallbackValue(Result));                           \
+                     VMCallbackValueCodec<RetType>::encode(Result));           \
     return Result;                                                             \
   }
 
@@ -293,11 +352,11 @@ static void handleReplaySideEffects(unsigned Kind, ArrayRef<CallbackValue> Args,
                                     const CallbackValue &RawResult) {
   switch (Kind) {
   case CK_GetInlineCalleeIR:
-    if (!decodeVMCallbackValue<bool>(RawResult))
+    if (!VMCallbackValueCodec<bool>::decode(RawResult))
       return;
     assert(Args.size() == 1 && "GetInlineCalleeIR expects one argument");
-    assert(!Args[0].IsString && "GetInlineCalleeIR expects numeric method id");
-    materializeInlineCalleeIR(decodeVMCallbackValue<uintptr_t>(Args[0]));
+    assert(Args[0].isNumber() && "GetInlineCalleeIR expects numeric method id");
+    materializeInlineCalleeIR(VMCallbackValueCodec<uintptr_t>::decode(Args[0]));
     return;
 
   default:
@@ -310,7 +369,7 @@ static T fetchReplayedResult(unsigned Kind, ArrayRef<CallbackValue> Args,
                              const char *Name) {
   const CallbackValue &RawResult = lookupValue(Kind, Args, Name);
   handleReplaySideEffects(Kind, Args, RawResult);
-  return decodeVMCallbackValue<T>(RawResult);
+  return VMCallbackValueCodec<T>::decode(RawResult);
 }
 
 // REPLAY_CALLBACK(Name, RetType, (param-decls), (arg-names))
@@ -377,12 +436,6 @@ static std::optional<int64_t> parseNumericToken(StringRef Token,
       return std::nullopt;
     return static_cast<int64_t>(Val);
   }
-  case VMCallbackValueType::Uintptr: {
-    unsigned long long Val;
-    if (Token.getAsInteger(0, Val))
-      return std::nullopt;
-    return static_cast<int64_t>(static_cast<uintptr_t>(Val));
-  }
   case VMCallbackValueType::Int: {
     int Val;
     if (Token.getAsInteger(0, Val))
@@ -395,11 +448,134 @@ static std::optional<int64_t> parseNumericToken(StringRef Token,
       return std::nullopt;
     return Val;
   }
+  case VMCallbackValueType::Uintptr: {
+    unsigned long long Val;
+    if (Token.getAsInteger(0, Val))
+      return std::nullopt;
+    return static_cast<int64_t>(static_cast<uintptr_t>(Val));
+  }
   case VMCallbackValueType::String:
-    // String tokens are handled separately by parseArgToken.
+  case VMCallbackValueType::Array:
+  case VMCallbackValueType::Tuple:
+    // Structured and string tokens are handled separately by parseArgToken.
     return std::nullopt;
   }
   return std::nullopt;
+}
+
+/// Parse a self-describing value: number, quoted string, parenthesized tuple,
+/// or bracketed array. Scalar elements use their canonical numeric form.
+static std::optional<std::pair<std::string, size_t>>
+parseStringLiteral(StringRef Str, size_t Pos) {
+  if (Pos >= Str.size() || Str[Pos] != '"')
+    return std::nullopt;
+
+  std::string Result;
+  for (++Pos; Pos < Str.size(); ++Pos) {
+    char C = Str[Pos];
+    if (C == '"')
+      return std::make_pair(std::move(Result), Pos + 1);
+    if (C != '\\') {
+      Result.push_back(C);
+      continue;
+    }
+    if (++Pos == Str.size())
+      return std::nullopt;
+    switch (Str[Pos]) {
+    case '\\':
+      Result.push_back('\\');
+      break;
+    case '"':
+      Result.push_back('"');
+      break;
+    case 'n':
+      Result.push_back('\n');
+      break;
+    case 'r':
+      Result.push_back('\r');
+      break;
+    case 't':
+      Result.push_back('\t');
+      break;
+    case 'x': {
+      if (Pos + 2 >= Str.size())
+        return std::nullopt;
+      auto HexValue = [](char Digit) -> int {
+        if (Digit >= '0' && Digit <= '9')
+          return Digit - '0';
+        if (Digit >= 'a' && Digit <= 'f')
+          return Digit - 'a' + 10;
+        if (Digit >= 'A' && Digit <= 'F')
+          return Digit - 'A' + 10;
+        return -1;
+      };
+      int High = HexValue(Str[Pos + 1]);
+      int Low = HexValue(Str[Pos + 2]);
+      if (High < 0 || Low < 0)
+        return std::nullopt;
+      Result.push_back(static_cast<char>((High << 4) | Low));
+      Pos += 2;
+      break;
+    }
+    default:
+      return std::nullopt;
+    }
+  }
+  return std::nullopt;
+}
+
+static std::optional<std::pair<CallbackValue, size_t>>
+parseStructuredValue(StringRef Str, size_t Pos) {
+  while (Pos < Str.size() && (Str[Pos] == ' ' || Str[Pos] == '\t'))
+    ++Pos;
+  if (Pos >= Str.size())
+    return std::nullopt;
+
+  if (Str[Pos] == '"') {
+    auto String = parseStringLiteral(Str, Pos);
+    if (!String)
+      return std::nullopt;
+    return std::make_pair(CallbackValue::fromStr(String->first),
+                          String->second);
+  }
+
+  if (Str[Pos] == '(' || Str[Pos] == '[') {
+    const char Closing = Str[Pos] == '(' ? ')' : ']';
+    const bool IsArray = Str[Pos] == '[';
+    std::vector<CallbackValue> Elements;
+    ++Pos;
+    while (true) {
+      while (Pos < Str.size() && (Str[Pos] == ' ' || Str[Pos] == '\t'))
+        ++Pos;
+      if (Pos >= Str.size())
+        return std::nullopt;
+      if (Str[Pos] == Closing)
+        return std::make_pair(
+            IsArray ? CallbackValue::fromArray(std::move(Elements))
+                    : CallbackValue::fromTuple(std::move(Elements)),
+            Pos + 1);
+      auto Element = parseStructuredValue(Str, Pos);
+      if (!Element)
+        return std::nullopt;
+      Elements.push_back(std::move(Element->first));
+      Pos = Element->second;
+      while (Pos < Str.size() && (Str[Pos] == ' ' || Str[Pos] == '\t'))
+        ++Pos;
+      if (Pos >= Str.size() || (Str[Pos] != ',' && Str[Pos] != Closing))
+        return std::nullopt;
+      if (Str[Pos] == ',')
+        ++Pos;
+    }
+  }
+
+  size_t TokEnd = Pos;
+  while (TokEnd < Str.size() && Str[TokEnd] != ' ' && Str[TokEnd] != '\t' &&
+         Str[TokEnd] != ',' && Str[TokEnd] != ')' && Str[TokEnd] != ']')
+    ++TokEnd;
+  int64_t Number;
+  if (Str.substr(Pos, TokEnd - Pos).getAsInteger(0, Number))
+    return std::nullopt;
+  return std::make_pair(CallbackValue::fromNum(Number), TokEnd);
 }
 
 /// Parse a single argument token from `Str` starting at position `Pos`.
@@ -415,26 +591,38 @@ parseArgToken(StringRef Str, size_t Pos, VMCallbackValueType VT) {
   if (Pos >= Str.size())
     return std::nullopt;
 
-  if (VT == VMCallbackValueType::String) {
-    // Expect a double-quoted string.
-    if (Str[Pos] != '"')
+  if (VT != VMCallbackValueType::String && VT != VMCallbackValueType::Array &&
+      VT != VMCallbackValueType::Tuple) {
+    size_t TokEnd = Pos;
+    while (TokEnd < Str.size() && Str[TokEnd] != ' ' && Str[TokEnd] != '\t')
+      ++TokEnd;
+    auto Val = parseNumericToken(Str.substr(Pos, TokEnd - Pos), VT);
+    if (!Val)
       return std::nullopt;
-    size_t EndQuote = Str.find('"', Pos + 1);
-    if (EndQuote == StringRef::npos)
-      return std::nullopt;
-    std::string S = Str.substr(Pos + 1, EndQuote - Pos - 1).str();
-    return std::make_pair(CallbackValue::fromStr(S), EndQuote + 1);
+    return std::make_pair(CallbackValue::fromNum(*Val), TokEnd);
   }
 
-  // Numeric token: read up to next whitespace.
-  size_t TokEnd = Pos;
-  while (TokEnd < Str.size() && Str[TokEnd] != ' ' && Str[TokEnd] != '\t')
-    ++TokEnd;
-  StringRef Token = Str.substr(Pos, TokEnd - Pos);
-  auto Val = parseNumericToken(Token, VT);
-  if (!Val)
-    return std::nullopt;
-  return std::make_pair(CallbackValue::fromNum(*Val), TokEnd);
+  if (VT == VMCallbackValueType::String) {
+    auto String = parseStringLiteral(Str, Pos);
+    if (!String)
+      return std::nullopt;
+    return std::make_pair(CallbackValue::fromStr(String->first),
+                          String->second);
+  }
+  if (VT == VMCallbackValueType::Array) {
+    auto Value = parseStructuredValue(Str, Pos);
+    if (!Value || !Value->first.isArray())
+      return std::nullopt;
+    return Value;
+  }
+  if (VT == VMCallbackValueType::Tuple) {
+    auto Value = parseStructuredValue(Str, Pos);
+    if (!Value || !Value->first.isTuple())
+      return std::nullopt;
+    return Value;
+  }
+
+  llvm_unreachable("unknown VMCallbackValueType");
 }
 
 static Error parseLogBuffer(
@@ -493,22 +681,39 @@ static Error parseLogBuffer(
     StringRef ResultPart = Line.substr(EqPos + 3).trim();
     CallbackValue ResultVal;
 
-    if (Info.ResType == VMCallbackValueType::String) {
-      // String result: expect "...".
-      if (!ResultPart.starts_with('"') || !ResultPart.ends_with('"'))
-        return createStringError(
-            "line %zu: string result must be double-quoted: '%s'", LineNum + 1,
-            ResultPart.str().c_str());
-      ResultVal =
-          CallbackValue::fromStr(ResultPart.substr(1, ResultPart.size() - 2));
-    } else {
-      // Numeric result.
+    if (Info.ResType != VMCallbackValueType::String &&
+        Info.ResType != VMCallbackValueType::Array &&
+        Info.ResType != VMCallbackValueType::Tuple) {
       auto Result = parseNumericToken(ResultPart, Info.ResType);
       if (!Result)
         return createStringError("line %zu: invalid result for '%s': '%s'",
                                  LineNum + 1, Info.Name,
                                  ResultPart.str().c_str());
       ResultVal = CallbackValue::fromNum(*Result);
+    } else if (Info.ResType == VMCallbackValueType::String) {
+      auto Result = parseStringLiteral(ResultPart, 0);
+      if (!Result || !ResultPart.substr(Result->second).trim().empty())
+        return createStringError(
+            "line %zu: string result must be double-quoted: '%s'", LineNum + 1,
+            ResultPart.str().c_str());
+      ResultVal = CallbackValue::fromStr(Result->first);
+    } else if (Info.ResType == VMCallbackValueType::Array) {
+      auto Result = parseStructuredValue(ResultPart, 0);
+      if (!Result || !Result->first.isArray() ||
+          !ResultPart.substr(Result->second).trim().empty())
+        return createStringError(
+            "line %zu: invalid array result for '%s': '%s'", LineNum + 1,
+            Info.Name, ResultPart.str().c_str());
+      ResultVal = std::move(Result->first);
+    } else {
+      assert(Info.ResType == VMCallbackValueType::Tuple);
+      auto Result = parseStructuredValue(ResultPart, 0);
+      if (!Result || !Result->first.isTuple() ||
+          !ResultPart.substr(Result->second).trim().empty())
+        return createStringError(
+            "line %zu: invalid tuple result for '%s': '%s'", LineNum + 1,
+            Info.Name, ResultPart.str().c_str());
+      ResultVal = std::move(Result->first);
     }
 
     // Insert into map; error on conflicting duplicates.

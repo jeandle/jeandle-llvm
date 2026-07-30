@@ -1,3 +1,2 @@
-GetConstantFieldInfo 0 16 = 12
-GetConstantFieldValue 0 16 = 1
+GetConstantField 0 16 = (12, 1)
 GetOopHandleName 1 = "oop_handle_Child_1"

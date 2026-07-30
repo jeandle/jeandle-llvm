@@ -1,8 +1,4 @@
-GetConstantFieldInfo 0 4 = 4
-GetConstantFieldValue 0 4 = 1
-GetConstantFieldInfo 0 8 = 8
-GetConstantFieldValue 0 8 = -1
-GetConstantFieldInfo 0 12 = 5
-GetConstantFieldValue 0 12 = 65535
-GetConstantFieldInfo 0 16 = 9
-GetConstantFieldValue 0 16 = -2
+GetConstantField 0 4 = (4, 1)
+GetConstantField 0 8 = (8, -1)
+GetConstantField 0 12 = (5, 65535)
+GetConstantField 0 16 = (9, -2)

@@ -1,2 +1,1 @@
-GetConstantFieldInfo 0 0 = 10
-GetConstantFieldValue 0 0 = 42
+GetConstantField 0 0 = (10, 42)

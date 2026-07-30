@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <string>
+#include <tuple>
 
 namespace llvm::jeandle {
 
@@ -29,11 +30,18 @@ namespace llvm::jeandle {
 /// Value type for VM callback parameters and results.
 enum class VMCallbackValueType : uint8_t {
   Bool,    // bool
-  Uintptr, // uintptr_t
   Int,     // int
   Long,    // int64_t
+  Uintptr, // uintptr_t
   String,  // std::string
+  Array,   // std::vector<T>, dynamically sized homogeneous values
+  Tuple,   // std::tuple<...>, recursively composed from callback value types
 };
+
+/// Foldability and raw value are one VM observation and must be recorded as
+/// one replayable callback result. A negative BasicType means not foldable and
+/// leaves RawValue unspecified (recorded as zero).
+using ConstantFieldResult = std::tuple<int, int64_t>;
 
 /// Result reported for an inline attempt after LLVM starts processing it.
 /// Keep the numeric values stable because the JVM records them.
@@ -53,7 +61,8 @@ enum class JeandleInlineReason : int {
 // ALL_JEANDLE_VM_CALLBACKS(def) invokes `def` for each VM callback with:
 //   Name     — callback name (struct field, CK_ prefix, stringification)
 //   RetType  — C++ return type (bool, uintptr_t)
-//   ResType  — VMCallbackValueType enum suffix (Bool, Uintptr, Int, String)
+//   ResType  — VMCallbackValueType enum suffix (Bool, Int, Long, Uintptr,
+//              String, Array, Tuple)
 //   Params   — parenthesized parameter declarations,
 //              e.g. (uintptr_t a1, uintptr_t a2)
 //   Args     — parenthesized argument names, e.g. (a1, a2)
@@ -145,10 +154,7 @@ enum class JeandleInlineReason : int {
   def(IsEffectivelyFinal, bool, Bool,                                            \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
-  def(GetConstantFieldValue, int64_t, Long,                                      \
-      (int a1, int a2), (a1, a2),                                                \
-      (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)                   \
-  def(GetConstantFieldInfo, int, Int,                                            \
+  def(GetConstantField, ConstantFieldResult, Tuple,                              \
       (int a1, int a2), (a1, a2),                                                \
       (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)                   \
   def(GetOopHandleName, std::string, String,                                     \
@@ -230,16 +236,13 @@ enum class JeandleInlineReason : int {
 ///                         whose bottom element is such an interface. Type info
 ///                         must not be attached to values of these types.
 ///   IsEffectivelyFinal  — Returns true if no subclass can exist at runtime.
-///   GetConstantFieldValue
-///                       — Returns the constant field value as int64_t.
-///                         For boolean/byte/char/short/int: the widened value.
-///                         For long: the long value.
-///                         For float: raw IEEE-754 bit pattern (low 32 bits).
-///                         For double: raw IEEE-754 bit pattern (full int64_t).
-///                         For object/array: the stable oop id, or -1 for null.
-///   GetConstantFieldInfo
-///                       — Combined query: returns -1 if the field is not
-///                         foldable, or the HotSpot BasicType (>=0) if it is.
+///   GetConstantField   — Returns (HotSpot BasicType, raw value) for a
+///                         foldable constant field. The BasicType is negative
+///                         when the field is not foldable; the raw value is
+///                         then recorded as zero. Otherwise the raw value is
+///                         widened for integral primitives, contains the IEEE
+///                         bit pattern for float/double, or is the stable oop
+///                         id for object/array values (-1 for null).
 ///   GetOopHandleName
 ///                       — Returns the descriptive oop handle name (e.g.
 ///                         "oop_handle_Test_1") for a given oop id. The

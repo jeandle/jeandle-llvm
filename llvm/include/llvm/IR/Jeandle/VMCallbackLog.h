@@ -41,6 +41,10 @@
 #include <cstdint>
 #include <initializer_list>
 #include <string>
+#include <tuple>
+#include <type_traits>
+#include <variant>
+#include <vector>
 
 namespace llvm {
 class Module;
@@ -85,28 +89,69 @@ enum CallbackKind : unsigned { ALL_JEANDLE_VM_CALLBACKS(DEF_CALLBACK_KIND) };
 // CallbackValue — unified type for callback arguments and results
 // =============================================================================
 
-/// A single value for VM callback arguments or results: numeric (int64_t) or
-/// string. Used both as the element type in CallbackKey::Args and as the map
-/// value type in recording/replay data structures.
+/// A single callback value. Arrays and tuples are represented structurally, so
+/// nested values stay typed through record/replay instead of being packed into
+/// an ad-hoc string.
 struct CallbackValue {
-  int64_t NumVal = 0;
-  std::string StrVal;
-  bool IsString = false;
+  // Keep these values aligned with StorageType's alternative indices.
+  enum class Kind : uint8_t { Number, String, Array, Tuple };
 
-  static CallbackValue fromNum(int64_t V) { return {V, {}, false}; }
-  static CallbackValue fromStr(StringRef S) { return {0, S.str(), true}; }
+private:
+  struct Array {
+    std::vector<CallbackValue> Elements;
 
-  bool operator==(const CallbackValue &O) const {
-    if (IsString != O.IsString)
-      return false;
-    return IsString ? (StrVal == O.StrVal) : (NumVal == O.NumVal);
+    bool operator==(const Array &O) const { return Elements == O.Elements; }
+    bool operator<(const Array &O) const { return Elements < O.Elements; }
+  };
+  struct Tuple {
+    std::vector<CallbackValue> Elements;
+
+    bool operator==(const Tuple &O) const { return Elements == O.Elements; }
+    bool operator<(const Tuple &O) const { return Elements < O.Elements; }
+  };
+
+  using StorageType = std::variant<int64_t, std::string, Array, Tuple>;
+  StorageType Storage = int64_t{0};
+
+public:
+  static CallbackValue fromNum(int64_t V) {
+    CallbackValue Result;
+    Result.Storage = V;
+    return Result;
   }
+  static CallbackValue fromStr(StringRef S) {
+    CallbackValue Result;
+    Result.Storage = S.str();
+    return Result;
+  }
+  static CallbackValue fromArray(std::vector<CallbackValue> V) {
+    CallbackValue Result;
+    Result.Storage = Array{std::move(V)};
+    return Result;
+  }
+  static CallbackValue fromTuple(std::vector<CallbackValue> V) {
+    CallbackValue Result;
+    Result.Storage = Tuple{std::move(V)};
+    return Result;
+  }
+
+  bool isNumber() const { return std::holds_alternative<int64_t>(Storage); }
+  bool isString() const { return std::holds_alternative<std::string>(Storage); }
+  bool isArray() const { return std::holds_alternative<Array>(Storage); }
+  bool isTuple() const { return std::holds_alternative<Tuple>(Storage); }
+
+  int64_t number() const { return std::get<int64_t>(Storage); }
+  StringRef string() const { return std::get<std::string>(Storage); }
+  const std::vector<CallbackValue> &array() const {
+    return std::get<Array>(Storage).Elements;
+  }
+  const std::vector<CallbackValue> &tuple() const {
+    return std::get<Tuple>(Storage).Elements;
+  }
+
+  bool operator==(const CallbackValue &O) const { return Storage == O.Storage; }
   bool operator!=(const CallbackValue &O) const { return !(*this == O); }
-  bool operator<(const CallbackValue &O) const {
-    if (IsString != O.IsString)
-      return IsString < O.IsString;
-    return IsString ? (StrVal < O.StrVal) : (NumVal < O.NumVal);
-  }
+  bool operator<(const CallbackValue &O) const { return Storage < O.Storage; }
 };
 
 // =============================================================================
@@ -134,15 +179,32 @@ struct CallbackKeyDenseMapInfo {
   static inline CallbackKey getTombstoneKey() {
     return {DenseMapInfo<unsigned>::getTombstoneKey(), {}};
   }
+  static hash_code hashCallbackValue(const CallbackValue &V) {
+    if (V.isNumber())
+      return hash_combine(static_cast<unsigned>(CallbackValue::Kind::Number),
+                          V.number());
+    if (V.isString())
+      return hash_combine(
+          static_cast<unsigned>(CallbackValue::Kind::String),
+          hash_combine_range(V.string().begin(), V.string().end()));
+    if (V.isArray()) {
+      hash_code H =
+          hash_combine(static_cast<unsigned>(CallbackValue::Kind::Array));
+      for (const CallbackValue &E : V.array())
+        H = hash_combine(H, hashCallbackValue(E));
+      return H;
+    }
+    assert(V.isTuple());
+    hash_code H =
+        hash_combine(static_cast<unsigned>(CallbackValue::Kind::Tuple));
+    for (const CallbackValue &E : V.tuple())
+      H = hash_combine(H, hashCallbackValue(E));
+    return H;
+  }
   static unsigned getHashValue(const CallbackKey &Key) {
     unsigned H = Key.Kind;
-    for (const auto &A : Key.Args) {
-      if (A.IsString)
-        H = hash_combine(H,
-                         hash_combine_range(A.StrVal.begin(), A.StrVal.end()));
-      else
-        H = hash_combine(H, A.NumVal);
-    }
+    for (const auto &A : Key.Args)
+      H = hash_combine(H, hashCallbackValue(A));
     return H;
   }
   static bool isEqual(const CallbackKey &LHS, const CallbackKey &RHS) {
@@ -190,50 +252,101 @@ private:
 // Encoding/decoding helpers for recording and replay trampolines
 // =============================================================================
 
-/// Encode a C++ argument value into a CallbackValue for key construction.
-template <typename T> inline CallbackValue encodeVMCallbackValue(T V);
-template <> inline CallbackValue encodeVMCallbackValue<uintptr_t>(uintptr_t V) {
-  return CallbackValue::fromNum(static_cast<int64_t>(V));
-}
-template <> inline CallbackValue encodeVMCallbackValue<int>(int V) {
-  return CallbackValue::fromNum(static_cast<int64_t>(V));
-}
-template <> inline CallbackValue encodeVMCallbackValue<int64_t>(int64_t V) {
-  return CallbackValue::fromNum(V);
-}
-template <> inline CallbackValue encodeVMCallbackValue<bool>(bool V) {
-  return CallbackValue::fromNum(V ? 1 : 0);
-}
-template <>
-inline CallbackValue encodeVMCallbackValue<std::string>(std::string V) {
-  return CallbackValue::fromStr(V);
-}
+template <typename T> struct VMCallbackValueCodec;
 
-/// Decode a CallbackValue result back to the C++ return type.
-template <typename T> inline T decodeVMCallbackValue(const CallbackValue &V);
-template <> inline bool decodeVMCallbackValue<bool>(const CallbackValue &V) {
-  return V.NumVal != 0;
-}
-template <>
-inline uintptr_t decodeVMCallbackValue<uintptr_t>(const CallbackValue &V) {
-  return static_cast<uintptr_t>(V.NumVal);
-}
-template <> inline int decodeVMCallbackValue<int>(const CallbackValue &V) {
-  return static_cast<int>(V.NumVal);
-}
-template <>
-inline int64_t decodeVMCallbackValue<int64_t>(const CallbackValue &V) {
-  return V.NumVal;
-}
-template <>
-inline std::string decodeVMCallbackValue<std::string>(const CallbackValue &V) {
-  return V.StrVal;
-}
+template <> struct VMCallbackValueCodec<bool> {
+  static CallbackValue encode(bool V) {
+    return CallbackValue::fromNum(V ? 1 : 0);
+  }
+  static bool decode(const CallbackValue &V) {
+    assert(V.isNumber());
+    return V.number() != 0;
+  }
+};
+template <> struct VMCallbackValueCodec<int> {
+  static CallbackValue encode(int V) { return CallbackValue::fromNum(V); }
+  static int decode(const CallbackValue &V) {
+    assert(V.isNumber());
+    return static_cast<int>(V.number());
+  }
+};
+template <> struct VMCallbackValueCodec<int64_t> {
+  static CallbackValue encode(int64_t V) { return CallbackValue::fromNum(V); }
+  static int64_t decode(const CallbackValue &V) {
+    assert(V.isNumber());
+    return V.number();
+  }
+};
+template <> struct VMCallbackValueCodec<uintptr_t> {
+  static CallbackValue encode(uintptr_t V) {
+    return CallbackValue::fromNum(static_cast<int64_t>(V));
+  }
+  static uintptr_t decode(const CallbackValue &V) {
+    assert(V.isNumber());
+    return static_cast<uintptr_t>(V.number());
+  }
+};
+template <> struct VMCallbackValueCodec<std::string> {
+  static CallbackValue encode(const std::string &V) {
+    return CallbackValue::fromStr(V);
+  }
+  static std::string decode(const CallbackValue &V) {
+    assert(V.isString());
+    return V.string().str();
+  }
+};
+
+/// A homogeneous callback array has dynamic length. Its element codec is
+/// compile-time selected; the iteration is intentionally runtime-sized.
+template <typename T> struct VMCallbackValueCodec<std::vector<T>> {
+  static CallbackValue encode(const std::vector<T> &V) {
+    std::vector<CallbackValue> Elements;
+    Elements.reserve(V.size());
+    for (const T &E : V)
+      Elements.push_back(VMCallbackValueCodec<T>::encode(E));
+    return CallbackValue::fromArray(std::move(Elements));
+  }
+  static std::vector<T> decode(const CallbackValue &V) {
+    assert(V.isArray());
+    std::vector<T> Elements;
+    Elements.reserve(V.array().size());
+    for (const CallbackValue &E : V.array())
+      Elements.push_back(VMCallbackValueCodec<T>::decode(E));
+    return Elements;
+  }
+};
+
+template <typename... Ts> struct VMCallbackValueCodec<std::tuple<Ts...>> {
+  using Tuple = std::tuple<Ts...>;
+  static CallbackValue encode(const Tuple &V) {
+    std::vector<CallbackValue> Elements;
+    Elements.reserve(sizeof...(Ts));
+    std::apply(
+        [&](const auto &...E) {
+          (Elements.push_back(
+               VMCallbackValueCodec<std::decay_t<decltype(E)>>::encode(E)),
+           ...);
+        },
+        V);
+    return CallbackValue::fromTuple(std::move(Elements));
+  }
+  static Tuple decode(const CallbackValue &V) {
+    assert(V.isTuple() && V.tuple().size() == sizeof...(Ts) &&
+           "callback tuple shape does not match its declared return type");
+    return decodeImpl(V, std::index_sequence_for<Ts...>{});
+  }
+
+private:
+  template <size_t... I>
+  static Tuple decodeImpl(const CallbackValue &V, std::index_sequence<I...>) {
+    return Tuple{VMCallbackValueCodec<Ts>::decode(V.tuple()[I])...};
+  }
+};
 
 /// Encode variadic args into a vector for replay matching.
 template <typename... Ts>
 inline SmallVector<CallbackValue, 4> encodeArgs(Ts... Args) {
-  return {encodeVMCallbackValue(Args)...};
+  return {VMCallbackValueCodec<std::decay_t<Ts>>::encode(Args)...};
 }
 
 // =============================================================================
