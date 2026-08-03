@@ -64,6 +64,9 @@ Pipeline::Pipeline(OptimizationLevel level, LLVMContext &Ctx,
   // Register all the basic analyses with the managers.
   PB.registerModuleAnalyses(MAM);
   PB.registerCGSCCAnalyses(CGAM);
+  FAM.registerPass([PartialEscape = Options.PartialEscape] {
+    return PartialEscapeAnalysis(PartialEscape);
+  });
   PB.registerFunctionAnalyses(FAM);
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
@@ -107,9 +110,8 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // high-tier loop-optimization cluster that exposes virtualization
   // opportunities, the pre-PEA cleanup that PEA's correctness depends on,
   // PEA itself, and the post-PEA cleanup. The whole segment is gated on PEA
-  // being enabled (-jeandle-pea-iterations > 0, see JeandleDoPEA on the JDK
-  // side) so that disabling PEA removes all of it from the pipeline.
-  if (jeandle::isPEAEnabled()) {
+  // being enabled by both the typed pipeline option and the configured rounds.
+  if (jeandle::isPEAEnabled(Options.PartialEscape.Enable)) {
     // ---- Pre-PEA high-tier cluster ----
     // Fold jeandle.arraylength(new_array(...)) to the new_array length
     // argument first: the frontend emits jeandle.arraylength both for the

@@ -33,11 +33,8 @@ public:
 
 namespace llvm::jeandle {
 
-// True when the PEA fixpoint will do work, i.e. -jeandle-pea-iterations > 0.
-// Used by the Jeandle pipeline to gate the whole PEA segment (pre-PEA
-// high-tier cluster, pre-PEA cleanup, PEA itself, and post-PEA cleanup) so
-// that disabling PEA removes all of it from the pipeline.
-bool isPEAEnabled();
+// True when PEA is enabled by the pipeline and has at least one round.
+bool isPEAEnabled(bool EnableByPipeline);
 
 } // namespace llvm::jeandle
 

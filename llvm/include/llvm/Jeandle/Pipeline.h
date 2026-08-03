@@ -26,8 +26,14 @@ enum class InlineMode {
   AccessorOnly,
 };
 
+struct PartialEscapeOptions {
+  bool Enable = true;
+  bool EliminateLocks = true;
+};
+
 struct PipelineOptions {
   InlineMode Inlining = InlineMode::Default;
+  PartialEscapeOptions PartialEscape;
 };
 
 class Pipeline {

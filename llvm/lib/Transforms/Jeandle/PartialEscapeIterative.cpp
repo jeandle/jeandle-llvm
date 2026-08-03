@@ -87,7 +87,9 @@ static bool matchesExactDumpFunction(StringRef FunctionName) {
 // Hard upper bound guarding against non-converging inputs.
 static constexpr unsigned HardIterationCap = 16;
 
-bool llvm::jeandle::isPEAEnabled() { return JeandlePEAIterations != 0; }
+bool llvm::jeandle::isPEAEnabled(bool EnableByPipeline) {
+  return EnableByPipeline && JeandlePEAIterations != 0;
+}
 
 static std::string printFunctionIR(const Function &F) {
   std::string IR;

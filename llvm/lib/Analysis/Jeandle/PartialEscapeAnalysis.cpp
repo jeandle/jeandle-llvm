@@ -663,12 +663,14 @@ static DenseSet<BasicBlock *> findUnsafeReachableCyclicBlocks(Function &F,
 class Analyzer {
 public:
   Analyzer(Function &F, DominatorTree &DT, LoopInfo &LI, bool StrictLockOrder,
+           jeandle::PartialEscapeOptions Options,
            const DenseSet<Instruction *> &SuppressedCFGProofs,
            const DenseSet<CallBase *> &SuppressedVirtualizations)
       : F(F), DT(DT), LI(LI), DL(F.getParent()->getDataLayout()),
         VMConsts(jeandle::VMConstants::fromModule(*F.getParent())),
         MonitorDepth(computeMonitorDepthInfo(F)),
         StrictLockOrder(StrictLockOrder),
+        LockEliminationEnabled(Options.EliminateLocks),
         SuppressedCFGProofs(SuppressedCFGProofs),
         SuppressedVirtualizations(SuppressedVirtualizations),
         UnsafeCyclicBlocks(findUnsafeReachableCyclicBlocks(F, LI)) {}
@@ -727,6 +729,7 @@ private:
   // Cached "strict lock order" decision shared by every fresh attempt in this
   // analysis run; see resolveStrictLockOrder() for the precedence rules.
   const bool StrictLockOrder;
+  const bool LockEliminationEnabled;
   const DenseSet<Instruction *> &SuppressedCFGProofs;
   const DenseSet<CallBase *> &SuppressedVirtualizations;
   DenseSet<BasicBlock *> UnsafeCyclicBlocks;
@@ -5799,6 +5802,9 @@ void Analyzer::materializeVirtualLocksBefore(CallBase *MonEnter) {
 }
 
 bool Analyzer::foldMonitorEnter(CallBase *CB) {
+  if (!LockEliminationEnabled)
+    return false;
+
   if (!MonitorDepth.Valid)
     return false;
   if (CB->arg_size() < 1)
@@ -5862,6 +5868,9 @@ bool Analyzer::foldMonitorEnter(CallBase *CB) {
 }
 
 bool Analyzer::foldMonitorExit(CallBase *CB) {
+  if (!LockEliminationEnabled)
+    return false;
+
   if (!MonitorDepth.Valid)
     return false;
   if (CB->arg_size() < 1)
@@ -9639,7 +9648,7 @@ PartialEscapeAnalysis::run(Function &F, FunctionAnalysisManager &FAM) {
   DenseSet<Instruction *> SuppressedCFGProofs;
   DenseSet<CallBase *> SuppressedVirtualizations;
   while (true) {
-    Analyzer A(F, DT, LI, StrictLockOrder, SuppressedCFGProofs,
+    Analyzer A(F, DT, LI, StrictLockOrder, Options, SuppressedCFGProofs,
                SuppressedVirtualizations);
     jeandle::PEAResult Attempt = A.run();
     if (!A.getRetryVirtualizationAllocationSites().empty()) {
