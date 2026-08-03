@@ -180,12 +180,6 @@ enum class JeandleInlineReason : int {
        VMCallbackValueType::Uintptr, VMCallbackValueType::Uintptr,               \
        VMCallbackValueType::Bool, VMCallbackValueType::Int,                      \
        VMCallbackValueType::Int), 7)                                             \
-  def(GetProfileDevirtInfo, std::string, String,                                 \
-      (uintptr_t a1, uintptr_t a2, uintptr_t a3, int a4, int a5),                \
-      (a1, a2, a3, a4, a5),                                                      \
-      (VMCallbackValueType::Uintptr, VMCallbackValueType::Uintptr,               \
-       VMCallbackValueType::Uintptr, VMCallbackValueType::Int,                   \
-       VMCallbackValueType::Int), 5)                                             \
   def(UpdateCallSite, bool, Bool,                                                \
       (int64_t a1, int a2, uintptr_t a3), (a1, a2, a3),                          \
       (VMCallbackValueType::Long, VMCallbackValueType::Int,                      \

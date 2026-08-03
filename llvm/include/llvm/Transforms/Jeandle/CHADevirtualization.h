@@ -30,8 +30,9 @@ namespace jeandle {
 //   Method: optimized target method, ciMethod*.
 //   DeoptReasonOrTargetInfo: packed signature info.
 //     Bit 0: target->is_static()
-//     Bit 1: target->can_be_statically_bound()
-//     Bits 2..31: target->signature()->count()
+//     Bit 1: target->is_accessor()
+//     Bit 2: target->can_be_statically_bound()
+//     Bits 3..31: target->signature()->count()
 //
 // Regular Java invoke opt and MethodHandle _invokebasic intrinsic:
 //   ConstraintOrHolder: receiver constraint Klass* required by the optimized
@@ -56,10 +57,7 @@ struct CHAOptInfo {
                                                     2);
   }
 
-  bool isAccessor() const {
-    assert(!isMethodHandle() && "should be regular invoke");
-    return DeoptReasonOrTargetInfo & 2;
-  }
+  bool isAccessor() const { return DeoptReasonOrTargetInfo & 2; }
 
   uintptr_t constraint() const {
     assert(!isMethodHandle() && "should be regular invoke");
@@ -76,17 +74,18 @@ struct CHAOptInfo {
 
   bool canBeStaticallyBound() const {
     assert(isMethodHandle() && "should be method handle intrinsic invoke");
-    return DeoptReasonOrTargetInfo & 2;
+    return DeoptReasonOrTargetInfo & 4;
   }
 
   int argsNum() const {
     assert(isMethodHandle() && "should be method handle intrinsic invoke");
-    return DeoptReasonOrTargetInfo >> 2;
+    return DeoptReasonOrTargetInfo >> 3;
   }
 
-  static uintptr_t packTargetInfo(bool IsStatic, bool CanBeStaticallyBound,
-                                  int ArgsNum) {
-    return IsStatic | (CanBeStaticallyBound << 1) | (ArgsNum << 2);
+  static uintptr_t packTargetInfo(bool IsStatic, bool IsAccessor,
+                                  bool CanBeStaticallyBound, int ArgsNum) {
+    return IsStatic | (IsAccessor << 1) | (CanBeStaticallyBound << 2) |
+           (ArgsNum << 3);
   }
 
   static uintptr_t packDeoptreasonInfo(bool IsStatic, bool IsAccessor,
