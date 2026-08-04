@@ -315,11 +315,11 @@ MODULE_PASS_WITH_PARAMS(
     parseFatLTOOptions, "O0;O1;O2;O3;Os;Oz;thinlto;emit-summary")
 
 MODULE_PASS_WITH_PARAMS(
-    "jeandle", "", [&](OptimizationLevel L) {
-      setupOptionsForPipelineAlias(PTO, L);
-      return jeandle::Pipeline::buildJeandlePipeline(*this, L);
+    "jeandle", "", [&](JeandlePipelineParams P) {
+      setupOptionsForPipelineAlias(PTO, P.Level);
+      return jeandle::Pipeline::buildJeandlePipeline(*this, P.Level, P.Mode);
     },
-    parseOptLevelParam, "O0;O1;O2;O3;Os;Oz")
+    parseJeandlePipelineParams, "O0;O1;O2;O3;Os;Oz;method;stub")
 
 #undef MODULE_PASS_WITH_PARAMS
 

@@ -1752,6 +1752,50 @@ Expected<FatLTOOptions> parseFatLTOOptions(StringRef Params) {
   return Result;
 }
 
+struct JeandlePipelineParams {
+  OptimizationLevel Level;
+  jeandle::PipelineMode Mode = jeandle::PipelineMode::MethodCompilation;
+};
+
+Expected<JeandlePipelineParams> parseJeandlePipelineParams(StringRef Params) {
+  JeandlePipelineParams Result;
+  bool HaveOptLevel = false;
+  bool HaveMode = false;
+  while (!Params.empty()) {
+    StringRef ParamName;
+    std::tie(ParamName, Params) = Params.split(';');
+
+    if (ParamName == "stub" || ParamName == "method") {
+      if (HaveMode)
+        return make_error<StringError>(
+            formatv("duplicate pipeline mode parameter '{}'", ParamName).str(),
+            inconvertibleErrorCode());
+      HaveMode = true;
+      Result.Mode = ParamName == "stub"
+                        ? jeandle::PipelineMode::StubCompilation
+                        : jeandle::PipelineMode::MethodCompilation;
+    } else if (std::optional<OptimizationLevel> OptLevel =
+                   parseOptLevel(ParamName)) {
+      if (HaveOptLevel)
+        return make_error<StringError>(
+            formatv("duplicate optimization level parameter '{}'", ParamName)
+                .str(),
+            inconvertibleErrorCode());
+      HaveOptLevel = true;
+      Result.Level = *OptLevel;
+    } else {
+      return make_error<StringError>(
+          formatv("invalid jeandle pipeline parameter '{}'", ParamName).str(),
+          inconvertibleErrorCode());
+    }
+  }
+  if (!HaveOptLevel)
+    return make_error<StringError>(
+        "missing optimization level for jeandle pipeline",
+        inconvertibleErrorCode());
+  return Result;
+}
+
 Expected<int> parseJavaOperationLowerOptions(StringRef Params) {
   int Result;
   if (!Params.consume_front("phase=") || Params.getAsInteger(0, Result)) {

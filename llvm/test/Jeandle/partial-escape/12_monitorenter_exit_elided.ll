@@ -1,4 +1,5 @@
 ; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" %s | FileCheck %s
+; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-pea-eliminate-locks=false %s | FileCheck %s --check-prefix=NOELIM
 
 ; PEA: monitorenter/monitorexit on a virtual receiver, balanced
 ; within a single block, are elided. The lock-count balance check in
@@ -39,3 +40,7 @@ u:
 ; CHECK: ret void
 
 !java-method-compilation = !{}
+
+; NOELIM-LABEL: define void @test_sync_simple
+; NOELIM: call hotspotcc void @jeandle.monitorenter_with_thin_lock
+; NOELIM: call hotspotcc void @jeandle.monitorexit_with_thin_lock

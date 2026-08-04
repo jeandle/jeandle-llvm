@@ -33,8 +33,9 @@ public:
 
 namespace llvm::jeandle {
 
-// True when PEA is enabled by the pipeline and has at least one round.
-bool isPEAEnabled(bool EnableByPipeline);
+// True when PEA is enabled (-jeandle-pea) and has at least one round
+// (-jeandle-pea-iterations > 0).
+bool isPEAEnabled();
 
 } // namespace llvm::jeandle
 

@@ -59,6 +59,12 @@ static cl::opt<unsigned> JeandlePEAIterations(
              "in the outer fixpoint. Default 2. Set to 1 for single-round "
              "semantics or higher to observe an idle convergence probe."));
 
+// Master switch for PEA in the Jeandle pipeline. The JDK forwards its
+// JeandleDoPEA VM flag here; opt users set it directly.
+static cl::opt<bool> JeandlePEA(
+    "jeandle-pea", cl::init(true), cl::Hidden,
+    cl::desc("Enable Partial Escape Analysis in the Jeandle pipeline."));
+
 // PEA-only IR dump hook. When non-empty and matching F.getName(), dumps F to
 // errs() before and after each complete outer round, followed by a summary.
 // Filter with `2>&1 | grep PEA-` to isolate PEA diagnostics.
@@ -87,8 +93,8 @@ static bool matchesExactDumpFunction(StringRef FunctionName) {
 // Hard upper bound guarding against non-converging inputs.
 static constexpr unsigned HardIterationCap = 16;
 
-bool llvm::jeandle::isPEAEnabled(bool EnableByPipeline) {
-  return EnableByPipeline && JeandlePEAIterations != 0;
+bool llvm::jeandle::isPEAEnabled() {
+  return JeandlePEA && JeandlePEAIterations != 0;
 }
 
 static std::string printFunctionIR(const Function &F) {

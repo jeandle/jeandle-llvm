@@ -19,31 +19,20 @@
 
 namespace llvm::jeandle {
 
-// Controls whether JeandleInliner is added and which callees it may try.
-enum class InlineMode {
-  Disabled,
-  Default,
-  AccessorOnly,
-};
-
-struct PartialEscapeOptions {
-  bool Enable = true;
-  bool EliminateLocks = true;
-};
-
-struct PipelineOptions {
-  InlineMode Inlining = InlineMode::Default;
-  PartialEscapeOptions PartialEscape;
+// Selects which kind of compilation the pipeline is built for.
+enum class PipelineMode {
+  MethodCompilation,
+  StubCompilation,
 };
 
 class Pipeline {
 public:
   Pipeline(OptimizationLevel Level, LLVMContext &Ctx,
-           PipelineOptions Options = {});
+           PipelineMode Mode = PipelineMode::MethodCompilation);
 
   LLVM_ABI static ModulePassManager
   buildJeandlePipeline(PassBuilder &PB, OptimizationLevel Level,
-                       PipelineOptions Options = {});
+                       PipelineMode Mode = PipelineMode::MethodCompilation);
 
   void run(Module &M);
 

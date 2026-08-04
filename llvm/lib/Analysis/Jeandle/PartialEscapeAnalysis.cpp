@@ -127,6 +127,13 @@ static llvm::cl::opt<bool> JeandleDumpPEAStats(
     llvm::cl::desc("PEA: dump per-function NeverEscapes / PartiallyEscapes "
                    "/ AlwaysEscapes counts on errs() after analysis."));
 
+// Eliminate balanced monitor enter/exit pairs on virtual receivers. The JDK
+// forwards its JeandleEliminateLocks VM flag here; opt users set it directly.
+static llvm::cl::opt<bool> JeandlePEAEliminateLocks(
+    "jeandle-pea-eliminate-locks", llvm::cl::init(true), llvm::cl::Hidden,
+    llvm::cl::desc("PEA: eliminate balanced monitor enter/exit pairs on "
+                   "virtual (non-escaping) receivers."));
+
 // Cascade other still-locked virtuals at materialization when the target uses
 // HotSpot's lightweight locking (LM_LIGHTWEIGHT requires strict lock nesting).
 // Resolved per-run by resolveStrictLockOrder(): explicit cl override wins,
@@ -663,14 +670,13 @@ static DenseSet<BasicBlock *> findUnsafeReachableCyclicBlocks(Function &F,
 class Analyzer {
 public:
   Analyzer(Function &F, DominatorTree &DT, LoopInfo &LI, bool StrictLockOrder,
-           jeandle::PartialEscapeOptions Options,
            const DenseSet<Instruction *> &SuppressedCFGProofs,
            const DenseSet<CallBase *> &SuppressedVirtualizations)
       : F(F), DT(DT), LI(LI), DL(F.getParent()->getDataLayout()),
         VMConsts(jeandle::VMConstants::fromModule(*F.getParent())),
         MonitorDepth(computeMonitorDepthInfo(F)),
         StrictLockOrder(StrictLockOrder),
-        LockEliminationEnabled(Options.EliminateLocks),
+        LockEliminationEnabled(JeandlePEAEliminateLocks),
         SuppressedCFGProofs(SuppressedCFGProofs),
         SuppressedVirtualizations(SuppressedVirtualizations),
         UnsafeCyclicBlocks(findUnsafeReachableCyclicBlocks(F, LI)) {}
@@ -9648,7 +9654,7 @@ PartialEscapeAnalysis::run(Function &F, FunctionAnalysisManager &FAM) {
   DenseSet<Instruction *> SuppressedCFGProofs;
   DenseSet<CallBase *> SuppressedVirtualizations;
   while (true) {
-    Analyzer A(F, DT, LI, StrictLockOrder, Options, SuppressedCFGProofs,
+    Analyzer A(F, DT, LI, StrictLockOrder, SuppressedCFGProofs,
                SuppressedVirtualizations);
     jeandle::PEAResult Attempt = A.run();
     if (!A.getRetryVirtualizationAllocationSites().empty()) {

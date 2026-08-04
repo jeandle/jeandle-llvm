@@ -756,6 +756,11 @@ optMain(int argc, char **argv,
                 "-passes='default<O#>,other-pass'\n";
       return 1;
     }
+    if (RunJeandle && PassPipeline.getNumOccurrences() > 0) {
+      errs() << "Cannot specify --jeandle and --passes, use "
+                "-passes='jeandle<O#'>\n";
+      return 1;
+    }
     std::string Pipeline = PassPipeline;
 
     // Load VM callback log for Jeandle passes if specified.
@@ -792,8 +797,21 @@ optMain(int argc, char **argv,
       Pipeline = "default<Os>";
     if (OptLevelOz)
       Pipeline = "default<Oz>";
-    if (RunJeandle)
-      Pipeline = "jeandle<O3>";
+    if (RunJeandle) {
+      // --jeandle composes with -O#; without one it defaults to O3.
+      if (OptLevelO0)
+        Pipeline = "jeandle<O0>";
+      else if (OptLevelO1)
+        Pipeline = "jeandle<O1>";
+      else if (OptLevelO2)
+        Pipeline = "jeandle<O2>";
+      else if (OptLevelOs)
+        Pipeline = "jeandle<Os>";
+      else if (OptLevelOz)
+        Pipeline = "jeandle<Oz>";
+      else
+        Pipeline = "jeandle<O3>";
+    }
     OutputKind OK = OK_NoOutput;
     if (!NoOutput)
       OK = OutputAssembly

@@ -9,7 +9,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Jeandle/Pipeline.h"
-#include "llvm/Analysis/Jeandle/PartialEscapeAnalysis.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
@@ -54,8 +53,24 @@ static cl::opt<unsigned> JeandlePrePEAFullUnrollMaxCount(
              "high-tier cluster. Default 128, matching "
              "-jeandle-pea-max-array-length."));
 
-Pipeline::Pipeline(OptimizationLevel level, LLVMContext &Ctx,
-                   PipelineOptions Options)
+namespace {
+
+// Inlining policy for Java method compilation.
+enum class InlinePolicy { Off, Default, AccessorsOnly };
+
+} // namespace
+
+// The JDK derives this from the Inline/InlineAccessors VM flags. Stub
+// compilation never inlines regardless of this setting.
+static cl::opt<InlinePolicy> JeandleInlinePolicy(
+    "jeandle-inline", cl::init(InlinePolicy::Default), cl::Hidden,
+    cl::desc("Inlining policy for Jeandle Java method compilation."),
+    cl::values(clEnumValN(InlinePolicy::Default, "default", "Inline normally"),
+               clEnumValN(InlinePolicy::AccessorsOnly, "accessors-only",
+                          "Inline accessor methods only"),
+               clEnumValN(InlinePolicy::Off, "off", "Disable inlining")));
+
+Pipeline::Pipeline(OptimizationLevel level, LLVMContext &Ctx, PipelineMode Mode)
     : SI(Ctx, /*DebugLogging=*/false) {
   SI.registerCallbacks(PIC, &MAM);
 
@@ -64,20 +79,17 @@ Pipeline::Pipeline(OptimizationLevel level, LLVMContext &Ctx,
   // Register all the basic analyses with the managers.
   PB.registerModuleAnalyses(MAM);
   PB.registerCGSCCAnalyses(CGAM);
-  FAM.registerPass([PartialEscape = Options.PartialEscape] {
-    return PartialEscapeAnalysis(PartialEscape);
-  });
   PB.registerFunctionAnalyses(FAM);
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
-  PM = buildJeandlePipeline(PB, level, Options);
+  PM = buildJeandlePipeline(PB, level, Mode);
 }
 
 // TODO: The pass selection/ordering is not optimal. We need to improve it.
 ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
                                                  OptimizationLevel level,
-                                                 PipelineOptions Options) {
+                                                 PipelineMode Mode) {
   ModulePassManager PM;
   PM.addPass(JavaOperationLower(0));
   FunctionPassManager PreCHACleanup;
@@ -94,24 +106,27 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(CHADevirtualization()));
   // JeandleInlineDriver owns the inline-specific loop. Devirtualization
   // refinement between inline rounds should be wired inside the driver so
-  // inline-scope state can be preserved across IR rewrites.
-  switch (Options.Inlining) {
-  case InlineMode::Disabled:
-    break;
-  case InlineMode::Default:
-    PM.addPass(JeandleInlineDriver());
-    break;
-  case InlineMode::AccessorOnly:
-    PM.addPass(JeandleInlineDriver(/*InlineAccessorsOnly=*/true));
-    break;
+  // inline-scope state can be preserved across IR rewrites. Stub compilation
+  // never inlines.
+  if (Mode == PipelineMode::MethodCompilation) {
+    switch (JeandleInlinePolicy) {
+    case InlinePolicy::Off:
+      break;
+    case InlinePolicy::Default:
+      PM.addPass(JeandleInlineDriver());
+      break;
+    case InlinePolicy::AccessorsOnly:
+      PM.addPass(JeandleInlineDriver(/*InlineAccessorsOnly=*/true));
+      break;
+    }
   }
   // ==== PEA segment ====
   // Everything below up to InsertGCBarriers exists to serve PEA: the
   // high-tier loop-optimization cluster that exposes virtualization
   // opportunities, the pre-PEA cleanup that PEA's correctness depends on,
-  // PEA itself, and the post-PEA cleanup. The whole segment is gated on PEA
-  // being enabled by both the typed pipeline option and the configured rounds.
-  if (jeandle::isPEAEnabled(Options.PartialEscape.Enable)) {
+  // PEA itself, and the post-PEA cleanup. The whole segment is gated on
+  // -jeandle-pea and the configured rounds (-jeandle-pea-iterations).
+  if (jeandle::isPEAEnabled()) {
     // ---- Pre-PEA high-tier cluster ----
     // Fold jeandle.arraylength(new_array(...)) to the new_array length
     // argument first: the frontend emits jeandle.arraylength both for the

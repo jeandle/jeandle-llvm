@@ -18,7 +18,7 @@
 namespace llvm::jeandle {
 
 void optimize(Module &M, OptimizationLevel Level = OptimizationLevel::O3,
-              PipelineOptions Options = {});
+              PipelineMode Mode = PipelineMode::MethodCompilation);
 
 } // end namespace llvm::jeandle
 
