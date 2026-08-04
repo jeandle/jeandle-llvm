@@ -47,6 +47,11 @@ using ConstantFieldResult = std::tuple<int, int64_t>;
 /// and target method name returned by CHA devirtualization.
 using CHAOptResult = std::tuple<uintptr_t, uintptr_t, uintptr_t, std::string>;
 
+/// GetMirrorKlass result used when the oop is not a constant Class mirror or
+/// its represented type is unavailable. Zero remains available to encode the
+/// known-null Klass field of a primitive Class mirror.
+inline constexpr uintptr_t MirrorKlassUnavailable = ~uintptr_t{0};
+
 /// Result reported for an inline attempt after LLVM starts processing it.
 /// Keep the numeric values stable because the JVM records them.
 enum class JeandleInlineReason : int {
@@ -188,9 +193,18 @@ enum class JeandleInlineReason : int {
   def(GetOopKlass, uintptr_t, Uintptr,                                           \
       (int a1), (a1),                                                            \
       (VMCallbackValueType::Int), 1)                                             \
-  def(GetJavaMirror, int, Int,                                               \
-      (uintptr_t a1), (a1),                                                  \
-      (VMCallbackValueType::Uintptr), 1)                                     \
+  def(GetJavaMirror, int, Int,                                                   \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetMirrorKlass, uintptr_t, Uintptr,                                        \
+      (int a1), (a1),                                                            \
+      (VMCallbackValueType::Int), 1)                                             \
+  def(GetKlassLayoutHelper, int, Int,                                            \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(IsKlassInitialized, bool, Bool,                                            \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
   def(IsOkToInline, bool, Bool,                                                  \
       (int a1, int a2, uintptr_t a3), (a1, a2, a3),                              \
       (VMCallbackValueType::Int, VMCallbackValueType::Int,                       \
@@ -353,6 +367,19 @@ enum class JeandleInlineReason : int {
 ///                         jeandle.get_class on a virtual receiver (whose exact
 ///                         klass is statically known) to the constant Class
 ///                         mirror. Pure (Klass -> mirror oop id).
+///   GetMirrorKlass      — For a constant java.lang.Class mirror, returns its
+///                         represented reference Klass pointer, or 0 when the
+///                         mirror represents a primitive type. Returns
+///                         MirrorKlassUnavailable for a non-mirror or an
+///                         unavailable value. Pure (id -> represented klass).
+///   GetKlassLayoutHelper
+///                       — Returns Klass::layout_helper() for a constant Klass
+///                         pointer, or 0 if unavailable. Pure (klass ->
+///                         layout helper).
+///   IsKlassInitialized  — Returns true iff a constant Klass is an initialized
+///                         instance klass. ConstantFieldFolding only acts on a
+///                         true result because initialization is monotonic;
+///                         false retains the dynamic initialization check.
 ///   IsOkToInline        — Given an inline scope id, call-site BCI, and callee
 ///                         Java method pointer, returns whether the VM allows
 ///                         this inline attempt.
@@ -377,9 +404,6 @@ enum class JeandleInlineReason : int {
 ///                         failures before returning, so LLVM expects a true
 ///                         result.
 ///                         "oop_handle_Test_1") for a given oop id.
-///   GetOopKlass         — Returns the actual runtime klass pointer of the
-///                         constant oop with the given oop id, or 0 if it is
-///                         unavailable. Pure (id -> klass).
 ///   GetCHAOptInfo       — Returns (constraint or holder, target method,
 ///                         packed deoptimization or target info, target method
 ///                         name) for CHA devirtualization. A zero first field

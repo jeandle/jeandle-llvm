@@ -319,7 +319,9 @@ LoadInst *createConstOopLoad(Module &M, IRBuilder<> &Builder, int OopId) {
   std::string Name = CB->GetOopHandleName(OopId);
   GlobalVariable *GV = cast<GlobalVariable>(M.getOrInsertGlobal(Name, OopTy));
   GV->setDSOLocal(true);
-  return Builder.CreateLoad(OopTy, GV, "folded.oop");
+  LoadInst *LI = Builder.CreateLoad(OopTy, GV, "folded.oop");
+  LI->setMetadata(LLVMContext::MD_nonnull, MDNode::get(Ctx, {}));
+  return LI;
 }
 
 void appendVirtualObjectDescriptor(SmallVectorImpl<Value *> &Args,

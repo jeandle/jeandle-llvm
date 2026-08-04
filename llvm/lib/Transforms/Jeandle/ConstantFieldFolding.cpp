@@ -39,6 +39,13 @@
 using namespace llvm;
 
 STATISTIC(NumFieldsFolded, "Number of constant field loads folded");
+STATISTIC(NumKlassesFolded, "Number of jeandle.load_klass calls folded");
+STATISTIC(NumMirrorKlassesFolded,
+          "Number of jeandle.load_mirror_klass calls folded");
+STATISTIC(NumKlassLayoutHelpersFolded,
+          "Number of jeandle.layout_helper calls folded");
+STATISTIC(NumKlassInitializedFolded,
+          "Number of jeandle.klass_is_initialized calls folded");
 STATISTIC(NumRounds, "Number of folding rounds");
 STATISTIC(NumOopChains, "Number of oop chains followed");
 
@@ -302,6 +309,140 @@ matchFieldLoad(LoadInst *LI, const DenseMap<Value *, int> &ConstOops,
   return FieldLoadMatch{LI, ImmediateGEP, *BaseId, OffsetVal};
 }
 
+std::optional<uintptr_t> getConstantKlassPointer(Value *V) {
+  V = V->stripPointerCasts();
+  if (auto *CE = dyn_cast<ConstantExpr>(V)) {
+    if (CE->getOpcode() != Instruction::IntToPtr || CE->getNumOperands() != 1)
+      return std::nullopt;
+    if (auto *CI = dyn_cast<ConstantInt>(CE->getOperand(0)))
+      return static_cast<uintptr_t>(CI->getZExtValue());
+    return std::nullopt;
+  }
+  if (auto *CI = dyn_cast<ConstantInt>(V))
+    return static_cast<uintptr_t>(CI->getZExtValue());
+  return std::nullopt;
+}
+
+Constant *klassPointerConstant(LLVMContext &Ctx, Type *Ty, uintptr_t Klass) {
+  if (Klass == 0 || !Ty->isPointerTy())
+    return nullptr;
+  return ConstantExpr::getIntToPtr(
+      ConstantInt::get(Type::getInt64Ty(Ctx), Klass), Ty);
+}
+
+bool isLoadKlassCall(CallInst *CI) {
+  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+  return Callee && Callee->getName() == "jeandle.load_klass" &&
+         CI->arg_size() == 1;
+}
+
+bool isLoadMirrorKlassCall(CallInst *CI) {
+  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+  return Callee && Callee->getName() == "jeandle.load_mirror_klass" &&
+         CI->arg_size() == 1;
+}
+
+bool isLayoutHelperCall(CallInst *CI) {
+  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+  return Callee && Callee->getName() == "jeandle.layout_helper" &&
+         CI->arg_size() == 1;
+}
+
+bool isKlassInitializedCall(CallInst *CI) {
+  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+  return Callee && Callee->getName() == "jeandle.klass_is_initialized" &&
+         CI->arg_size() == 1;
+}
+
+bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
+                       const DenseMap<Value *, int> &ConstOops) {
+  if (!isLoadKlassCall(CI) || !CB.GetOopKlass)
+    return false;
+
+  std::optional<int> OopId = lookupConstOop(CI->getArgOperand(0), ConstOops);
+  if (!OopId)
+    return false;
+
+  uintptr_t Klass = CB.GetOopKlass(*OopId);
+  Constant *KlassConstant =
+      klassPointerConstant(CI->getContext(), CI->getType(), Klass);
+  if (!KlassConstant)
+    return false;
+
+  CI->replaceAllUsesWith(KlassConstant);
+  CI->eraseFromParent();
+  return true;
+}
+
+bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
+                             const DenseMap<Value *, int> &ConstOops) {
+  if (!isLoadMirrorKlassCall(CI) || !CI->getType()->isPointerTy() ||
+      !CB.GetMirrorKlass)
+    return false;
+
+  std::optional<int> OopId = lookupConstOop(CI->getArgOperand(0), ConstOops);
+  if (!OopId)
+    return false;
+
+  uintptr_t Klass = CB.GetMirrorKlass(*OopId);
+  if (Klass == jeandle::MirrorKlassUnavailable)
+    return false;
+
+  Constant *KlassConstant;
+  if (Klass == 0)
+    KlassConstant = ConstantPointerNull::get(cast<PointerType>(CI->getType()));
+  else
+    KlassConstant =
+        klassPointerConstant(CI->getContext(), CI->getType(), Klass);
+  if (!KlassConstant)
+    return false;
+
+  CI->replaceAllUsesWith(KlassConstant);
+  CI->eraseFromParent();
+  return true;
+}
+
+bool foldLayoutHelperCall(CallInst *CI, const jeandle::VMCallbacks &CB) {
+  if (!isLayoutHelperCall(CI) || !CI->getType()->isIntegerTy(32) ||
+      !CB.GetKlassLayoutHelper)
+    return false;
+
+  std::optional<uintptr_t> Klass =
+      getConstantKlassPointer(CI->getArgOperand(0));
+  if (!Klass || *Klass == 0)
+    return false;
+
+  int LayoutHelper = CB.GetKlassLayoutHelper(*Klass);
+  if (LayoutHelper == 0)
+    return false;
+
+  CI->replaceAllUsesWith(ConstantInt::get(CI->getType(), LayoutHelper));
+  CI->eraseFromParent();
+  return true;
+}
+
+bool foldKlassInitializedCall(CallInst *CI, const jeandle::VMCallbacks &CB) {
+  if (!isKlassInitializedCall(CI) || !CI->getType()->isIntegerTy(1) ||
+      !CB.IsKlassInitialized)
+    return false;
+
+  std::optional<uintptr_t> Klass =
+      getConstantKlassPointer(CI->getArgOperand(0));
+  if (!Klass || *Klass == 0)
+    return false;
+
+  // Initialization is monotonic. A class known to be fully initialized at
+  // compile time stays initialized, so replacing the query with true is safe.
+  // A false result is only a snapshot: the class may initialize before this
+  // code executes, so retain the JavaOp and its dynamic load.
+  if (!CB.IsKlassInitialized(*Klass))
+    return false;
+
+  CI->replaceAllUsesWith(ConstantInt::getTrue(CI->getContext()));
+  CI->eraseFromParent();
+  return true;
+}
+
 bool isSubIntBasicType(int BasicType) {
   return BasicType == T_BOOLEAN || BasicType == T_BYTE || BasicType == T_CHAR ||
          BasicType == T_SHORT;
@@ -516,15 +657,74 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     DenseMap<Value *, int> ConstOops = computeConstOops(F);
     ReversePostOrderTraversal<Function *> RPOT(&F);
 
+    SmallVector<CallInst *, 16> LoadKlassCalls;
+    SmallVector<CallInst *, 16> LoadMirrorKlassCalls;
+    SmallVector<CallInst *, 16> LayoutHelperCalls;
+    SmallVector<CallInst *, 16> KlassInitializedCalls;
     SmallVector<LoadInst *, 16> Loads;
     for (BasicBlock *BB : RPOT) {
       for (Instruction &I : *BB) {
+        if (auto *CI = dyn_cast<CallInst>(&I)) {
+          if (isLoadKlassCall(CI))
+            LoadKlassCalls.push_back(CI);
+          if (isLoadMirrorKlassCall(CI))
+            LoadMirrorKlassCalls.push_back(CI);
+          if (isLayoutHelperCall(CI))
+            LayoutHelperCalls.push_back(CI);
+          if (isKlassInitializedCall(CI))
+            KlassInitializedCalls.push_back(CI);
+        }
         if (auto *LI = dyn_cast<LoadInst>(&I))
           Loads.push_back(LI);
       }
     }
 
+    // Fold object Klass loads before layout-helper queries so that a complete
+    // constant-oop -> Klass* -> layout-helper chain collapses in one round.
+    for (CallInst *CI : LoadKlassCalls) {
+      if (CI->getParent() == nullptr)
+        continue;
+      if (foldLoadKlassCall(CI, *CB, ConstOops)) {
+        ++NumKlassesFolded;
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
+    for (CallInst *CI : LoadMirrorKlassCalls) {
+      if (CI->getParent() == nullptr)
+        continue;
+      if (foldLoadMirrorKlassCall(CI, *CB, ConstOops)) {
+        ++NumMirrorKlassesFolded;
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
+    for (CallInst *CI : LayoutHelperCalls) {
+      if (CI->getParent() == nullptr)
+        continue;
+      if (foldLayoutHelperCall(CI, *CB)) {
+        ++NumKlassLayoutHelpersFolded;
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
+    for (CallInst *CI : KlassInitializedCalls) {
+      if (CI->getParent() == nullptr)
+        continue;
+      if (foldKlassInitializedCall(CI, *CB)) {
+        ++NumKlassInitializedFolded;
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
     for (LoadInst *LI : Loads) {
+      if (LI->getParent() == nullptr)
+        continue;
+
       std::optional<FieldLoadMatch> Match = matchFieldLoad(LI, ConstOops, DL);
       if (!Match)
         continue;

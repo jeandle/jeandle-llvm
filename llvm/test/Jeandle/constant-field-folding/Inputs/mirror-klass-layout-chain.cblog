@@ -1,0 +1,4 @@
+GetConstantField 0 16 = (12, 1)
+GetOopHandleName 1 = "oop_handle_ClassMirror_1"
+GetMirrorKlass 1 = 234567
+GetKlassLayoutHelper 234567 = -2147483637
