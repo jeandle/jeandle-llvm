@@ -25,8 +25,6 @@
 #include <optional>
 #include <string>
 
-#define DEBUG_TYPE "jeandle-utils"
-
 namespace llvm::jeandle {
 
 /// Basic types used by HotSpot JVM, mirroring HotSpot's BasicType enum.
@@ -146,10 +144,12 @@ inline Type *java2llvm(HotspotBasicType JavaType, LLVMContext &Context) {
   case T_METADATA:
   case T_CONFLICT:
   case T_ILLEGAL:
-    LLVM_DEBUG(dbgs() << "Unsupported type: " << JavaType << "\n");
+    DEBUG_WITH_TYPE("jeandle-utils",
+                    dbgs() << "Unsupported type: " << JavaType << "\n");
     return nullptr;
   }
-  LLVM_DEBUG(dbgs() << "Unsupported type: " << JavaType << "\n");
+  DEBUG_WITH_TYPE("jeandle-utils",
+                  dbgs() << "Unsupported type: " << JavaType << "\n");
   return nullptr;
 }
 

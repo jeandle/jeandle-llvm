@@ -33,6 +33,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/NoFolder.h"
 #include "llvm/IR/PassManager.h"
@@ -315,6 +316,13 @@ bool DeadArgumentEliminationPass::removeDeadArgumentsFromCallers(Function &F) {
 
     // Now go through all unused args and replace them with poison.
     for (unsigned ArgNo : UnusedArgs) {
+      // Some call arguments have runtime ABI uses that are not represented by
+      // uses of the visible LLVM callee parameter.  Preserve those arguments
+      // without teaching this generic IPO pass about a particular call stub.
+      if (CB->getAttributes().hasParamAttr(ArgNo,
+                                           jeandle::Attribute::RuntimeLive))
+        continue;
+
       Value *Arg = CB->getArgOperand(ArgNo);
       CB->setArgOperand(ArgNo, PoisonValue::get(Arg->getType()));
       CB->removeParamAttrs(ArgNo, UBImplyingAttributes);
