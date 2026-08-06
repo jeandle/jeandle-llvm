@@ -315,8 +315,8 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
   // Do not commit any speculative type assumptions unless all arguments were
   // compatible and the VM accepted the new call-site representation.
   if (!NarrowSuccess ||
-      !Callbacks.UpdateCallSite(static_cast<int64_t>(Id), DestKind,
-                                true, CHAOptInfo.Method)) {
+      !Callbacks.UpdateCallSite(static_cast<int64_t>(Id), DestKind, true,
+                                CHAOptInfo.Method)) {
     for (auto &[_, Value] : JavaTypeAssumeCB) {
       if (CallInst *Inst = dyn_cast_or_null<CallInst>(Value)) {
         Inst->eraseFromParent();
