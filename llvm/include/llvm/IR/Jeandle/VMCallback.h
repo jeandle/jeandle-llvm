@@ -181,9 +181,9 @@ enum class JeandleInlineReason : int {
        VMCallbackValueType::Bool, VMCallbackValueType::Int,                      \
        VMCallbackValueType::Int), 7)                                             \
   def(UpdateCallSite, bool, Bool,                                                \
-      (int64_t a1, int a2, uintptr_t a3), (a1, a2, a3),                          \
+      (int64_t a1, int a2, bool a3, uintptr_t a4), (a1, a2, a3, a4),             \
       (VMCallbackValueType::Long, VMCallbackValueType::Int,                      \
-       VMCallbackValueType::Uintptr), 3)                                         \
+       VMCallbackValueType::Bool, VMCallbackValueType::Uintptr), 4)              \
   def(GetSignatureAccessingKlass, uintptr_t, Uintptr,                            \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \

@@ -324,7 +324,7 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
   // compatible and the VM accepted the new call-site representation.
   if (!NarrowSuccess ||
       !Callbacks.UpdateCallSite(static_cast<int64_t>(Id), DestKind,
-                                CHAOptInfo.Method)) {
+                                true, CHAOptInfo.Method)) {
     for (auto &[_, Value] : JavaTypeAssumeCB) {
       if (CallInst *Inst = dyn_cast_or_null<CallInst>(Value)) {
         Inst->eraseFromParent();
@@ -449,7 +449,7 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
       !Callbacks.UpdateCallSite(static_cast<int64_t>(Id),
                                 CHAOptInfo.isStatic() ? jeandle::StaticCall
                                                       : jeandle::OptVirtualCall,
-                                IsInvokeBasic ? CHAOptInfo.Method : 0)) {
+                                IsInvokeBasic, CHAOptInfo.Method)) {
     return false;
   }
 
