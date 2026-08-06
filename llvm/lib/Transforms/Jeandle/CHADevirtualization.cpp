@@ -70,8 +70,6 @@ int getPatchSize(const Module *M, const char *PatchType) {
 
 void updateStaticOptVirtualCallAttrs(InvokeInst &CB, int PatchSize) {
   CB.addParamAttr(0, Attribute::NoUndef);
-  CB.addParamAttr(
-      0, Attribute::get(CB.getContext(), jeandle::Attribute::RuntimeLive));
   CB.removeFnAttr(jeandle::Attribute::StatepointNumPatchBytes);
   CB.addFnAttr(Attribute::get(CB.getContext(),
                               jeandle::Attribute::StatepointNumPatchBytes,
@@ -186,12 +184,6 @@ InvokeInst *createNewCB(InvokeInst &CB, bool IsMonomorphicTarget, int PatchSize,
 
   if (DestKind != jeandle::StaticCall) {
     NewCB->removeParamAttr(0, Attribute::NoUndef);
-    NewCB->removeParamAttr(0, jeandle::Attribute::RuntimeLive);
-  }
-  if (DestKind == jeandle::OptVirtualCall) {
-    NewCB->addParamAttr(0, Attribute::NoUndef);
-    NewCB->addParamAttr(
-        0, Attribute::get(CB.getContext(), jeandle::Attribute::RuntimeLive));
   }
   return NewCB;
 }

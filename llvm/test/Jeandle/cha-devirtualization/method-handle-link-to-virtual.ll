@@ -40,7 +40,7 @@ unwind:
 ; CHECK: call hotspotcc ptr addrspace(1) (...) @llvm.experimental.deoptimize.p1(i32 -201)
 ; CHECK: ret ptr addrspace(1)
 ; CHECK-LABEL: cha_bci_17_check_receiver_pass:
-; CHECK: invoke hotspotcc ptr addrspace(1) @"InlineTest$D_m()Ljava/lang/Object;"(ptr addrspace(1) noundef "runtime-live" %recv) #[[CALLATTR:[0-9]+]]
+; CHECK: invoke hotspotcc ptr addrspace(1) @"InlineTest$D_m()Ljava/lang/Object;"(ptr addrspace(1) noundef %recv) #[[CALLATTR:[0-9]+]]
 ; CHECK-SAME: [ "deopt"(
 ; CHECK: declare hotspotcc ptr addrspace(1) @"InlineTest$D_m()Ljava/lang/Object;"(ptr addrspace(1)) #[[TARGETATTR:[0-9]+]] gc "hotspotgc"
 ; CHECK: attributes #[[TARGETATTR]] = { "java-method"="135644198486144" }

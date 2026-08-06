@@ -40,7 +40,7 @@ unwind:
 ; Devirtualization happens only when Exact=true is propagated through typeIntersect.
 ; CHECK-LABEL: define hotspotcc i32 @caller(
 ; CHECK: call hotspotcc i1 @jeandle.check_instanceof(ptr inttoptr (i64 600 to ptr), ptr addrspace(1) %recv)
-; CHECK: invoke hotspotcc i32 @Optimized_target(ptr addrspace(1) noundef "runtime-live" %recv)
+; CHECK: invoke hotspotcc i32 @Optimized_target(ptr addrspace(1) noundef %recv)
 ; CHECK: "monomorphic-target"
 
 attributes #0 = { "java-method"="100" }

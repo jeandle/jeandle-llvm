@@ -452,7 +452,7 @@ InlineRoundResult JeandleInliner::runInlineRound(
     // operations, while an inlined callee forwards unwind edges to the
     // caller's landingpad. Mark root callees noinline so later LLVM inline
     // passes cannot inline them either.
-    if (Callee == RootFunction) {
+    if (CalleeMethod == getJavaMethodPointer(*RootFunction)) {
       CB->setIsNoInline();
       recordInlineResult(*VC, InlineScopeID, BCI, CalleeMethod,
                          jeandle::JeandleInlineReason::RootCalleeUnsupported);
@@ -588,7 +588,9 @@ InlineRoundResult JeandleInliner::runInlineRound(
       // operations, while an inlined callee forwards unwind edges to the
       // caller's landingpad. Mark root callees noinline so later LLVM inline
       // passes cannot inline them either.
-      if (NewCallee == RootFunction) {
+      if (NewCallee && isJeandleJavaMethod(*NewCallee) &&
+          getJavaMethodPointer(*NewCallee) ==
+              getJavaMethodPointer(*RootFunction)) {
         NewCB->setIsNoInline();
         continue;
       }

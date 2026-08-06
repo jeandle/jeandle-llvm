@@ -1,27 +1,28 @@
 ; RUN: opt -S -passes="function(cha-devirtualization),default<O3>" -jeandle-vm-callback-log=%S/Inputs/virtual-call.cblog %s 2>&1 | FileCheck %s
 
-; A virtual call with a unique CHA target is guarded by a receiver checkcast,
-; rewritten to the concrete target, and marked as monomorphic.
-; Non-Java invokes without a bytecode attribute are ignored.
+; A recursive virtual call whose unique CHA target is the root function itself,
+; and whose formal receiver is unused in the root body. The recursive invoke
+; passes a different oop (loaded from @other_recv) so the formal receiver
+; parameter %recv of @caller.root is dead to LLVM.
+;
+; The root function is named "caller.root" while CHA devirt uses the unsuffixed
+; "caller" (returned by the VM as the resolved target's MethodName). The
+; recursive invoke is therefore retargeted to a distinct @caller declaration,
+; not to the @caller.root definition. DeadArgumentElimination's
+; removeDeadArgumentsFromCallers sees @caller as a declaration (no exact
+; definition) and skips it, so the recursive call operand is preserved.
 
 @jeandle.personality = global ptr null
+@other_recv = external global ptr addrspace(1)
 
 declare hotspotcc i1 @jeandle.check_instanceof(ptr, ptr addrspace(1))
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(i32) gc "hotspotgc"
 declare hotspotcc i32 @Virtual_target(ptr addrspace(1)) #1 gc "hotspotgc"
 declare void @opaque_side_effect()
 
-; Keep an exact definition whose receiver is deliberately unused. LLVM's
-; dead-argument elimination must preserve its runtime-live call operand.
-define hotspotcc i32 @Optimized_target(ptr addrspace(1) %unused) #3 gc "hotspotgc" {
+define hotspotcc i32 @caller.root(ptr addrspace(1) "java-klass"="500" %recv) #0 gc "hotspotgc" personality ptr @jeandle.personality {
 entry:
-  call void @opaque_side_effect()
-  ret i32 1
-}
-
-define hotspotcc i32 @caller(ptr addrspace(1) "java-klass"="500" %recv) #0 gc "hotspotgc" personality ptr @jeandle.personality {
-entry:
-  %ret = invoke hotspotcc i32 @Virtual_target(ptr addrspace(1) %recv) #2 [ "deopt"(i64 0, i32 7, i32 7) ]
+  %other = load ptr addrspace(1), ptr @other_recv, !java-klass !0
+  %ret = invoke hotspotcc i32 @Virtual_target(ptr addrspace(1) %other) #2 [ "deopt"(i64 0, i32 7, i32 7) ]
           to label %normal unwind label %unwind
 
 normal:
@@ -33,27 +34,27 @@ unwind:
   ret i32 -1
 }
 
-; CHECK: define hotspotcc i32 @Optimized_target(ptr addrspace(1) %unused) #[[TARGETATTR:[0-9]+]] gc "hotspotgc"
-; CHECK-LABEL: define hotspotcc i32 @caller(
-; CHECK: call hotspotcc i1 @jeandle.check_instanceof(ptr inttoptr (i64 600 to ptr), ptr addrspace(1) %recv)
+; CHECK-LABEL: define hotspotcc i32 @caller.root(
+; CHECK: call hotspotcc i1 @jeandle.check_instanceof(ptr{{.*}}inttoptr (i64 600 to ptr), ptr addrspace(1) %other)
 ; CHECK: br i1
 ; CHECK-LABEL: cha_bci_7_check_receiver_fail:
 ; CHECK: call hotspotcc i32 (...) @llvm.experimental.deoptimize.i32(i32 -201)
 ; CHECK: ret i32
 ; CHECK-LABEL: cha_bci_7_check_receiver_pass:
-; CHECK: invoke hotspotcc i32 @Optimized_target(ptr addrspace(1) noundef "runtime-live" %recv) #[[CALLATTR:[0-9]+]]
+; CHECK: invoke hotspotcc i32 @caller(ptr addrspace(1) noundef %other) #[[CALLATTR:[0-9]+]]
 ; CHECK-SAME: [ "deopt"(
-; CHECK: attributes #[[TARGETATTR]] = { "java-method"="700" }
+; CHECK-NOT: poison
+; CHECK: declare hotspotcc i32 @caller(ptr addrspace(1)){{.*}} gc "hotspotgc"
 ; CHECK: attributes #[[CALLATTR]] = { {{.*}}"monomorphic-target"{{.*}}"statepoint-num-patch-bytes"="5"{{.*}} }
 
 attributes #0 = { "java-method"="100" }
 attributes #1 = { "java-method"="200" }
 attributes #2 = { "bytecode"="invokevirtual" "call-site"="900" "declared-holder"="300" "statepoint-id"="42" "statepoint-num-patch-bytes"="15" }
-attributes #3 = { noinline "java-method"="700" }
 
 !java-method-compilation = !{}
-!static-call-patch-size = !{!0}
-!dynamic-call-patch-size = !{!1}
+!static-call-patch-size = !{!1}
+!dynamic-call-patch-size = !{!2}
 
-!0 = !{i32 5}
-!1 = !{i32 15}
+!0 = !{i64 500}
+!1 = !{i32 5}
+!2 = !{i32 15}

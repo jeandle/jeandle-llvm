@@ -49,10 +49,6 @@ public:
   static constexpr const char *MhIntrinsicName = "mh-intrinsic-name";
 
   static constexpr const char *MonomorphicTarget = "monomorphic-target";
-
-  /// Marks a call argument that remains live for the HotSpot runtime ABI even
-  /// when the visible LLVM callee does not use the corresponding parameter.
-  static constexpr const char *RuntimeLive = "runtime-live";
 };
 
 } // namespace llvm::jeandle

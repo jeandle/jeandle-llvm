@@ -11,4 +11,4 @@ GetCHAOptInfo 100 200 300 500 true 0 -1 = "600#700#50#Optimized_target"
 # Bug: Exact=false -> CHA returns no target -> the invoke stays virtual.
 # (This entry is what makes the test fail without the typeIntersect fix.)
 GetCHAOptInfo 100 200 300 500 false 0 -1 = ""
-UpdateCallSite 42 2 0 = true
+UpdateCallSite 42 2 false 700 = true
