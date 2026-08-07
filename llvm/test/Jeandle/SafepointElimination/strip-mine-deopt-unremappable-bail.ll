@@ -1,4 +1,4 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
 
 ; The poll's deopt bundle references %t, a body-computed value that is neither
 ; loop-invariant, a header phi, nor any header phi's latch-carried next value.
@@ -9,7 +9,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define i64 @sum(i64 %n) {
+define i64 @sum(i64 %n) "java-method" {
 entry:
   br label %header
 
@@ -40,4 +40,3 @@ exit:
 ; CHECK-LABEL: @sum(
 ; CHECK-NOT:   outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next, i64 %t) ]
-; CHECK-NOT:   !poll-coverage

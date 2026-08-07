@@ -1,5 +1,5 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -S < %s | FileCheck %s
 
 ; C2's counted-loop shape is post-increment: the latch compares the next IV.
@@ -8,7 +8,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define i64 @latch_exit_sum(i64 %n) {
+define i64 @latch_exit_sum(i64 noundef %n) "java-method" {
 entry:
   %entry.guard = icmp slt i64 0, %n
   br i1 %entry.guard, label %loop.preheader, label %return
@@ -43,7 +43,7 @@ return:
 ; CHECK:         %iv.next = add nuw nsw i64 %iv, 1
 ; CHECK-NOT:     call hotspotcc void @jeandle.safepoint_poll
 ; CHECK:         %cond = icmp slt i64 %iv.next, %outer.inner.limit
-; CHECK:         br i1 %cond, label %header, label %header.outer.latch, !strip-mined
+; CHECK:         br i1 %cond, label %header, label %header.outer.latch
 
 ; CHECK:       loop.exit:
 ; CHECK:         %sum.lcssa = phi i64 [ %sum.outer, %header.outer ]
@@ -55,9 +55,9 @@ return:
 ; CHECK:       header.outer.latch:
 ; CHECK:         %outer.iv.next = phi i64 [ %iv.next, %latch ]
 ; CHECK:         %sum.outer.next = phi i64 [ %sum.next, %latch ]
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %outer.iv.next, i64 %sum.outer.next) ]{{.*}}!poll-coverage
+; CHECK:         call hotspotcc void @jeandle.safepoint_poll() #{{[0-9]+}} [ "deopt"(i64 %outer.iv.next, i64 %sum.outer.next) ]
 
-define void @latch_exit_swapped(i64 %n) {
+define void @latch_exit_swapped(i64 noundef %n) "java-method" {
 entry:
   %entry.guard = icmp slt i64 0, %n
   br i1 %entry.guard, label %loop.preheader, label %return
@@ -85,13 +85,13 @@ return:
 ; CHECK-LABEL: @latch_exit_swapped(
 ; CHECK:       latch:
 ; CHECK:         %cond = icmp sgt i64 %outer.inner.limit, %iv.next
-; CHECK:         br i1 %cond, label %header, label %header.outer.latch, !strip-mined
+; CHECK:         br i1 %cond, label %header, label %header.outer.latch
 ; CHECK:       header.outer:
 ; CHECK:         %outer.cond = icmp slt i64 %outer.iv, %n
 ; CHECK:       header.outer.latch:
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %outer.iv.next) ]{{.*}}!poll-coverage
+; CHECK:         call hotspotcc void @jeandle.safepoint_poll() #{{[0-9]+}} [ "deopt"(i64 %outer.iv.next) ]
 
-define void @latch_exit_exit_on_true(i64 %n) {
+define void @latch_exit_exit_on_true(i64 noundef %n) "java-method" {
 entry:
   %entry.guard = icmp slt i64 0, %n
   br i1 %entry.guard, label %loop.preheader, label %return
@@ -119,10 +119,10 @@ return:
 ; CHECK-LABEL: @latch_exit_exit_on_true(
 ; CHECK:       latch:
 ; CHECK:         %done = icmp sge i64 %iv.next, %outer.inner.limit
-; CHECK:         br i1 %done, label %header.outer.latch, label %header, !strip-mined
+; CHECK:         br i1 %done, label %header.outer.latch, label %header
 ; CHECK:       header.outer:
 ; CHECK:         %outer.cond = icmp slt i64 %outer.iv, %n
 ; CHECK:       header.outer.latch:
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %outer.iv.next) ]{{.*}}!poll-coverage
+; CHECK:         call hotspotcc void @jeandle.safepoint_poll() #{{[0-9]+}} [ "deopt"(i64 %outer.iv.next) ]
 
 !java-method-compilation = !{}

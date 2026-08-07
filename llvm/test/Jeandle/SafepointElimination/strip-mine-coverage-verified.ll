@@ -1,16 +1,17 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -S < %s 2>&1 | FileCheck %s
 
 ; After strip mining, the inner loop runs poll-free with a bound SCEV can't
 ; recover (clamped select). The fatal coverage verifier must still pass: the
-; inner latch carries !strip-mined (bounded by construction) and the
-; outer loop carries the relocated poll. A coverage violation would abort the
-; compile, so reaching FileCheck at all proves the verifier accepted the nest.
+; relocated poll on the outer back-edge carries the "jeandle.strip-mined-poll"
+; attribute that marks the nest (bounded by construction). A coverage violation
+; would abort the compile, so reaching FileCheck at all proves the verifier
+; accepted the nest.
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @loop(i64 %n) {
+define void @loop(i64 %n) "java-method" {
 entry:
   br label %header
 
@@ -34,5 +35,5 @@ exit:
 !java-method-compilation = !{}
 
 ; CHECK-NOT: SafepointCoverageVerifier
-; CHECK:     br label %header, !strip-mined
-; CHECK:     call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CHECK:     call hotspotcc void @jeandle.safepoint_poll() #[[POLLATTR:[0-9]+]]
+; CHECK:     attributes #[[POLLATTR]] = { "jeandle.strip-mined-poll" }

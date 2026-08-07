@@ -1,4 +1,4 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
 
 ; |step| > 1 without a provable no-wrap fact can step past the type extreme,
 ; wrap to the other side, and then run a huge poll-free span before reaching
@@ -6,7 +6,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @wrap(i64 %n) {
+define void @wrap(i64 %n) "java-method" {
 entry:
   br label %header
 
@@ -27,7 +27,7 @@ exit:
   ret void
 }
 
-define void @wrap_down(i64 %n) {
+define void @wrap_down(i64 %n) "java-method" {
 entry:
   br label %header
 
@@ -53,9 +53,7 @@ exit:
 ; CHECK-LABEL: @wrap(
 ; CHECK-NOT:   outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
-; CHECK-NOT:   !poll-coverage
 
 ; CHECK-LABEL: @wrap_down(
 ; CHECK-NOT:   outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
-; CHECK-NOT:   !poll-coverage

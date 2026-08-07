@@ -1,11 +1,11 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>,verify' \
-; RUN:   -jeandle-enable-strip-mining -S < %s > %t
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify' \
+; RUN:   -S < %s > %t
 ; RUN: FileCheck %s --input-file=%t
 ; RUN: FileCheck %s --input-file=%t --check-prefix=OUTERS
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @two_safe_loops(i64 %n) {
+define void @two_safe_loops(i64 %n) "java-method" {
 entry:
   br label %h1
 h1:
@@ -36,17 +36,17 @@ exit:
 
 ; CHECK-LABEL: @two_safe_loops(
 ; CHECK-NOT:     call hotspotcc void @jeandle.safepoint_poll()
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CHECK:         call hotspotcc void @jeandle.safepoint_poll()
 ; CHECK-NOT:     call hotspotcc void @jeandle.safepoint_poll()
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CHECK:         call hotspotcc void @jeandle.safepoint_poll()
 ; CHECK-NOT:     call hotspotcc void @jeandle.safepoint_poll()
 
 ; OUTERS-LABEL: @two_safe_loops(
-; OUTERS-DAG:   h1.outer:
-; OUTERS-DAG:   h2.outer:
+; OUTERS-DAG:   b1.outer:
+; OUTERS-DAG:   b2.outer:
 ; OUTERS-LABEL: @safe_then_unsafe_loop(
 
-define void @safe_then_unsafe_loop(i64 %n, ptr %p) {
+define void @safe_then_unsafe_loop(i64 %n, ptr %p) "java-method" {
 entry:
   br label %h1
 h1:
@@ -78,8 +78,8 @@ exit:
 
 ; CHECK-LABEL: @safe_then_unsafe_loop(
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %j.next) ]
-; CHECK-NEXT:  store volatile i64 %j, ptr %p
-; CHECK:       h1.outer:
-; CHECK-NOT:   h2.outer
+; CHECK-NEXT:  store volatile i64 %j{{[0-9]*}}, ptr %p
+; CHECK:       b1.outer:
+; CHECK-NOT:   b2.outer
 
 !java-method-compilation = !{}

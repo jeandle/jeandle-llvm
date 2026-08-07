@@ -1,4 +1,4 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
 
 ; A strict in-range inclusive limit is not enough for |step| > 1: with
 ; limit == INT64_MAX - 1, a step-2 IV can overflow after executing the limit
@@ -7,7 +7,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @incl_step2() {
+define void @incl_step2() "java-method" {
 entry:
   br label %header
 
@@ -28,7 +28,7 @@ exit:
   ret void
 }
 
-define void @incl_step2_sub_form_bails(i64 %raw) {
+define void @incl_step2_sub_form_bails(i64 %raw) "java-method" {
 entry:
   %n = and i64 %raw, 1000000
   br label %header
@@ -50,7 +50,7 @@ exit:
   ret void
 }
 
-define void @uincl_step2_uintmax_minus1_bails() {
+define void @uincl_step2_uintmax_minus1_bails() "java-method" {
 entry:
   br label %header
 
@@ -71,7 +71,7 @@ exit:
   ret void
 }
 
-define void @incl_dec_step2_intmin_plus1_bails() {
+define void @incl_dec_step2_intmin_plus1_bails() "java-method" {
 entry:
   br label %header
 
@@ -92,7 +92,7 @@ exit:
   ret void
 }
 
-define void @uincl_dec_step2_one_bails() {
+define void @uincl_dec_step2_one_bails() "java-method" {
 entry:
   br label %header
 
@@ -118,24 +118,19 @@ exit:
 ; CHECK-LABEL: @incl_step2(
 ; CHECK-NOT:   outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
-; CHECK-NOT:   !poll-coverage
 
 ; CHECK-LABEL: @incl_step2_sub_form_bails(
 ; CHECK-NOT:   outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
-; CHECK-NOT:   !poll-coverage
 
 ; CHECK-LABEL: @uincl_step2_uintmax_minus1_bails(
 ; CHECK-NOT:   outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
-; CHECK-NOT:   !poll-coverage
 
 ; CHECK-LABEL: @incl_dec_step2_intmin_plus1_bails(
 ; CHECK-NOT:   outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
-; CHECK-NOT:   !poll-coverage
 
 ; CHECK-LABEL: @uincl_dec_step2_one_bails(
 ; CHECK-NOT:   outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
-; CHECK-NOT:   !poll-coverage

@@ -1,10 +1,10 @@
-; RUN: opt -passes='loop-simplify,lcssa,safepoint-elimination<inclusive-loop-versioning>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-enable-inclusive-loop-versioning \
-; RUN:   -jeandle-safepoint-chunk-iters=8 -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='loop-simplify,lcssa,safepoint-strip-mining<inclusive-loop-versioning>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-enable-inclusive-loop-versioning \
+; RUN:   -jeandle-loop-strip-mining-iter=8 -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -verify-each -S < %s | FileCheck %s
-; RUN: opt -passes='early-cse,instcombine,simplifycfg,loop-simplify,lcssa,safepoint-elimination<inclusive-loop-versioning>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-enable-inclusive-loop-versioning \
-; RUN:   -jeandle-safepoint-chunk-iters=8 -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='early-cse,instcombine,simplifycfg,loop-simplify,lcssa,safepoint-strip-mining<inclusive-loop-versioning>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-enable-inclusive-loop-versioning \
+; RUN:   -jeandle-loop-strip-mining-iter=8 -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -verify-each -S < %s | FileCheck %s --check-prefix=PIPELINE
 
 ; Minimized from the frontend input for a nested Java loop. The positive loop
@@ -17,7 +17,7 @@
 declare hotspotcc void @jeandle.safepoint_poll()
 
 define i64 @nested_runtime_inclusive_with_outer_poll(i32 %outer.trips,
-                                                      i32 %start, i32 %limit) {
+                                                      i32 %start, i32 %limit) "java-method" {
 entry:
   br label %outer.header
 
@@ -60,7 +60,7 @@ exit:
 }
 
 define void @nested_inner_poll_required_by_ancestor(i32 %outer.trips,
-                                                     i32 %start, i32 %limit) {
+                                                     i32 %start, i32 %limit) "java-method" {
 entry:
   br label %outer.header
 
@@ -94,7 +94,7 @@ exit:
 ; CHECK-DAG:   inner.header.inclusive.slow:
 ; CHECK-NOT:   inner.header.inclusive.slow.outer
 ; CHECK-DAG:   inner.header.outer.latch:
-; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll()
 ; CHECK-DAG:   outer.latch:
 ; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i32 %outer.next, i64 %sum.after) ]
 

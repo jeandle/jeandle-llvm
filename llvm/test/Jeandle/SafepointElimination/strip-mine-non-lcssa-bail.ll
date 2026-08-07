@@ -1,4 +1,4 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
 
 ; The loop value %iv is used directly in the exit (`ret %iv`) rather than
 ; through an LCSSA phi. Strip mining would move the exit edge to the outer
@@ -7,7 +7,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define i64 @loop(i64 %n) {
+define i64 @loop(i64 %n) "java-method" {
 entry:
   br label %header
 
@@ -33,4 +33,3 @@ exit:
 ; CHECK-LABEL: @loop(
 ; CHECK-NOT:   outer
 ; CHECK:         call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
-; CHECK-NOT:   !poll-coverage

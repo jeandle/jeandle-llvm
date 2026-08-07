@@ -1,4 +1,4 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
+; RUN: opt -passes=safepoint-poll-elimination -S < %s | FileCheck %s
 
 ; Module is NOT marked as a compiled Java method (no !java-method-compilation
 ; named metadata). The pass must bail before touching anything, so the two

@@ -1,0 +1,4 @@
+# Both seeds klass 5 (no LCA needed). field@16 of 5 -> 7.
+GetFieldType 5 16 = 7
+IsUnverifiedInterface 7 = false
+IsEffectivelyFinal 7 = false

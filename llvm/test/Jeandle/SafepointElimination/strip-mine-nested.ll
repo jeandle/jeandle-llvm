@@ -1,5 +1,5 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -S < %s 2>&1 | FileCheck %s
 
 ; A nested loop with a back-edge poll at each level. Strip mining fires only on
@@ -11,7 +11,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @nested(i64 %m, i64 %n) {
+define void @nested(i64 %m, i64 %n) "java-method" {
 entry:
   br label %outer.h
 
@@ -47,15 +47,16 @@ exit:
 
 !java-method-compilation = !{}
 
-; The innermost loop is marked strip-mined and runs poll-free.
+; The innermost loop runs poll-free; its nest is marked via the relocated
+; poll's attribute.
 ; CHECK:       inner.lat:
-; CHECK:         br label %inner.h, !strip-mined
 
 ; The outer loop keeps its own back-edge poll, untouched.
 ; CHECK:       outer.lat:
-; CHECK-NEXT:    call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %i) ]
+; CHECK-NEXT:    call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %i{{[0-9]*}}) ]
 
 ; The inner poll is relocated to the strip-mined outer latch with %j remapped to
 ; the batch-boundary recurrence and %i (invariant to the inner loop) preserved.
-; CHECK:       inner.h.outer.latch:
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %i, i64 %outer.iv.next) ]{{.*}}!poll-coverage
+; CHECK:       inner.body.outer.latch:
+; CHECK:         call hotspotcc void @jeandle.safepoint_poll() #{{[0-9]+}} [ "deopt"(i64 %i{{[0-9]*}}, i64 %outer.iv.next) ]
+; CHECK:       attributes #{{[0-9]+}} = { "jeandle.strip-mined-poll" }

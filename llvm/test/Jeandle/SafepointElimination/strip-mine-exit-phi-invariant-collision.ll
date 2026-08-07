@@ -1,12 +1,12 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
 
-; A lifted recurrence can carry a loop-invariant latch value. Exit LCSSA fixup
-; must not key remaps on that invariant, or an unrelated equal constant leaking
-; out through the exit phi can be rewritten to the recurrence's outer phi.
+; Loop canonicalization removes the unused %x recurrence. The unrelated equal
+; constant leaking through the exit phi must remain 42 while the primary exit
+; is rewired through the outer loop.
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define i64 @invariant_exit_phi_collision(i64 %n) {
+define i64 @invariant_exit_phi_collision(i64 %n) "java-method" {
 entry:
   br label %header
 
@@ -32,7 +32,8 @@ exit:
 !java-method-compilation = !{}
 
 ; CHECK-LABEL: @invariant_exit_phi_collision(
+; CHECK:       header.exit_crit_edge:
+; CHECK:         %split = phi i64 [ 42, %body.outer ]
 ; CHECK:       exit:
-; CHECK:         %r = phi i64 [ 42, %header.outer ]
-; CHECK:       header.outer:
-; CHECK:         %x.outer = phi i64 [ 7, %header.outer.ph ], [ %x.outer.next, %header.outer.latch ]
+; CHECK:         %r = phi i64 [ %split, %header.exit_crit_edge ], [ 42, %entry ]
+; CHECK-NOT:   %x.outer

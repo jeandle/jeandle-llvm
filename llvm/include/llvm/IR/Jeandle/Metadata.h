@@ -24,6 +24,8 @@ public:
   static constexpr const char *JavaMethodCompilation =
       "java-method-compilation";
 
+  static constexpr const char *DynamicCallPatchSize = "dynamic-call-patch-size";
+
   static constexpr const char *StaticCallPatchSize = "static-call-patch-size";
 
   static constexpr const char *JavaKlass = "java-klass";
@@ -32,17 +34,11 @@ public:
 
   static constexpr const char *InlineScopeID = "inline-scope-id";
 
-  // Set by SafepointElimination on a poll that is its loop's required coverage;
-  // the keep-one/collapse rules must not delete the last one so tagged.
-  static constexpr const char *PollCoverage = "poll-coverage";
+  // Set by inclusive loop versioning on the latch of the slow-path clone so the
+  // later strip-mining pass skips it instead of trying to version it again.
+  static constexpr const char *InclusiveSlowPath = "jeandle.inclusive.slow";
 
-  // Set by strip mining on the inner latch to identify a poll-free inner loop
-  // whose bound must be validated structurally by the coverage verifier. Branch
-  // metadata is droppable by later passes (e.g. SimplifyCFG folding the latch),
-  // so this marker is only useful between SafepointElimination and the verifier
-  // that immediately follows it — do not move the verifier later in the
-  // pipeline expecting this to survive.
-  static constexpr const char *StripMined = "strip-mined";
+  static constexpr const char *SkipSafepointCoverageVerifier = "skip-safepoint-coverage-verifier";
 };
 
 enum AddrSpace : unsigned {

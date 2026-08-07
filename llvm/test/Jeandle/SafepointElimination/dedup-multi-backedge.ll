@@ -1,4 +1,4 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
+; RUN: opt -passes=safepoint-poll-elimination -S < %s | FileCheck %s
 
 ; Two backward branches (a `continue`-style shape) and no LoopSimplify run
 ; before this pass, so the loop has no unique latch. Keep-one must bail and
@@ -6,7 +6,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @two_backedges(i64 %n, i1 %c) gc "safepoint-in-loop-example" {
+define void @two_backedges(i64 %n, i1 %c) "java-method" gc "safepoint-in-loop-example" {
 entry:
   br label %loop.header
 

@@ -1,15 +1,15 @@
 ; RUN: opt -verify-each \
-; RUN:   -passes='function(safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>,safepoint-elimination<loop-deletion-prep>,verify<jeandle-safepoint-coverage>)' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-verify-safepoint-coverage=fatal \
+; RUN:   -passes='function(safepoint-poll-elimination<loop-deletion-prep>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>,safepoint-poll-elimination<loop-deletion-prep>,verify<jeandle-safepoint-coverage>)' \
+; RUN:   -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -S < %s \
 ; RUN:   | FileCheck %s --check-prefix=ATOMIC
 ; RUN: opt -verify-each \
-; RUN:   -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>,safepoint-elimination<loop-deletion-prep>),java-operation-lower<phase=1>,default<O3>,rewrite-statepoints-for-gc,verify' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-verify-safepoint-coverage=fatal \
+; RUN:   -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-poll-elimination<loop-deletion-prep>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>,safepoint-poll-elimination<loop-deletion-prep>),java-operation-lower<phase=1>,default<O3>,rewrite-statepoints-for-gc,verify' \
+; RUN:   -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -S < %s | FileCheck %s --check-prefix=O3
 ; RUN: opt -verify-each \
-; RUN:   -passes='function(verify<jeandle-safepoint-coverage>,safepoint-elimination<loop-deletion-prep>,verify<jeandle-safepoint-coverage>)' \
-; RUN:   -jeandle-enable-strip-mining=false \
+; RUN:   -passes='function(verify<jeandle-safepoint-coverage>,safepoint-poll-elimination<loop-deletion-prep>,verify<jeandle-safepoint-coverage>)' \
+; RUN:   -jeandle-loop-strip-mining-iter=0 \
 ; RUN:   -jeandle-verify-safepoint-coverage=fatal -S < %s \
 ; RUN:   | FileCheck %s --check-prefix=NO-STRIP
 
@@ -24,7 +24,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define i64 @deletes_rotated_empty_loop(i32 %n, ptr %slot) {
+define i64 @deletes_rotated_empty_loop(i32 %n, ptr %slot) "java-method" {
 entry:
   %positive = icmp sgt i32 %n, 0
   br i1 %positive, label %preheader, label %exit
@@ -66,12 +66,12 @@ exit:
 ; O3-LABEL: @deletes_rotated_empty_loop(
 ; O3-NOT:   loop:
 ; O3-NOT:   %iv = phi
-; O3-NOT:   !strip-mined
+; O3-NOT:   jeandle.strip-mined-poll
 ; O3:       call hotspotcc void @jeandle.safepoint_poll()
 
 ; This is the earlier frontend shape. Loop rotation and LICM mutate it into the
 ; do-while form above before the production strip-mining pass runs.
-define i64 @deletes_pipeline_mutated_frontend_loop(i32 %n, ptr %slot) {
+define i64 @deletes_pipeline_mutated_frontend_loop(i32 %n, ptr %slot) "java-method" {
 entry:
   br label %header
 
@@ -103,12 +103,12 @@ exit:
 ; O3-LABEL: @deletes_pipeline_mutated_frontend_loop(
 ; O3-NOT:   header:
 ; O3-NOT:   %iv = phi
-; O3-NOT:   !strip-mined
+; O3-NOT:   jeandle.strip-mined-poll
 ; O3:       call hotspotcc void @jeandle.safepoint_poll()
 
 ; The inner poll is the only safepoint that dominates the unbounded outer
 ; latch. Deleting the inner loop would uncover the outer loop, so retain it.
-define void @keeps_empty_loop_required_by_unbounded_ancestor(i32 %n) {
+define void @keeps_empty_loop_required_by_unbounded_ancestor(i32 %n) "java-method" {
 entry:
   br label %outer.header
 
@@ -141,7 +141,7 @@ outer.latch:
 
 ; Once the outer loop has independent all-path coverage, the inner empty loop
 ; can be removed without weakening time-to-safepoint coverage.
-define void @deletes_empty_loop_when_ancestor_has_own_poll(i32 %n) {
+define void @deletes_empty_loop_when_ancestor_has_own_poll(i32 %n) "java-method" {
 entry:
   br label %outer.header
 
@@ -173,7 +173,7 @@ outer.latch:
 
 ; A real memory side effect is not an empty loop even when the stored value is
 ; invariant. The loop and some safepoint coverage must remain.
-define void @keeps_loop_with_store(i32 %n, ptr %out) {
+define void @keeps_loop_with_store(i32 %n, ptr %out) "java-method" {
 entry:
   %positive = icmp sgt i32 %n, 0
   br i1 %positive, label %preheader, label %exit
@@ -199,7 +199,7 @@ exit:
 
 ; This pure recurrence contributes to the return value but has no SCEV exit
 ; expression. Conservatively retain the loop instead of guessing its live-out.
-define i32 @keeps_loop_with_unrepresentable_liveout(i32 %n) {
+define i32 @keeps_loop_with_unrepresentable_liveout(i32 %n) "java-method" {
 entry:
   %positive = icmp sgt i32 %n, 0
   br i1 %positive, label %preheader, label %exit.zero
@@ -226,11 +226,13 @@ exit.zero:
 
 ; ATOMIC-LABEL: @keeps_loop_with_unrepresentable_liveout(
 ; ATOMIC:         %acc.next = xor i32
-; ATOMIC:         call hotspotcc void @jeandle.safepoint_poll()
+; ATOMIC:         .outer
+; ATOMIC:         call hotspotcc void @jeandle.safepoint_poll() #{{[0-9]+}}
 
 ; A droppable intrinsic may still report memory side effects, so the atomic
-; empty-loop deletion must retain this loop and its safepoint coverage.
-define void @keeps_loop_with_droppable_side_effect(i32 %len, ptr %slot) {
+; empty-loop deletion retains the loop. The llvm.assume is also a relocation
+; hazard, so the loop is not strip-mined and its back-edge poll is kept.
+define void @keeps_loop_with_droppable_side_effect(i32 %len, ptr %slot) "java-method" {
 entry:
   br label %loop
 
@@ -259,16 +261,20 @@ exit:
 ; ATOMIC:         %remaining.next = add i32 %remaining, -12
 ; ATOMIC-NEXT:    %assume.condition = icmp ne i32 %remaining.next, 123456789
 ; ATOMIC-NEXT:    call void @llvm.assume(i1 %assume.condition)
-; ATOMIC-NEXT:    br label %loop, !strip-mined
-; ATOMIC:       loop.outer.latch:
+; ATOMIC-NEXT:    call hotspotcc void @jeandle.safepoint_poll()
+; ATOMIC-NEXT:    br label %loop
+; ATOMIC-NOT:     jeandle.strip-mined-poll
+; ATOMIC:       exit:
 ; ATOMIC:         call hotspotcc void @jeandle.safepoint_poll()
 
 ; O3-LABEL: @keeps_loop_with_droppable_side_effect(
 ; O3:       latch:
 ; O3:         call void @llvm.assume
+; O3-NEXT:    call hotspotcc void @jeandle.safepoint_poll()
 ; O3-NEXT:    %continue = icmp ugt i32
-; O3-NEXT:    br i1 %continue, label %latch, label %loop.outer.latch
-; O3:       loop.outer.latch:
+; O3-NEXT:    br i1 %continue, label %latch, label %exit
+; O3-NOT:     jeandle.strip-mined-poll
+; O3:       exit:
 ; O3:         call hotspotcc void @jeandle.safepoint_poll()
 
 ; NO-STRIP-LABEL: @keeps_loop_with_droppable_side_effect(
@@ -278,7 +284,7 @@ exit:
 
 ; Choosing among multiple exits would require preserving the loop's control
 ; semantics. This initial capability deliberately handles one dedicated exit.
-define i32 @keeps_empty_loop_with_multiple_exits(i32 %n, i1 %stop) {
+define i32 @keeps_empty_loop_with_multiple_exits(i32 %n, i1 %stop) "java-method" {
 entry:
   br label %loop
 
@@ -306,3 +312,5 @@ normal.exit:
 ; ATOMIC:         call hotspotcc void @jeandle.safepoint_poll()
 
 !java-method-compilation = !{}
+
+; ATOMIC:       attributes #{{[0-9]+}} = { "jeandle.strip-mined-poll" }

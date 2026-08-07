@@ -19,6 +19,7 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/Deoptimization.h"
+#include "llvm/IR/Jeandle/JavaType.h"
 
 namespace llvm {
 
@@ -51,6 +52,34 @@ void buildDeoptimize(IRBuilder<> &Builder, Module &M,
 BasicBlock *insertCheckInstanceOf(Instruction &Inst, Value *Receiver,
                                   uintptr_t Constraint, const StringRef &Prefix,
                                   DomTreeUpdater *DTU = nullptr);
+
+/// Inserts a null check guard before an instruction.
+///
+/// The original block is split at \p Inst. The pass block continues with
+///  \p Inst, while the fail block is returned.
+///
+/// \param Inst Instruction before which the guard is inserted.
+/// \param Receiver Object pointer that will do null check.
+/// \param Prefix Prefix used to name the generated basic blocks.
+/// \param DTU Optional dominator tree updater kept in sync with the new CFG,
+/// could be null.
+/// \returns If insert checknull success, return the fail block for checknull,
+/// otherwise return nullptr.
+BasicBlock *insertNullCheck(Instruction &Inst, Value *Receiver,
+                            const StringRef &Prefix,
+                            DomTreeUpdater *DTU = nullptr);
+
+/// Inserts a `jeandle.assume_java_type` identity marker before an instruction.
+///
+/// The returned value is the same oop as \p V, but carries \p T as JavaType
+/// information on the call result. This is useful when a single oop value
+/// should be interpreted with a narrower Java type at a specific use site.
+///
+/// \param V Java oop value to reinterpret.
+/// \param T Java type attached to the marker result.
+/// \param I Instruction before which the marker is inserted.
+/// \returns The marker call result.
+CallInst *insertJavaTypeAssume(Value *V, jeandle::JavaType T, Instruction *I);
 
 /// Checks whether \p attr is a valid string attribute.
 ///
@@ -100,6 +129,19 @@ inline bool getFunctionJavaMethod(const Function &F, uintptr_t &Method) {
   return parseUIntPtr(A.getValueAsString(), Method);
 }
 
+/// Finds or creates the LLVM declaration for a concrete Java method.
+///
+/// Java symbols produced by the VM include ciMethod identity so classes with
+/// the same binary name from different class loaders remain distinct.  Keep
+/// the JavaMethod attribute check as the authoritative validation when a
+/// declaration already exists (including standalone/replayed IR).
+///
+/// \returns A compatible function whose JavaMethod attribute equals \p Method,
+/// or nullptr when \p Name is already owned by another Java method/signature.
+Function *getOrInsertJavaMethodFunction(Module &M, StringRef Name,
+                                        FunctionType *Type, uintptr_t Method,
+                                        bool IsAccessor);
+
 /// Reads a named function attribute from a call and parses it as uintptr_t.
 ///
 /// \param CB Call or invoke instruction carrying the function attribute.
@@ -122,6 +164,18 @@ inline bool getUIntFnAttr(const CallBase &CB, StringRef Name, uint64_t &Out) {
   return parseUInt(A.getValueAsString(), Out);
 }
 
+/// Reads the current Java call-site BCI from a deoptimization operand bundle.
+///
+/// Jeandle deopt bundles are encoded scope by scope. Each scope starts with two
+/// adjacent i32 BCI operands; inlined callee scopes are appended after caller
+/// scopes and are preceded by a MethodType marker. The current call-site BCI is
+/// therefore the last adjacent i32 BCI pair in the bundle.
+int getCurrentDeoptBCI(const CallBase &CB);
+
+/// Reads the current Java method from a deoptimization operand bundle.
+/// Root scopes omit the MethodType marker and use \p RootMethod instead.
+uintptr_t getCurrentDeoptMethod(const CallBase &CB, uintptr_t RootMethod);
+
 /// Compute the pre called deoptimization operand bundle for a Java invoke.
 ///
 /// \param CB Java invoke. With deoptimization operand bundle present.
@@ -129,6 +183,13 @@ inline bool getUIntFnAttr(const CallBase &CB, StringRef Name, uint64_t &Out) {
 //  when entering the invoke callee.
 /// \returns Pre called deoptimization operand bundle.
 OperandBundleDef createPreCallDeoptBundle(InvokeInst &CB);
+
+// If `LI` is a load from an oop_handle_* global, return its id.
+inline std::optional<int> getOopHandleLoadId(LoadInst *LI) {
+  if (!LI || !jeandle::isJavaOopType(LI->getType()))
+    return std::nullopt;
+  return jeandle::getOopHandleId(LI->getPointerOperand());
+}
 
 } // namespace llvm
 

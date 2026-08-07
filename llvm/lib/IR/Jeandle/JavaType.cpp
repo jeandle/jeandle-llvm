@@ -285,7 +285,15 @@ JavaType jeandle::typeIntersect(JavaType A, JavaType B) {
   if (A.isKnown() && B.isKnown()) {
     const VMCallbacks *CB = getVMCallbacks();
     assert(CB && CB->IsSubtype && "VMCallbacks must be set");
-    if (CB->IsSubtype(A.Klass, B.Klass)) {
+    if (A.Klass == B.Klass) {
+      // Equal klass: Exact is conjunctive. Exact=true is the stricter claim
+      // ("value is exactly this class"), so if either operand is exact the
+      // intersection is exact. IsSubtype is reflexive, so without this case
+      // the first branch below would win and silently drop the other side's
+      // Exact. (Dual of typeUnion's A.Exact && B.Exact for the equal case.)
+      Result.Klass = A.Klass;
+      Result.Exact = A.Exact || B.Exact;
+    } else if (CB->IsSubtype(A.Klass, B.Klass)) {
       Result.Klass = A.Klass;
       Result.Exact = A.Exact;
     } else if (CB->IsSubtype(B.Klass, A.Klass)) {
@@ -1007,6 +1015,12 @@ static JavaType sharpenFromDominators(Value *V, Instruction *Context,
                         << " from dominating check in " << BB->getName()
                         << "\n");
       assert(CB->IsEffectivelyFinal && "IsEffectivelyFinal must be set");
+      // Exact is a pure function of the klass (IsEffectivelyFinal), not carried
+      // in from an independent source. So when Klass == Best.Klass — the
+      // reflexive IsSubtype branch below — IsExact already equals Best.Exact
+      // and the assignment is a no-op. Contrast typeIntersect, whose operands'
+      // Exact come from different provenances and can diverge for the same
+      // klass.
       bool IsExact = CB->IsEffectivelyFinal(Klass);
       if (!Best.isKnown()) {
         Best.Klass = Klass;

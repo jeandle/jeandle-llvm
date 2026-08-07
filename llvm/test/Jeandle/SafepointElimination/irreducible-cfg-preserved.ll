@@ -1,4 +1,4 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
+; RUN: opt -passes=safepoint-poll-elimination -S < %s | FileCheck %s
 ; RUN: opt -passes='verify<jeandle-safepoint-coverage>' \
 ; RUN:   -jeandle-verify-safepoint-coverage=warn -S < %s 2>&1 \
 ; RUN:   | FileCheck %s --check-prefix=VERIFY
@@ -8,11 +8,12 @@
 ; dominator chain, keep the header poll, and erase the cycle's polls — leaving
 ; a thread that spins in A<->B with no safepoint. The whole-function
 ; irreducible-CFG bail must prevent that: all three polls survive. The verifier
-; reports the function as unverifiable rather than falsely certifying it.
+; also skips the function because neither safepoint transform changes its loop
+; polls.
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @irreducible_inner(i64 %n, i1 %c1, i1 %c2, i1 %c3) gc "safepoint-in-loop-example" {
+define void @irreducible_inner(i64 %n, i1 %c1, i1 %c2, i1 %c3) "java-method" gc "safepoint-in-loop-example" {
 entry:
   br label %H
 
@@ -48,4 +49,4 @@ exit:
 ; CHECK:       B:
 ; CHECK:         call hotspotcc void @jeandle.safepoint_poll()
 
-; VERIFY: SafepointCoverageVerifier: function 'irreducible_inner' has an irreducible CFG; coverage not verified
+; VERIFY-NOT: SafepointCoverageVerifier:

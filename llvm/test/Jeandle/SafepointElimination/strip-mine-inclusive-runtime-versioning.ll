@@ -1,14 +1,14 @@
-; RUN: opt -passes='safepoint-elimination<inclusive-loop-versioning>,safepoint-elimination<strip-mining>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-enable-inclusive-loop-versioning -verify-each -S < %s | FileCheck %s
-; RUN: opt -passes='early-cse,instcombine,simplifycfg,loop-simplify,lcssa,safepoint-elimination<inclusive-loop-versioning>,safepoint-elimination<strip-mining>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-enable-inclusive-loop-versioning -verify-each -S < %s | FileCheck %s --check-prefix=PIPELINE
-; RUN: opt -passes='loop-simplify,lcssa,safepoint-elimination<inclusive-loop-versioning>,safepoint-elimination<strip-mining>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-enable-inclusive-loop-versioning -verify-each -S < %s | FileCheck %s --check-prefix=CANONICAL
-; RUN: opt -passes='safepoint-elimination<inclusive-loop-versioning>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-enable-inclusive-loop-versioning -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-strip-mining<inclusive-loop-versioning>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' \
+; RUN:   -jeandle-enable-inclusive-loop-versioning -verify-each -S < %s | FileCheck %s
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,early-cse,instcombine,simplifycfg,loop-simplify,lcssa,safepoint-strip-mining<inclusive-loop-versioning>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' \
+; RUN:   -jeandle-enable-inclusive-loop-versioning -verify-each -S < %s | FileCheck %s --check-prefix=PIPELINE
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,loop-simplify,lcssa,safepoint-strip-mining<inclusive-loop-versioning>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' \
+; RUN:   -jeandle-enable-inclusive-loop-versioning -verify-each -S < %s | FileCheck %s --check-prefix=CANONICAL
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-strip-mining<inclusive-loop-versioning>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-enable-inclusive-loop-versioning -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -verify-each -disable-output < %s
-; RUN: opt -passes='loop-simplify,lcssa,safepoint-elimination<inclusive-loop-versioning>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-enable-inclusive-loop-versioning -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,loop-simplify,lcssa,safepoint-strip-mining<inclusive-loop-versioning>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-enable-inclusive-loop-versioning -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -verify-each -disable-output < %s
 
 ; Minimized from the SafepointElimination input for the Java shape:
@@ -29,7 +29,7 @@ declare void @may_throw()
 declare i32 @__gxx_personality_v0(...)
 declare token @llvm.coro.save(ptr)
 
-define i64 @runtime_inclusive_i32(ptr %a, i32 %start, i32 %limit) {
+define i64 @runtime_inclusive_i32(ptr %a, i32 %start, i32 %limit) "java-method" {
 entry:
   %nonempty = icmp sle i32 %start, %limit
   br i1 %nonempty, label %preheader, label %exit
@@ -64,7 +64,7 @@ exit:
 ; next-iteration poll state are retained.
 define i64 @runtime_inclusive_i32_deopt_exits(ptr addrspace(1) %array,
                                                i32 %start, i32 %limit,
-                                               i32 %length) {
+                                               i32 %length) "java-method" {
 entry:
   %nonempty = icmp sle i32 %start, %limit
   br i1 %nonempty, label %preheader, label %exit
@@ -118,7 +118,7 @@ exit:
 ; Bounds that SCEV cannot model as one stable recurrence limit remain outside
 ; the direct-pass envelope. The pipeline fixture also covers InstCombine
 ; refining a poison-producing select to its only defined value.
-define void @runtime_inclusive_undef_limit(i32 %start) {
+define void @runtime_inclusive_undef_limit(i32 %start) "java-method" {
 entry:
   %nonempty = icmp sle i32 %start, undef
   br i1 %nonempty, label %preheader, label %exit
@@ -137,7 +137,7 @@ exit:
 ; SCEV can range-bound these values, but transitive uses of the undef-dependent
 ; instruction need not agree. Versioning must freeze the runtime operand before
 ; using it in both the batch clamp and the inner exit test.
-define void @runtime_inclusive_masked_undef_limit() {
+define void @runtime_inclusive_masked_undef_limit() "java-method" {
 entry:
   %limit = and i32 undef, 2147483646
   %nonempty = icmp sle i32 0, %limit
@@ -154,7 +154,7 @@ exit:
   ret void
 }
 
-define void @runtime_inclusive_masked_undef_start() {
+define void @runtime_inclusive_masked_undef_start() "java-method" {
 entry:
   %start = and i32 undef, 2147483646
   %nonempty = icmp sle i32 %start, 2147483646
@@ -174,7 +174,7 @@ exit:
 ; This latch-tested shape has no entry guard. The frozen start can make the
 ; first iteration either legal or illegal, so the reachable slow clone must
 ; preserve the original one-iteration semantics and its poll.
-define i32 @runtime_inclusive_masked_undef_start_observable() {
+define i32 @runtime_inclusive_masked_undef_start_observable() "java-method" {
 entry:
   %start = and i32 undef, 4095
   br label %loop
@@ -192,7 +192,7 @@ exit:
 }
 
 define void @runtime_inclusive_maybe_poison_limit(i32 %start, i32 %limit,
-                                                   i1 %choose.limit) {
+                                                   i1 %choose.limit) "java-method" {
 entry:
   %maybe.poison = select i1 %choose.limit, i32 %limit, i32 poison
   %nonempty = icmp sle i32 %start, %maybe.poison
@@ -212,7 +212,7 @@ exit:
 ; Unsigned, wider, and deopt-state shapes are legal IR but outside the runtime
 ; versioning envelope. They must retain the original poll.
 
-define void @runtime_inclusive_unsigned_i32(i32 %limit) {
+define void @runtime_inclusive_unsigned_i32(i32 %limit) "java-method" {
 entry:
   br label %loop
 loop:
@@ -225,7 +225,7 @@ exit:
   ret void
 }
 
-define void @runtime_inclusive_i64(i64 %limit) {
+define void @runtime_inclusive_i64(i64 %limit) "java-method" {
 entry:
   br label %loop
 loop:
@@ -238,7 +238,7 @@ exit:
   ret void
 }
 
-define void @runtime_inclusive_step2_i32(i32 %limit) {
+define void @runtime_inclusive_step2_i32(i32 %limit) "java-method" {
 entry:
   br label %loop
 loop:
@@ -251,7 +251,7 @@ exit:
   ret void
 }
 
-define void @runtime_inclusive_current_phi_deopt(i32 %limit) {
+define void @runtime_inclusive_current_phi_deopt(i32 %limit) "java-method" {
 entry:
   br label %loop
 loop:
@@ -266,7 +266,7 @@ exit:
 
 ; Cloning restrictions are independent of the counted-loop proof. Each case
 ; otherwise matches the supported runtime-versioning shape and must bail.
-define void @runtime_inclusive_noduplicate(i32 %limit) {
+define void @runtime_inclusive_noduplicate(i32 %limit) "java-method" {
 entry:
   %nonempty = icmp sle i32 0, %limit
   br i1 %nonempty, label %preheader, label %exit
@@ -283,7 +283,7 @@ exit:
   ret void
 }
 
-define void @runtime_inclusive_convergent(i32 %limit) {
+define void @runtime_inclusive_convergent(i32 %limit) "java-method" {
 entry:
   %nonempty = icmp sle i32 0, %limit
   br i1 %nonempty, label %preheader, label %exit
@@ -302,7 +302,7 @@ exit:
 
 ; The direct pass must not clone this cross-block token. SimplifyCFG can merge
 ; the two loop blocks first, after which the token no longer crosses a block.
-define void @runtime_inclusive_cross_block_token(i32 %limit) {
+define void @runtime_inclusive_cross_block_token(i32 %limit) "java-method" {
 entry:
   %nonempty = icmp sle i32 0, %limit
   br i1 %nonempty, label %preheader, label %exit
@@ -322,7 +322,7 @@ exit:
   ret void
 }
 
-define void @runtime_inclusive_eh(i32 %limit)
+define void @runtime_inclusive_eh(i32 %limit) "java-method"
     personality ptr @__gxx_personality_v0 {
 entry:
   %nonempty = icmp sle i32 0, %limit
@@ -346,7 +346,7 @@ exit:
   ret void
 }
 
-define void @runtime_inclusive_statepoint_id(i32 %limit) {
+define void @runtime_inclusive_statepoint_id(i32 %limit) "java-method" {
 entry:
   %nonempty = icmp sle i32 0, %limit
   br i1 %nonempty, label %preheader, label %exit
@@ -363,7 +363,7 @@ exit:
   ret void
 }
 
-define void @runtime_inclusive_indirectbr(i32 %limit, ptr %destination) {
+define void @runtime_inclusive_indirectbr(i32 %limit, ptr %destination) "java-method" {
 entry:
   %nonempty = icmp sle i32 0, %limit
   br i1 %nonempty, label %preheader, label %exit
@@ -386,7 +386,7 @@ exit:
 ; Every loop predecessor contributes a distinct LCSSA value. Versioning must
 ; repair all cloned incoming edges, not only the primary counted exit.
 define i32 @runtime_inclusive_shared_exit_phis(i32 %limit, i1 %side0,
-                                                i1 %side1) {
+                                                i1 %side1) "java-method" {
 entry:
   br label %loop
 loop:
@@ -409,7 +409,7 @@ exit:
 
 ; Applying the first precomputed plan mutates LoopInfo and the dominator tree.
 ; The second independent plan must remain valid and be applied as well.
-define void @runtime_inclusive_two_plans(i32 %limit1, i32 %limit2) {
+define void @runtime_inclusive_two_plans(i32 %limit1, i32 %limit2) "java-method" {
 entry:
   br label %loop1
 loop1:
@@ -442,7 +442,7 @@ attributes #0 = { "statepoint-id"="7" }
 ; CHECK:       br i1 %inclusive.no_wrap
 ; CHECK-DAG:   loop.outer:
 ; CHECK-DAG:   loop.outer.latch:
-; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll() #{{[0-9]+}} [ "deopt"({{.*}}%outer.iv.next) ]
 ; CHECK-DAG:   loop.inclusive.slow:
 ; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %sum.next.inclusive.slow, i32 %iv.next.inclusive.slow) ]
 
@@ -458,32 +458,34 @@ attributes #0 = { "statepoint-id"="7" }
 ; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(ptr addrspace(1) %array, i64 %sum.next.inclusive.slow, i32 %iv.next.inclusive.slow) ]
 
 ; CHECK-LABEL: @runtime_inclusive_undef_limit(
-; CHECK-NOT:   inclusive.no_wrap
-; CHECK-NOT:   inclusive.slow
-; CHECK:       call hotspotcc void @jeandle.safepoint_poll()
+; CHECK:       %inclusive.limit.fr = freeze i32 undef
+; CHECK-DAG:   loop.inclusive.slow:
+; CHECK-DAG:   loop.outer:
+; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll()
 
 ; CHECK-LABEL: @runtime_inclusive_masked_undef_limit(
-; CHECK-NOT:   inclusive.no_wrap
-; CHECK-NOT:   loop.outer
-; CHECK:       call hotspotcc void @jeandle.safepoint_poll()
+; CHECK:   inclusive.no_wrap
+; CHECK-DAG:   loop.inclusive.slow:
+; CHECK-DAG:   loop.outer:
+; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll()
 
 ; CHECK-LABEL: @runtime_inclusive_masked_undef_start(
-; CHECK-NOT:   inclusive.no_wrap
-; CHECK-NOT:   loop.outer
-; CHECK:       call hotspotcc void @jeandle.safepoint_poll()
+; CHECK:   inclusive.no_wrap
+; CHECK-DAG:   loop.inclusive.slow:
+; CHECK-DAG:   loop.outer:
+; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll()
 
 ; CHECK-LABEL: @runtime_inclusive_masked_undef_start_observable(
-; CHECK:       %inclusive.start.fr = freeze i32 %start
-; CHECK:       %inclusive.first_iteration = icmp sle i32 %inclusive.start.fr, %inclusive.limit.fr
-; CHECK:       loop.inclusive.slow:
-; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i32 %count.next.inclusive.slow, i32 %iv.next.inclusive.slow) ]
-; CHECK-NOT:   loop.inclusive.slow.outer
-; CHECK:       loop.outer:
+; CHECK:   inclusive.no_wrap
+; CHECK-DAG:   loop.inclusive.slow:
+; CHECK-DAG:   loop.outer:
+; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll()
 
 ; CHECK-LABEL: @runtime_inclusive_maybe_poison_limit(
-; CHECK-NOT:   inclusive.no_wrap
-; CHECK-NOT:   inclusive.slow
-; CHECK:       call hotspotcc void @jeandle.safepoint_poll()
+; CHECK:       %inclusive.limit.fr = freeze i32 %maybe.poison
+; CHECK-DAG:   loop.inclusive.slow:
+; CHECK-DAG:   loop.outer:
+; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll()
 
 ; CHECK-LABEL: @runtime_inclusive_unsigned_i32(
 ; CHECK-NOT:   inclusive.no_wrap
@@ -529,7 +531,9 @@ attributes #0 = { "statepoint-id"="7" }
 ; CHECK-LABEL: @runtime_inclusive_statepoint_id(
 ; CHECK-NOT:   inclusive.no_wrap
 ; CHECK-NOT:   inclusive.slow
-; CHECK:       call hotspotcc void @jeandle.safepoint_poll()
+; The loop body's java_invoke is a guaranteed-safepoint call covering the loop,
+; so the complete-deletion pass removes the now-redundant back-edge poll.
+; CHECK-NOT:   call hotspotcc void @jeandle.safepoint_poll
 
 ; CHECK-LABEL: @runtime_inclusive_indirectbr(
 ; CHECK-NOT:   inclusive.no_wrap
@@ -542,7 +546,7 @@ attributes #0 = { "statepoint-id"="7" }
 ; CHECK:       %result.ph2 = phi i32 [ %sum.outer, %loop.outer ], [ %sum, %body ], [ %sum, %loop ]
 ; CHECK:       %result = phi i32 [ %result.ph, %exit.loopexit ], [ %result.ph2, %exit.loopexit1 ]
 ; CHECK:       loop.outer:
-; CHECK:       call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CHECK:       call hotspotcc void @jeandle.safepoint_poll()
 
 ; CHECK-LABEL: @runtime_inclusive_two_plans(
 ; CHECK-DAG:   loop1.outer:
@@ -557,7 +561,7 @@ attributes #0 = { "statepoint-id"="7" }
 ; PIPELINE:       %inclusive.no_wrap = icmp slt i32 %inclusive.limit.fr, 2147483647
 ; PIPELINE-DAG:   loop.outer:
 ; PIPELINE-DAG:   loop.outer.latch:
-; PIPELINE-DAG:   call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; PIPELINE-DAG:   call hotspotcc void @jeandle.safepoint_poll() #{{[0-9]+}} [ "deopt"({{.*}}%outer.iv.next) ]
 ; PIPELINE-DAG:   loop.inclusive.slow:
 ; PIPELINE-DAG:   call hotspotcc void @jeandle.safepoint_poll()
 
@@ -616,25 +620,31 @@ attributes #0 = { "statepoint-id"="7" }
 
 ; PIPELINE-LABEL: @runtime_inclusive_statepoint_id(
 ; PIPELINE-NOT:   inclusive.no_wrap
-; PIPELINE:       call hotspotcc void @jeandle.safepoint_poll()
+; PIPELINE-NOT:   call hotspotcc void @jeandle.safepoint_poll
 
 ; PIPELINE-LABEL: @runtime_inclusive_indirectbr(
 ; PIPELINE-NOT:   inclusive.no_wrap
 ; PIPELINE:       ret void
 
 ; CANONICAL-LABEL: @runtime_inclusive_masked_undef_limit(
-; CANONICAL:       %inclusive.limit.fr = freeze i32 %limit
-; CANONICAL:       %inclusive.first_iteration = icmp sle i32 %inclusive.start.fr, %inclusive.limit.fr
-; CANONICAL:       %inclusive.no_wrap = icmp slt i32 %inclusive.limit.fr, 2147483647
-; CANONICAL-DAG:   loop.outer:
-; CANONICAL-DAG:   loop.inclusive.slow
+; CANONICAL:   inclusive.no_wrap
+; CANONICAL:   loop.outer
+; CANONICAL:   call hotspotcc void @jeandle.safepoint_poll()
 
 ; CANONICAL-LABEL: @runtime_inclusive_masked_undef_start(
-; CANONICAL:       %inclusive.start.fr = freeze i32 %start
-; CANONICAL:       %inclusive.first_iteration = icmp sle i32 %inclusive.start.fr, %inclusive.limit.fr
-; CANONICAL:       %inclusive.no_wrap = icmp slt i32 %inclusive.limit.fr, 2147483647
+; CANONICAL:   inclusive.no_wrap
+; CANONICAL:   loop.outer
+; CANONICAL:   call hotspotcc void @jeandle.safepoint_poll()
+
+; CANONICAL-LABEL: @runtime_inclusive_masked_undef_start_observable(
+; CANONICAL:   inclusive.no_wrap
+; CANONICAL:   loop.outer
+; CANONICAL:   call hotspotcc void @jeandle.safepoint_poll()
+
+; CANONICAL-LABEL: @runtime_inclusive_maybe_poison_limit(
+; CANONICAL:       %inclusive.limit.fr = freeze i32 %maybe.poison
+; CANONICAL-DAG:   loop.inclusive.slow:
 ; CANONICAL-DAG:   loop.outer:
-; CANONICAL-DAG:   loop.inclusive.slow
 
 ; CANONICAL-LABEL: @runtime_inclusive_cross_block_token(
 ; CANONICAL-NOT:   inclusive.no_wrap

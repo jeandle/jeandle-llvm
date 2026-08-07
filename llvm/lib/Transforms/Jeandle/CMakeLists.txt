@@ -8,9 +8,12 @@ add_llvm_component_library(LLVMJeandleTransforms
   JeandleNarrowOopMarker.cpp
   JeandleInlineDriver.cpp
   JeandleInliner.cpp
+  RecoverTypeInfo.cpp
   RepeatedConstantFolding.cpp
   SafepointCoverageVerifier.cpp
-  SafepointElimination.cpp
+  SafepointPollElimination.cpp
+  SafepointStripMining.cpp
+  SafepointUtils.cpp
   TLSPointerRewrite.cpp
   TypeCheckElimination.cpp
   JeandleTransformUtils.cpp

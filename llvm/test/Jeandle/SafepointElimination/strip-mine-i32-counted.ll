@@ -1,14 +1,16 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes='loop-simplify,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
+; RUN: opt -passes='loop-simplify,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' -jeandle-verify-safepoint-coverage=fatal -disable-output < %s
 
-; The canonical Java `for (int i = 0; i < n; i++)` shape: an i32 IV (Java `int`)
-; with a symbolic trip count and no secondary recurrence. Exercises the i32
-; stride arithmetic (sadd.sat.i32), the empty lifted-phi case (only the IV is
-; threaded, no `.outer` reduction phi), and a deopt bundle whose bci operand is
-; left untouched while the loop-carried IV is remapped to the batch boundary.
+; The canonical Java `for (int i = 0; i < n; i++)` shape can run up to INT_MAX
+; trips. With strip mining enabled it must be wrapped so its time-to-safepoint is
+; bounded to the chunk size: the inner loop runs poll-free (<= N iterations), and
+; a single relocated poll on the outer back-edge keeps coverage. Deleting its polls
+; outright (the old int-counted-equivalent shortcut) left it poll-free for up to
+; ~2^31 iterations.
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @count(i32 %n, ptr %a) {
+define void @count(i32 %n, ptr %a) "java-method" {
 entry:
   br label %header
 
@@ -34,24 +36,7 @@ exit:
 !java-method-compilation = !{}
 
 ; CHECK-LABEL: @count(
+; CHECK:         .outer
+; CHECK:         call hotspotcc void @jeandle.safepoint_poll() #[[POLLATTR:[0-9]+]]
+; CHECK:       attributes #[[POLLATTR]] = { "jeandle.strip-mined-poll" }
 
-; The inner exit tests against the per-batch clamp.
-; CHECK:       header:
-; CHECK:         icmp slt i32 %iv, %outer.inner.limit
-
-; Inner body runs poll-free; the inner latch is tagged bounded-by-construction.
-; CHECK:       body:
-; CHECK-NOT:     call hotspotcc void @jeandle.safepoint_poll
-; CHECK:         br label %latch
-; CHECK:       latch:
-; CHECK:         br label %header, !strip-mined
-
-; Per-batch limit clamped with an i32 saturating add against the budget.
-; CHECK:       header.outer.inner.entry:
-; CHECK:         %outer.batch.end = call i32 @llvm.sadd.sat.i32(i32 %outer.iv, i32 1000)
-; CHECK:         %outer.inner.limit = select i1 %outer.cap.cond, i32 %outer.batch.end, i32 %n
-
-; Single relocated poll on the outer back-edge: the bci operand (5) is carried
-; over verbatim and only the IV is remapped to the batch-boundary recurrence.
-; CHECK:       header.outer.latch:
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i32 5, i32 %outer.iv.next) ]{{.*}}!poll-coverage

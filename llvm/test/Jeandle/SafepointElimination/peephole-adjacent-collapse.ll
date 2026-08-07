@@ -1,36 +1,22 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
+; RUN: opt -passes=safepoint-poll-elimination -S < %s | FileCheck %s
 
 ; Two `jeandle.safepoint_poll` calls sit back to back on the same straight-line
-; block. They collapse to one, keeping the later.
+; (non-loop) block. They collapse to one, keeping the later. The pass is not
+; loop-scoped (collapse runs on blocks outside any loop; loop-block polls are
+; deferred to loop poll deletion).
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @adjacent_polls(i64 %n) gc "safepoint-in-loop-example" {
+define void @adjacent_polls() "java-method" gc "no-loop" {
 entry:
-  %cmp = icmp sgt i64 %n, 0
-  br i1 %cmp, label %loop.header, label %exit
-
-loop.header:
-  %iv = phi i64 [ 0, %entry ], [ %iv.next, %loop.latch ]
-  %exit.cond = icmp slt i64 %iv, %n
-  br i1 %exit.cond, label %loop.body, label %exit
-
-loop.body:
   call hotspotcc void @jeandle.safepoint_poll()
   call hotspotcc void @jeandle.safepoint_poll()
-  br label %loop.latch
-
-loop.latch:
-  %iv.next = add nsw i64 %iv, 1
-  br label %loop.header
-
-exit:
   ret void
 }
 
 !java-method-compilation = !{}
 
 ; CHECK-LABEL: @adjacent_polls(
-; CHECK:       loop.body:
+; CHECK:       entry:
 ; CHECK-NEXT:    call hotspotcc void @jeandle.safepoint_poll()
-; CHECK-NEXT:    br label %loop.latch
+; CHECK-NEXT:    ret void

@@ -1,4 +1,4 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
+; RUN: opt -passes=safepoint-poll-elimination -S < %s | FileCheck %s
 
 ; Adjacent polls outside any loop (the shape inlining produces: a callee's
 ; return poll landing next to the caller's poll) also collapse — the pass is
@@ -6,7 +6,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @straight_line() gc "no-loop" {
+define void @straight_line() "java-method" gc "no-loop" {
 entry:
   call hotspotcc void @jeandle.safepoint_poll()
   call hotspotcc void @jeandle.safepoint_poll()

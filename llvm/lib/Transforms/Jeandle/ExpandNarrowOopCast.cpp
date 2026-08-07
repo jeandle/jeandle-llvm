@@ -49,22 +49,62 @@ PreservedAnalyses ExpandNarrowOopCast::run(Module &M, ModuleAnalysisManager &) {
   if (!moduleUsesCompressedOops(M))
     return PreservedAnalyses::all();
 
+  // Collect every addrspacecast between AS1 (Java heap) and AS3 (narrow oop)
+  // in a single pass over the module: both AddrSpaceCastInst instructions and
+  // constant addrspacecast expressions nested in instruction operands.
   SmallVector<AddrSpaceCastInst *, 16> Casts;
+  SmallVector<Use *, 16> ConstCastOps;
   for (Function &F : M) {
-    for (Instruction &I : instructions(F))
+    for (Instruction &I : instructions(F)) {
+      // Instruction-level addrspacecast (e.g. encoding a runtime oop).
       if (auto *Cast = dyn_cast<AddrSpaceCastInst>(&I))
         Casts.push_back(Cast);
+
+      // Constant addrspacecast nested in operands (e.g. encoding a null oop).
+      for (Use &Op : I.operands()) {
+        auto *CE = dyn_cast<ConstantExpr>(Op.get());
+        if (!CE || CE->getOpcode() != Instruction::AddrSpaceCast)
+          continue;
+        unsigned SrcAS = getPointerAddressSpace(CE->getOperand(0)->getType());
+        unsigned DstAS = getPointerAddressSpace(CE->getType());
+        const bool IsNarrowPair =
+            (SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+             DstAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
+            (SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
+             DstAS == jeandle::AddrSpace::JavaHeapAddrSpace);
+        if (!IsNarrowPair)
+          continue;
+        ConstCastOps.push_back(&Op);
+      }
+    }
   }
 
-  if (Casts.empty())
+  if (Casts.empty() && ConstCastOps.empty())
     return PreservedAnalyses::all();
 
-  Function *Encode = M.getFunction("jeandle.encode_heap_oop");
-  assert(Encode != nullptr && "jeandle.encode_heap_oop must exist");
-  Function *Decode = M.getFunction("jeandle.decode_heap_oop");
-  assert(Decode != nullptr && "jeandle.decode_heap_oop must exist");
+  Function *Encode = nullptr;
+  Function *Decode = nullptr;
+  if (!Casts.empty()) {
+    Encode = M.getFunction("jeandle.encode_heap_oop");
+    assert(Encode != nullptr && "jeandle.encode_heap_oop must exist");
+    Decode = M.getFunction("jeandle.decode_heap_oop");
+    assert(Decode != nullptr && "jeandle.decode_heap_oop must exist");
+  }
 
   bool Changed = false;
+
+  // ConstantExpr(null) with a addrspacecast opcode
+  for (Use *Op : ConstCastOps) {
+    auto *CE = cast<ConstantExpr>(Op->get());
+    if (!isa<ConstantPointerNull>(CE->getOperand(0)))
+      continue;
+    Constant *NullInDst =
+        ConstantPointerNull::get(cast<PointerType>(CE->getType()));
+    Op->set(NullInDst);
+    Changed = true;
+  }
+
+  // AddrSpaceCast instruction
   for (AddrSpaceCastInst *Cast : Casts) {
     unsigned SrcAS = getPointerAddressSpace(Cast->getOperand(0)->getType());
     unsigned DstAS = getPointerAddressSpace(Cast->getType());

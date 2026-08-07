@@ -1,0 +1,1 @@
+# %head is an opaque argument (no java-klass attribute). No callbacks fire.

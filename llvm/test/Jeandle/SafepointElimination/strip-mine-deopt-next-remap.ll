@@ -1,6 +1,6 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
-; RUN: opt -passes='function(safepoint-elimination<early>,safepoint-elimination<strip-mining>),java-operation-lower<phase=1>,rewrite-statepoints-for-gc,verify' \
-; RUN:   -jeandle-enable-strip-mining -S < %s | FileCheck %s --check-prefix=STATEPOINT \
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
+; RUN: opt -passes='function(loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>),java-operation-lower<phase=1>,rewrite-statepoints-for-gc,verify' \
+; RUN:   -S < %s | FileCheck %s --check-prefix=STATEPOINT \
 ; RUN:   --implicit-check-not='call hotspotcc void @jeandle.safepoint_poll'
 
 ; Real-frontend-shaped deopt bundle at a back-edge poll: an interleaved list of
@@ -20,7 +20,7 @@ entry:
   ret void
 }
 
-define i64 @sum(i64 %n, ptr addrspace(1) %obj) gc "hotspotgc" {
+define i64 @sum(i64 noundef %n, ptr addrspace(1) %obj) "java-method" gc "hotspotgc" {
 entry:
   br label %header
 
@@ -53,20 +53,23 @@ attributes #0 = { "lower-phase"="1" "noinline" }
 ; through and .next operands remapped (%s.next -> %s.outer.next,
 ; %iv.next -> %outer.iv.next).
 ; CHECK-LABEL: @sum(
-; CHECK:         icmp slt i64 %iv, %outer.inner.limit
 ; CHECK:       body:
 ; CHECK-NOT:     call hotspotcc void @jeandle.safepoint_poll
-; CHECK:       header.outer.latch:
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i32 23, ptr addrspace(1) %obj, i64 %n, i64 8589934603, i64 %s.outer.next, i64 17179869195, i64 %outer.iv.next) ]{{.*}}!poll-coverage
+; CHECK:       latch:
+; CHECK:         icmp slt i64 %iv.next, %outer.inner.limit
+; CHECK:       body.outer.latch:
+; CHECK:         call hotspotcc void @jeandle.safepoint_poll() #{{[0-9]+}} [ "deopt"(i32 23, ptr addrspace(1) %obj, i64 %n, i64 8589934603, i64 %s3.outer.next, i64 17179869195, i64 %outer.iv.next) ]
 
 ; STATEPOINT-LABEL: @sum(
-; STATEPOINT:       header:
-; STATEPOINT:         %[[IV:[^ ]+]] = phi i64
+; STATEPOINT:       body:
 ; STATEPOINT:         %[[SUM:[^ ]+]] = phi i64
-; STATEPOINT:       header.outer:
-; STATEPOINT:         %[[OBJ:[^ ]+]] = phi ptr addrspace(1) [ %obj, %header.outer.ph ], [ %[[RELOCATED:[^, ]+]], %header.outer.latch ]
-; STATEPOINT:       header.outer.latch:
+; STATEPOINT:         %[[IV:[^ ]+]] = phi i64
+; STATEPOINT:         %[[SUM_NEXT:[^ ]+]] = add i64 %[[SUM]], %[[IV]]
+; STATEPOINT:         %[[IV_NEXT:[^ ]+]] = add i64 %[[IV]], 1
+; STATEPOINT:       body.outer:
+; STATEPOINT:         %[[OBJ:[^ ]+]] = phi ptr addrspace(1) [ %obj, %body.outer.ph ], [ %[[RELOCATED:[^, ]+]], %body.outer.latch ]
+; STATEPOINT:       body.outer.latch:
 ; STATEPOINT:         %[[TOKEN:[^ ]+]] = call hotspotcc token {{.*}}@llvm.experimental.gc.statepoint.p0(
 ; STATEPOINT-SAME:      ptr elementtype(void ()) @safepoint_handler
-; STATEPOINT-SAME:      [ "deopt"(i32 23, ptr addrspace(1) %[[OBJ]], i64 %n, i64 8589934603, i64 %[[SUM]], i64 17179869195, i64 %[[IV]]), "gc-live"(ptr addrspace(1) %[[OBJ]]) ]
+; STATEPOINT-SAME:      [ "deopt"(i32 23, ptr addrspace(1) %[[OBJ]], i64 %n, i64 8589934603, i64 %[[SUM_NEXT]], i64 17179869195, i64 %[[IV_NEXT]]), "gc-live"(ptr addrspace(1) %[[OBJ]]) ]
 ; STATEPOINT-NEXT:    %[[RELOCATED]] = call coldcc ptr addrspace(1) @llvm.experimental.gc.relocate.p1(token %[[TOKEN]], i32 0, i32 0)

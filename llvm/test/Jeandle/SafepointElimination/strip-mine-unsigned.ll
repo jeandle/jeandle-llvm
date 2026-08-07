@@ -1,6 +1,6 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -disable-output < %s
 
 ; Canonical unsigned counted loop: SCEV can prove the step-1 recurrence does
@@ -8,7 +8,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @uloop(i64 %n) {
+define void @uloop(i64 noundef %n) "java-method" {
 entry:
   br label %header
 
@@ -29,7 +29,7 @@ exit:
   ret void
 }
 
-define void @udown(i64 %n) {
+define void @udown(i64 noundef %n) "java-method" {
 entry:
   br label %header
 
@@ -55,9 +55,9 @@ exit:
 ; CHECK-LABEL: @uloop(
 ; CHECK:       %outer.cond = icmp ult i64 %outer.iv, %n
 ; CHECK:       %outer.batch.end = call i64 @llvm.uadd.sat.i64(i64 %outer.iv, i64 1000)
-; CHECK:       call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CHECK:       call hotspotcc void @jeandle.safepoint_poll()
 
 ; CHECK-LABEL: @udown(
 ; CHECK:       %outer.cond = icmp ugt i64 %outer.iv, 0
 ; CHECK:       %outer.batch.end = call i64 @llvm.usub.sat.i64(i64 %outer.iv, i64 1000)
-; CHECK:       call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CHECK:       call hotspotcc void @jeandle.safepoint_poll()

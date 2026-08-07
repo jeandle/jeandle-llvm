@@ -520,6 +520,7 @@ FUNCTION_PASS("objc-arc-contract", ObjCARCContractPass())
 FUNCTION_PASS("objc-arc-expand", ObjCARCExpandPass())
 FUNCTION_PASS("pa-eval", PAEvalPass())
 FUNCTION_PASS("partially-inline-libcalls", PartiallyInlineLibCallsPass())
+FUNCTION_PASS("recover-type-info", RecoverTypeInfo())
 FUNCTION_PASS("pgo-memop-opt", PGOMemOPSizeOpt())
 FUNCTION_PASS("place-safepoints", PlaceSafepointsPass())
 FUNCTION_PASS("print", PrintFunctionPass(errs()))
@@ -717,10 +718,20 @@ FUNCTION_PASS_WITH_PARAMS(
     [](bool LowerGEP) { return SeparateConstOffsetFromGEPPass(LowerGEP); },
     parseSeparateConstOffsetFromGEPPassOptions, "lower-gep")
 FUNCTION_PASS_WITH_PARAMS(
-    "safepoint-elimination", "SafepointElimination",
-    [](SafepointEliminationMode Mode) { return SafepointElimination(Mode); },
-    parseSafepointEliminationOptions,
-    "early;inclusive-loop-versioning;strip-mining;cleanup;loop-deletion-prep")
+    "safepoint-poll-elimination", "SafepointPollElimination",
+    [](SafepointPollEliminationOptions Options) {
+      return SafepointPollElimination(Options.Mode,
+                                      Options.DeferEmptyLoopDeletion);
+    },
+    parseSafepointPollEliminationOptions,
+    "early;after-strip-mining;loop-deletion-prep;defer-empty-loop-deletion")
+FUNCTION_PASS_WITH_PARAMS(
+    "safepoint-strip-mining", "SafepointStripMining",
+    [](SafepointStripMiningOptions Options) {
+      return SafepointStripMining(Options.Mode, Options.DeferEmptyLoopDeletion);
+    },
+    parseSafepointStripMiningOptions,
+    "inclusive-loop-versioning;strip-mining;defer-empty-loop-deletion")
 FUNCTION_PASS_WITH_PARAMS(
     "simplifycfg", "SimplifyCFGPass",
     [](SimplifyCFGOptions Opts) { return SimplifyCFGPass(Opts); },

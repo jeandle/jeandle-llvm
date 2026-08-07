@@ -1,0 +1,3 @@
+GetFieldType 5 16 = 7
+IsUnverifiedInterface 7 = false
+IsEffectivelyFinal 7 = false

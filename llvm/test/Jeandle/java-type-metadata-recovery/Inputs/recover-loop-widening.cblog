@@ -1,0 +1,6 @@
+# %head klass 5. field@16 of 5 -> 7. 5 and 7 widen to LCA 10. field@16 of 10 -> 7.
+GetFieldType 5 16 = 7
+IsUnverifiedInterface 7 = false
+IsEffectivelyFinal 7 = false
+GetCommonSuperKlass 5 7 = 10
+GetFieldType 10 16 = 7

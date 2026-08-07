@@ -1,0 +1,5 @@
+# Base klass 5 has a field at offset 16 of declared type klass 7.
+# Klass 7 is a concrete (non-interface), non-final class.
+GetFieldType 5 16 = 7
+IsUnverifiedInterface 7 = false
+IsEffectivelyFinal 7 = false

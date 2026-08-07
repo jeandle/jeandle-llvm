@@ -1,11 +1,11 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
 
 ; `i != limit` is only converted to a relational counted loop for unit strides
 ; and a proven start/limit order. Otherwise the original poll stays in place.
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @ne_stride_two_bails(i64 %n) {
+define void @ne_stride_two_bails(i64 %n) "java-method" {
 entry:
   %entry.guard = icmp sle i64 0, %n
   br i1 %entry.guard, label %loop.preheader, label %return
@@ -36,10 +36,10 @@ return:
 ; CHECK-LABEL: @ne_stride_two_bails(
 ; CHECK-NOT:   .outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll()
-; CHECK-NOT:   !strip-mined
+; CHECK-NOT:   jeandle.strip-mined-poll
 
 
-define void @ne_without_order_guard_bails(i64 %n) {
+define void @ne_without_order_guard_bails(i64 %n) "java-method" {
 entry:
   br label %header
 
@@ -63,9 +63,9 @@ exit:
 ; CHECK-LABEL: @ne_without_order_guard_bails(
 ; CHECK-NOT:   .outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll()
-; CHECK-NOT:   !strip-mined
+; CHECK-NOT:   jeandle.strip-mined-poll
 
-define void @latch_ne_without_order_guard_bails(i64 %n) {
+define void @latch_ne_without_order_guard_bails(i64 %n) "java-method" {
 entry:
   br label %header
 
@@ -86,6 +86,6 @@ exit:
 ; CHECK-LABEL: @latch_ne_without_order_guard_bails(
 ; CHECK-NOT:   .outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll()
-; CHECK-NOT:   !strip-mined
+; CHECK-NOT:   jeandle.strip-mined-poll
 
 !java-method-compilation = !{}

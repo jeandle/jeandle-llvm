@@ -1,4 +1,4 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
 
 ; A store in the header ahead of the exit test would be replayed when a batch
 ; boundary re-enters the header with the same IV. The transform must bail and
@@ -6,7 +6,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @hdr_store(i64 %n, ptr %log) {
+define void @hdr_store(i64 %n, ptr %log) "java-method" {
 entry:
   br label %header
 
@@ -34,4 +34,3 @@ exit:
 ; CHECK-NOT:   outer
 ; CHECK:       store i64 %iv, ptr %log
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
-; CHECK-NOT:   !poll-coverage

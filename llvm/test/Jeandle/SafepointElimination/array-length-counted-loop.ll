@@ -1,16 +1,16 @@
-; RUN: opt -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-elimination<early>,safepoint-elimination<strip-mining>)' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-safepoint-chunk-iters=1000 -S < %s \
+; RUN: opt -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>)' \
+; RUN:   -jeandle-loop-strip-mining-iter=1000 -S < %s \
 ; RUN:   | FileCheck %s --check-prefix=PRECANON
-; RUN: opt -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-elimination<early>,loop-mssa(loop-rotate,licm),safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>)' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-safepoint-chunk-iters=1000 \
+; RUN: opt -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-poll-elimination<early>,loop-mssa(loop-rotate,licm),safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>)' \
+; RUN:   -jeandle-loop-strip-mining-iter=1000 \
 ; RUN:   -jeandle-verify-safepoint-coverage=fatal -S < %s \
 ; RUN:   | FileCheck %s --check-prefix=CANON
 ; RUN: opt -verify-each \
-; RUN:   -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-elimination<early>,loop-mssa(loop-rotate,licm),safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>)' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-safepoint-chunk-iters=1000 \
+; RUN:   -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-poll-elimination<early>,loop-mssa(loop-rotate,licm),safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>)' \
+; RUN:   -jeandle-loop-strip-mining-iter=1000 \
 ; RUN:   -jeandle-verify-safepoint-coverage=fatal -disable-output < %s
-; RUN: opt -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-elimination<early>,loop-mssa(loop-rotate,licm,simple-loop-unswitch<trivial>,licm,simple-loop-unswitch<nontrivial;trivial>),guard-widening,loop-mssa(licm),loop-mssa(loop-predication,licm,simple-loop-unswitch<nontrivial;trivial>,guard-widening),lower-widenable-condition,lower-guard-intrinsic,simplifycfg,irce,instcombine,simplifycfg,loop-simplify,lcssa,loop-mssa(loop-rotate,licm),safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>)' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-safepoint-chunk-iters=1000 \
+; RUN: opt -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-poll-elimination<early>,loop-mssa(loop-rotate,licm,simple-loop-unswitch<trivial>,licm,simple-loop-unswitch<nontrivial;trivial>),guard-widening,loop-mssa(licm),loop-mssa(loop-predication,licm,simple-loop-unswitch<nontrivial;trivial>,guard-widening),lower-widenable-condition,lower-guard-intrinsic,simplifycfg,irce,instcombine,simplifycfg,loop-simplify,lcssa,loop-mssa(loop-rotate,licm),safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>)' \
+; RUN:   -jeandle-loop-strip-mining-iter=1000 \
 ; RUN:   -jeandle-verify-safepoint-coverage=fatal -S < %s \
 ; RUN:   | FileCheck %s --check-prefix=PIPELINE
 
@@ -27,7 +27,7 @@ declare hotspotcc void @jeandle.safepoint_poll()
 
 define void @direct_array_length(ptr addrspace(1) %a,
                                  ptr addrspace(1) noalias %b,
-                                 ptr addrspace(1) noalias %c) {
+                                 ptr addrspace(1) noalias %c) "java-method" {
 entry:
   br label %loop.header
 
@@ -74,15 +74,13 @@ loop.exit:
 ; PRECANON-LABEL: define void @direct_array_length(
 ; PRECANON-NOT: .outer
 ; PRECANON: call hotspotcc void @jeandle.safepoint_poll()
-; PRECANON-NOT: !strip-mined
 
 ; CANON-LABEL: define void @direct_array_length(
-; CANON: .outer
-; CANON: br i1 %{{.*}}, label %{{.*}}, label %{{.*}}, !strip-mined
-; CANON: call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CANON-NOT: .outer
+; CANON: call hotspotcc void @jeandle.safepoint_poll()
 
 define void @runtime_skippable_array_length(ptr addrspace(1) %a,
-                                            i1 %test.length) {
+                                            i1 %test.length) "java-method" {
 entry:
   br label %loop.header
 
@@ -120,18 +118,16 @@ loop.exit:
 ; PRECANON-LABEL: define void @runtime_skippable_array_length(
 ; PRECANON-NOT: .outer
 ; PRECANON: call hotspotcc void @jeandle.safepoint_poll()
-; PRECANON-NOT: !strip-mined
 
 ; CANON-LABEL: define void @runtime_skippable_array_length(
 ; CANON-NOT: .outer
 ; CANON: call hotspotcc void @jeandle.safepoint_poll()
-; CANON-NOT: !strip-mined
 
 ; The loop-varying dispatch cannot be specialized by unswitching. The array
 ; length test is skipped on alternating iterations, so it must not be used as
 ; the mandatory counted exit by either the direct or production-shaped run.
 define void @varying_skippable_array_length(ptr addrspace(1) %a,
-                                            i1 %test.initial) {
+                                            i1 %test.initial) "java-method" {
 entry:
   br label %loop.header
 
@@ -171,22 +167,22 @@ loop.exit:
 ; PRECANON-LABEL: define void @varying_skippable_array_length(
 ; PRECANON-NOT: .outer
 ; PRECANON: call hotspotcc void @jeandle.safepoint_poll()
-; PRECANON-NOT: !strip-mined
 
 ; CANON-LABEL: define void @varying_skippable_array_length(
 ; CANON-NOT: .outer
 ; CANON: call hotspotcc void @jeandle.safepoint_poll()
-; CANON-NOT: !strip-mined
 
 ; PIPELINE-LABEL: define void @direct_array_length(
 ; PIPELINE: .outer
-; PIPELINE: !strip-mined
-; PIPELINE: call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; PIPELINE: call hotspotcc void @jeandle.safepoint_poll() #{{[0-9]+}}
+; PIPELINE-LABEL: define void @runtime_skippable_array_length(
+; PIPELINE: call hotspotcc void @jeandle.safepoint_poll()
 ; PIPELINE-LABEL: define void @varying_skippable_array_length(
 ; PIPELINE-NOT: .outer
 ; PIPELINE: call hotspotcc void @jeandle.safepoint_poll()
-; PIPELINE-NOT: !strip-mined
 
 !java-method-compilation = !{}
 !0 = !{i32 0, i32 2147483647}
 !1 = !{}
+
+; PIPELINE:     attributes #{{[0-9]+}} = { "jeandle.strip-mined-poll" }

@@ -28,6 +28,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 
 #include <climits>
 #include <cstring>
@@ -106,13 +107,6 @@ struct FieldLoadMatch {
   int OopId;
   int Offset;
 };
-
-// If `LI` is a load from an oop_handle_* global, return its id.
-std::optional<int> getOopHandleLoadId(LoadInst *LI) {
-  if (!LI || !isJavaOopType(LI->getType()))
-    return std::nullopt;
-  return getOopHandleId(LI->getPointerOperand());
-}
 
 // Returns true for instructions that we treat as a one-step pointer
 // forwarder in the lattice — i.e. their result's ConstOop lattice value

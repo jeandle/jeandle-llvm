@@ -1,5 +1,5 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining \
-; RUN:   -jeandle-safepoint-chunk-iters=3000000000 -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' \
+; RUN:   -jeandle-loop-strip-mining-iter=3000000000 -S < %s | FileCheck %s
 
 ; A normal `for (int i = start; i < n; i++)` (i32 IV from an unknown start, so
 ; SCEV gives no constant trip bound and short-loop deletion leaves it alone).
@@ -12,7 +12,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @f(i32 %n, i32 %start) {
+define void @f(i32 %n, i32 %start) "java-method" {
 entry:
   br label %h
 
@@ -40,4 +40,3 @@ x:
 ; CHECK-LABEL: @f(
 ; CHECK-NOT:   outer
 ; CHECK:         call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i32 5, i32 %iv.next) ]
-; CHECK-NOT:   !poll-coverage

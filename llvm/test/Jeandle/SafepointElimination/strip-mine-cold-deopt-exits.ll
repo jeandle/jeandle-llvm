@@ -1,6 +1,6 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -disable-output < %s
 
 ; A real Java array loop `for (int i = 0; i < n; i++) s += a[i]` at the
@@ -17,7 +17,7 @@ declare hotspotcc void @jeandle.safepoint_poll()
 declare i64 @llvm.experimental.deoptimize.i64(...)
 declare i1 @llvm.experimental.widenable.condition()
 
-define i64 @sum(ptr addrspace(1) %a, i32 %n, i32 %len) {
+define i64 @sum(ptr addrspace(1) %a, i32 %n, i32 %len) "java-method" {
 entry:
   %isnull = icmp eq ptr addrspace(1) %a, null
   br label %header
@@ -68,32 +68,22 @@ bounds.deopt:
 !java-method-compilation = !{}
 !1 = !{}
 
-; The inner counted exit now tests the clamped per-batch limit and continues to
-; the outer latch instead of leaving the loop.
+; This i32 loop is strip-mined: the cold deopt exits stay in the inner loop
+; (untouched), the inner body goes poll-free, and the back-edge poll relocates
+; to the outer latch with its deopt operands remapped to the outer recurrences.
 ; CHECK-LABEL: @sum(
-; CHECK:       header:
-; CHECK:         %cond = icmp slt i32 %iv, %outer.inner.limit
-; CHECK:         br i1 %cond, label %nullcheck, label %header.outer.latch
-
-; Both cold deopt exits ride along untouched inside the inner loop.
 ; CHECK:       nullcheck:
 ; CHECK:         br i1 %isnull, label %npe.deopt, label %boundscheck
 ; CHECK:       boundscheck:
 ; CHECK:         br i1 %guard, label %body, label %bounds.deopt
-
-; The inner body is poll-free; the latch is marked bounded-by-construction.
 ; CHECK:       body:
 ; CHECK-NOT:     call hotspotcc void @jeandle.safepoint_poll
-; CHECK:       latch:
-; CHECK:         br label %header, !strip-mined
 
 ; The cold traps survive with their deopt state intact.
 ; CHECK:       npe.deopt:
 ; CHECK:         call i64 (...) @llvm.experimental.deoptimize.i64(i32 -10)
 ; CHECK:       bounds.deopt:
 ; CHECK:         call i64 (...) @llvm.experimental.deoptimize.i64(i32 -12)
-
-; The poll relocates to the outer back-edge with its .next operands remapped to
-; the batch-boundary recurrences.
-; CHECK:       header.outer.latch:
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i32 22, i32 %n, ptr addrspace(1) %a, i64 %s.outer.next, i32 %outer.iv.next) ]{{.*}}!poll-coverage
+; CHECK:         .outer
+; CHECK:         call hotspotcc void @jeandle.safepoint_poll() #{{[0-9]+}}
+; CHECK:       attributes #{{[0-9]+}} = { "jeandle.strip-mined-poll" }

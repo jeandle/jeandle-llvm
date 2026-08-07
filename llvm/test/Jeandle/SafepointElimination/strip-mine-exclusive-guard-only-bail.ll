@@ -1,6 +1,6 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -disable-output < %s
 
 ; A loop-body guard can prove the latch add safe on the original loop, but the
@@ -10,7 +10,7 @@
 declare hotspotcc void @jeandle.safepoint_poll()
 declare void @llvm.assume(i1)
 
-define void @exclusive_step2_guard_only_bails(i64 %n) {
+define void @exclusive_step2_guard_only_bails(i64 %n) "java-method" {
 entry:
   br label %header
 
@@ -38,4 +38,4 @@ exit:
 ; CHECK-LABEL: @exclusive_step2_guard_only_bails(
 ; CHECK-NOT:   .outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
-; CHECK-NOT:   !strip-mined
+; CHECK-NOT:   jeandle.strip-mined-poll

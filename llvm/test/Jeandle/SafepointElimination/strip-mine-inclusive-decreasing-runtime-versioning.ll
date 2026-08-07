@@ -1,9 +1,9 @@
-; RUN: opt -passes='safepoint-elimination<inclusive-loop-versioning>,safepoint-elimination<strip-mining>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-enable-inclusive-loop-versioning -verify-each -S < %s | FileCheck %s
-; RUN: opt -passes='early-cse,instcombine,simplifycfg,loop-simplify,lcssa,safepoint-elimination<inclusive-loop-versioning>,safepoint-elimination<strip-mining>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-enable-inclusive-loop-versioning -verify-each -S < %s | FileCheck %s --check-prefix=PIPELINE
-; RUN: opt -passes='safepoint-elimination<inclusive-loop-versioning>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-enable-inclusive-loop-versioning -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-strip-mining<inclusive-loop-versioning>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' \
+; RUN:   -jeandle-enable-inclusive-loop-versioning -verify-each -S < %s | FileCheck %s
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,early-cse,instcombine,simplifycfg,loop-simplify,lcssa,safepoint-strip-mining<inclusive-loop-versioning>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' \
+; RUN:   -jeandle-enable-inclusive-loop-versioning -verify-each -S < %s | FileCheck %s --check-prefix=PIPELINE
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-strip-mining<inclusive-loop-versioning>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-enable-inclusive-loop-versioning -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -verify-each -disable-output < %s
 
 ; Minimized from the frontend shape for:
@@ -15,7 +15,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define i64 @runtime_inclusive_decreasing_i32(ptr %a, i32 %start, i32 %limit) {
+define i64 @runtime_inclusive_decreasing_i32(ptr %a, i32 %start, i32 %limit) "java-method" {
 entry:
   %nonempty = icmp sge i32 %start, %limit
   br i1 %nonempty, label %preheader, label %exit
@@ -45,7 +45,7 @@ exit:
 ; start < limit, versioning must select the original slow loop so its one
 ; iteration is preserved instead of turning it into an empty fast loop.
 define i32 @runtime_inclusive_decreasing_unguarded_latch_i32(i32 %start,
-                                                              i32 %limit) {
+                                                              i32 %limit) "java-method" {
 entry:
   br label %loop
 loop:
@@ -65,7 +65,7 @@ exit:
 ; may change this shape before versioning, so both direct and pipeline forms are
 ; permanent fixtures.
 define i64 @runtime_inclusive_decreasing_header_i32(ptr %a, i32 %start,
-                                                     i32 %limit) {
+                                                     i32 %limit) "java-method" {
 entry:
   br label %header
 header:
@@ -89,7 +89,7 @@ exit:
 
 ; These legal shapes remain outside this enhancement and retain their polls.
 define void @runtime_inclusive_decreasing_unsigned_i32(i32 %start,
-                                                        i32 %limit) {
+                                                        i32 %limit) "java-method" {
 entry:
   br label %loop
 loop:
@@ -102,7 +102,7 @@ exit:
   ret void
 }
 
-define void @runtime_inclusive_decreasing_i64(i64 %start, i64 %limit) {
+define void @runtime_inclusive_decreasing_i64(i64 %start, i64 %limit) "java-method" {
 entry:
   br label %loop
 loop:
@@ -115,7 +115,7 @@ exit:
   ret void
 }
 
-define void @runtime_inclusive_decreasing_step2_i32(i32 %start, i32 %limit) {
+define void @runtime_inclusive_decreasing_step2_i32(i32 %start, i32 %limit) "java-method" {
 entry:
   br label %loop
 loop:
@@ -129,7 +129,7 @@ exit:
 }
 
 define void @runtime_inclusive_decreasing_current_phi_deopt(i32 %start,
-                                                             i32 %limit) {
+                                                             i32 %limit) "java-method" {
 entry:
   br label %loop
 loop:
@@ -152,9 +152,11 @@ exit:
 ; CHECK-DAG:   loop.inclusive.slow:
 ; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %sum.next.inclusive.slow, i32 %iv.next.inclusive.slow) ]
 ; CHECK-DAG:   loop.outer:
-; CHECK-DAG:   %outer.batch.end = call i32 @llvm.ssub.sat.i32(i32 %outer.iv, i32 999)
+; CHECK-DAG:   %outer.batch.dist = sub nsw i64
+; CHECK-DAG:   call i64 @llvm.smin.i64
+; CHECK-DAG:   %outer.inner.limit = sub nsw i32 %outer.iv, %outer.batch.chunk
 ; CHECK-DAG:   loop.outer.latch:
-; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CHECK-DAG:   call hotspotcc void @jeandle.safepoint_poll()
 
 ; CHECK-LABEL: @runtime_inclusive_decreasing_unguarded_latch_i32(
 ; CHECK:       %inclusive.first_iteration = icmp sge i32 %inclusive.start.fr, %inclusive.limit.fr
@@ -167,9 +169,9 @@ exit:
 ; CHECK-LABEL: @runtime_inclusive_decreasing_header_i32(
 ; CHECK:       %inclusive.first_iteration = icmp sge i32 %inclusive.start.fr, %inclusive.limit.fr
 ; CHECK:       %inclusive.no_wrap = icmp sgt i32 %inclusive.limit.fr, -2147483648
-; CHECK-DAG:   header.inclusive.slow:
-; CHECK-DAG:   header.outer:
-; CHECK-DAG:   header.outer.latch:
+; CHECK-DAG:   body.inclusive.slow:
+; CHECK-DAG:   body.outer:
+; CHECK-DAG:   body.outer.latch:
 
 ; CHECK-LABEL: @runtime_inclusive_decreasing_unsigned_i32(
 ; CHECK-NOT:   inclusive.no_wrap
@@ -206,6 +208,6 @@ exit:
 
 ; PIPELINE-LABEL: @runtime_inclusive_decreasing_header_i32(
 ; PIPELINE:       %inclusive.no_wrap = icmp sgt i32 %inclusive.limit.fr, -2147483648
-; PIPELINE-DAG:   header.inclusive.slow:
-; PIPELINE-DAG:   header.outer:
-; PIPELINE-DAG:   header.outer.latch:
+; PIPELINE-DAG:   body.inclusive.slow:
+; PIPELINE-DAG:   body.outer:
+; PIPELINE-DAG:   body.outer.latch:

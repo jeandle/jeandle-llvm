@@ -1,15 +1,14 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
-; RUN: opt -passes='safepoint-elimination<early>' -S < %s | FileCheck %s
-; RUN: opt -passes='safepoint-elimination<cleanup>' -S < %s | FileCheck %s
-; RUN: opt -passes='safepoint-elimination<strip-mining>' \
-; RUN:   -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes=safepoint-poll-elimination -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination<early>' -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' \
+; RUN:   -S < %s | FileCheck %s
 ; RUN: opt --print-passes | FileCheck %s --check-prefix=PRINT
 
 ; The pass resolves by name as a function pass and leaves IR intact.
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @f() gc "no-op" {
+define void @f() "java-method" gc "no-op" {
 entry:
   call hotspotcc void @jeandle.safepoint_poll()
   ret void
@@ -19,4 +18,5 @@ entry:
 
 ; CHECK-LABEL: @f(
 ; CHECK: call hotspotcc void @jeandle.safepoint_poll()
-; PRINT: safepoint-elimination<early;inclusive-loop-versioning;strip-mining;cleanup;loop-deletion-prep>
+; PRINT-DAG: safepoint-poll-elimination<early;after-strip-mining;loop-deletion-prep;defer-empty-loop-deletion>
+; PRINT-DAG: safepoint-strip-mining<inclusive-loop-versioning;strip-mining;defer-empty-loop-deletion>

@@ -41,10 +41,31 @@ public:
   static constexpr const char *StatepointNumPatchBytes =
       "statepoint-num-patch-bytes";
 
+  /// Marks a function whose call sites carry a "deopt" operand bundle for
+  /// deoptimization STATE but are NOT genuine safepoints: a leaf/alloc/lock
+  /// fast path that may deopt but never actually polls / reaches a VM
+  /// safepoint every invocation. Mirrors C2's
+  /// AllocateNode::AbstractLockNode::UnlockNode::CallLeafNode overriding
+  /// `guaranteed_safepoint()` to false. The coverage logic (loop analyze,
+  /// adjacency collapse, the coverage verifier) must treat such a call as NOT
+  /// covering a loop, so its surrounding polls are not deleted as redundant.
+  static constexpr const char *NotGuaranteedSafepoint =
+      "jeandle.not-guaranteed-safepoint";
+
+  /// Call-site attribute attached by SafepointStripMining to the safepoint
+  /// poll it relocates onto the outer back-edge of a strip-mined loop nest.
+  /// The attribute identifies the nest: a loop whose parent loop's latch holds
+  /// a poll carrying it is the poll-free, batch-bounded inner loop. Marking
+  /// the relocated poll itself means the marker cannot outlive the coverage it
+  /// certifies.
+  static constexpr const char *StripMinedPoll = "jeandle.strip-mined-poll";
+
   /// Call-site attributes attached to java call(InvokeInsts).
   static constexpr const char *Bytecode = "bytecode";
 
   static constexpr const char *DeclaredHolder = "declared-holder";
+
+  static constexpr const char *MhIntrinsicName = "mh-intrinsic-name";
 
   static constexpr const char *MonomorphicTarget = "monomorphic-target";
 };

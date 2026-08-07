@@ -1,0 +1,3 @@
+# field@16 of klass 5 is an interface type (klass 8) -> skipped.
+GetFieldType 5 16 = 8
+IsUnverifiedInterface 8 = true

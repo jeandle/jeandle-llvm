@@ -1,4 +1,5 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' \
+; RUN:   -S < %s | FileCheck %s
 
 ; A poll in a block that is not part of the loop must never enter the loop's
 ; deletion candidate set, even when the loop's own poll is removed. Here a
@@ -6,12 +7,14 @@
 ; emits a poll before every return (see add_safepoint_poll on return
 ; bytecodes), and the return block leaves the method — no path back to the
 ; back-edge — so it is outside the loop's blocks. The loop's trip count is a
-; provable constant <= N, so its back-edge poll is deleted, while the return
-; poll survives untouched.
+; provable constant (100) within the chunk budget, so its back-edge poll is
+; deleted (strip mining on → Early skips loop deletion and the StripMining
+; mode's complete-deletion pass removes it), while the return poll survives
+; untouched.
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @early_return(ptr %a, i1 %stop) gc "safepoint-in-loop-example" {
+define void @early_return(ptr %a, i1 %stop) "java-method" gc "safepoint-in-loop-example" {
 entry:
   br label %loop.header
 

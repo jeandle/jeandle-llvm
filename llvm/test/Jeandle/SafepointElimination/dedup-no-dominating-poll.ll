@@ -1,17 +1,18 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
+; RUN: opt -passes=safepoint-poll-elimination -S < %s | FileCheck %s
 
 ; Polls live only in the two branch arms; neither dominates the latch.
 ; Deleting either could leave the other path's iterations uncovered, so
 ; keep-one must delete nothing (C2: no dominating safepoint found -> keep all).
+; Non-counted loop (runtime-flag exits) so this exercises the keep-one prune
+; gate rather than counted-loop deletion.
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @no_dominating(i64 %n, i1 %c) gc "safepoint-in-loop-example" {
+define void @no_dominating(i1 %c, i1 %keep_going) "java-method" gc "safepoint-in-loop-example" {
 entry:
   br label %loop.header
 
 loop.header:
-  %iv = phi i64 [ 0, %entry ], [ %iv.next, %loop.latch ]
   br i1 %c, label %then, label %else
 
 then:
@@ -23,9 +24,7 @@ else:
   br label %loop.latch
 
 loop.latch:
-  %iv.next = add nsw i64 %iv, 1
-  %exit.cond = icmp slt i64 %iv.next, %n
-  br i1 %exit.cond, label %loop.header, label %exit
+  br i1 %keep_going, label %loop.header, label %exit
 
 exit:
   ret void

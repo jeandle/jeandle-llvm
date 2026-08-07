@@ -1,15 +1,20 @@
-; RUN: opt -passes='safepoint-elimination<strip-mining>' \
-; RUN:   -jeandle-enable-strip-mining -S < %s | FileCheck %s
-; RUN: opt -passes='safepoint-elimination<strip-mining>' \
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' \
+; RUN:   -S < %s | FileCheck %s
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -jeandle-loop-strip-mining-iter=0 \
 ; RUN:   -S < %s | FileCheck %s --check-prefix=DISABLED \
-; RUN:   --implicit-check-not=.outer --implicit-check-not='!poll-coverage'
+; RUN:   --implicit-check-not=.outer
 
-; StripMining does not perform keep-one or short-loop deletion while preparing
-; MemorySSA-based relocation plans.
+; The StripMining mode runs the complete loop-tree poll deletion
+; (completeLoopPollDeletion) AFTER its (possibly empty) surgery: a non-counted
+; loop reduces its polls via keep-one; a constant-short counted loop's poll is
+; deleted outright (short-loop); a strip-minable int counted loop relocates its
+; poll to the outer back-edge (the inner is poll-free). With strip mining OFF
+; (-iter=0) the mode is a no-op (polls unchanged, no .outer nest) and
+; the deletion falls to the Early mode instead.
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @non_counted_keeps_both_polls(i1 %again) {
+define void @non_counted_keep_one(i1 %again) "java-method" {
 entry:
   br label %header
 header:
@@ -22,11 +27,10 @@ exit:
   ret void
 }
 
-; CHECK-LABEL: @non_counted_keeps_both_polls(
-; CHECK-COUNT-2: call hotspotcc void @jeandle.safepoint_poll()
-; CHECK-NOT:   !poll-coverage
+; CHECK-LABEL: @non_counted_keep_one(
+; CHECK-COUNT-1: call hotspotcc void @jeandle.safepoint_poll()
 
-define void @short_counted_loop_keeps_poll() {
+define void @short_counted_poll_deleted() "java-method" {
 entry:
   br label %header
 header:
@@ -43,11 +47,11 @@ exit:
   ret void
 }
 
-; CHECK-LABEL: @short_counted_loop_keeps_poll(
+; CHECK-LABEL: @short_counted_poll_deleted(
 ; CHECK-NOT:   .outer
-; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
+; CHECK-NOT:   call hotspotcc void @jeandle.safepoint_poll
 
-define void @strip_mining_toggle(i64 %n) {
+define void @strip_mining_toggle(i64 %n) "java-method" {
 entry:
   br label %header
 header:
@@ -71,7 +75,7 @@ exit:
 ; CHECK-LABEL: @strip_mining_toggle(
 ; CHECK:       body:
 ; CHECK-NOT:     call hotspotcc void @jeandle.safepoint_poll
-; CHECK:       header.outer.latch:
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %outer.iv.next) ]{{.*}}!poll-coverage
+; CHECK:       body.outer.latch:
+; CHECK:         call hotspotcc void @jeandle.safepoint_poll() #{{[0-9]+}} [ "deopt"(i64 %outer.iv.next) ]
 
 !java-method-compilation = !{}

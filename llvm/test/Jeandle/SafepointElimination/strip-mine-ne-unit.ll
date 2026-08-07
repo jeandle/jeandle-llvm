@@ -1,5 +1,5 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -S < %s | FileCheck %s
 
 ; C2 treats `i != limit` as a counted loop only for unit strides and a proven
@@ -8,7 +8,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @header_ne_inc(i64 %n) {
+define void @header_ne_inc(i64 noundef %n) "java-method" {
 entry:
   %entry.guard = icmp sle i64 0, %n
   br i1 %entry.guard, label %loop.preheader, label %return
@@ -37,15 +37,13 @@ return:
 }
 
 ; CHECK-LABEL: @header_ne_inc(
-; CHECK:       header:
-; CHECK:         %cond = icmp ne i64 %iv, %outer.inner.limit
-; CHECK:         br i1 %cond, label %body, label %header.outer.latch
 ; CHECK:       latch:
-; CHECK:         br label %header, !strip-mined
-; CHECK:       header.outer:
+; CHECK:         %cond = icmp ne i64 %iv.next, %outer.inner.limit
+; CHECK:         br i1 %cond, label %body, label %body.outer.latch
+; CHECK:       body.outer:
 ; CHECK:         %outer.cond = icmp slt i64 %outer.iv, %n
 
-define void @header_eq_exit_on_true(i64 %n) {
+define void @header_eq_exit_on_true(i64 noundef %n) "java-method" {
 entry:
   %entry.guard = icmp sle i64 0, %n
   br i1 %entry.guard, label %loop.preheader, label %return
@@ -74,15 +72,13 @@ return:
 }
 
 ; CHECK-LABEL: @header_eq_exit_on_true(
-; CHECK:       header:
-; CHECK:         %done = icmp eq i64 %iv, %outer.inner.limit
-; CHECK:         br i1 %done, label %header.outer.latch, label %body
 ; CHECK:       latch:
-; CHECK:         br label %header, !strip-mined
-; CHECK:       header.outer:
+; CHECK:         %done = icmp eq i64 %iv.next, %outer.inner.limit
+; CHECK:         br i1 %done, label %body.outer.latch, label %body
+; CHECK:       body.outer:
 ; CHECK:         %outer.cond = icmp slt i64 %outer.iv, %n
 
-define void @latch_ne_inc(i64 %n) {
+define void @latch_ne_inc(i64 noundef %n) "java-method" {
 entry:
   %entry.guard = icmp slt i64 0, %n
   br i1 %entry.guard, label %loop.preheader, label %return
@@ -111,11 +107,11 @@ return:
 ; CHECK:       latch:
 ; CHECK-NOT:     call hotspotcc void @jeandle.safepoint_poll
 ; CHECK:         %cond = icmp ne i64 %iv.next, %outer.inner.limit
-; CHECK:         br i1 %cond, label %header, label %header.outer.latch, !strip-mined
+; CHECK:         br i1 %cond, label %header, label %header.outer.latch
 ; CHECK:       header.outer:
 ; CHECK:         %outer.cond = icmp slt i64 %outer.iv, %n
 
-define void @header_ne_dec(i64 %n) {
+define void @header_ne_dec(i64 noundef %n) "java-method" {
 entry:
   %entry.guard = icmp sge i64 10, %n
   br i1 %entry.guard, label %loop.preheader, label %return
@@ -144,13 +140,15 @@ return:
 }
 
 ; CHECK-LABEL: @header_ne_dec(
-; CHECK:       header:
-; CHECK:         %cond = icmp ne i64 %iv, %outer.inner.limit
-; CHECK:       header.outer:
+; CHECK:       latch:
+; CHECK:         %cond = icmp ne i64 %iv.next, %outer.inner.limit
+; CHECK:       body.outer:
 ; CHECK:         %outer.cond = icmp sgt i64 %outer.iv, %n
-; CHECK:         %outer.batch.end = call i64 @llvm.ssub.sat.i64(i64 %outer.iv, i64 1000)
+; CHECK:         %outer.batch.dist = sub nsw i128
+; CHECK:         call i128 @llvm.smin.i128
+; CHECK:         %outer.inner.limit = sub nsw i64 %outer.iv, %outer.batch.chunk
 
-define void @header_ne_swapped(i64 %n) {
+define void @header_ne_swapped(i64 noundef %n) "java-method" {
 entry:
   %entry.guard = icmp sle i64 0, %n
   br i1 %entry.guard, label %loop.preheader, label %return
@@ -179,12 +177,12 @@ return:
 }
 
 ; CHECK-LABEL: @header_ne_swapped(
-; CHECK:       header:
-; CHECK:         %cond = icmp ne i64 %outer.inner.limit, %iv
-; CHECK:       header.outer:
+; CHECK:       latch:
+; CHECK:         %cond = icmp ne i64 %outer.inner.limit, %iv.next
+; CHECK:       body.outer:
 ; CHECK:         %outer.cond = icmp slt i64 %outer.iv, %n
 
-define void @latch_ne_dec(i64 %n) {
+define void @latch_ne_dec(i64 noundef %n) "java-method" {
 entry:
   %entry.guard = icmp sgt i64 10, %n
   br i1 %entry.guard, label %loop.preheader, label %return
@@ -213,8 +211,10 @@ return:
 ; CHECK:       latch:
 ; CHECK-NOT:     call hotspotcc void @jeandle.safepoint_poll
 ; CHECK:         %cond = icmp ne i64 %iv.next, %outer.inner.limit
-; CHECK:         br i1 %cond, label %header, label %header.outer.latch, !strip-mined
+; CHECK:         br i1 %cond, label %header, label %header.outer.latch
 ; CHECK:       header.outer:
 ; CHECK:         %outer.cond = icmp sgt i64 %outer.iv, %n
-; CHECK:         %outer.batch.end = call i64 @llvm.ssub.sat.i64(i64 %outer.iv, i64 1000)
+; CHECK:         %outer.batch.dist = sub nsw i128
+; CHECK:         call i128 @llvm.smin.i128
+; CHECK:         %outer.inner.limit = sub nsw i64 %outer.iv, %outer.batch.chunk
 !java-method-compilation = !{}

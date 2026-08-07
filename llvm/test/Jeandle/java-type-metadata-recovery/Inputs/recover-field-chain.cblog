@@ -1,0 +1,9 @@
+# Constant oop 0 has runtime klass 5 (Root).
+# Root.field@16 -> klass 7 (Child). Child.field@20 -> klass 9 (Grand), final.
+GetOopKlass 0 = 5
+GetFieldType 5 16 = 7
+IsUnverifiedInterface 7 = false
+IsEffectivelyFinal 7 = false
+GetFieldType 7 20 = 9
+IsUnverifiedInterface 9 = false
+IsEffectivelyFinal 9 = true

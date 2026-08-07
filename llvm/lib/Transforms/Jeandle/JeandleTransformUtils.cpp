@@ -11,9 +11,12 @@
 #include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 #include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/IR/Jeandle/Deoptimization.h"
+#include "llvm/IR/Jeandle/GCStrategy.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+
+#include <string>
 
 namespace llvm {
 
@@ -127,6 +130,111 @@ BasicBlock *insertCheckInstanceOf(Instruction &Inst, Value *Receiver,
     DTU->flush();
   }
   return CheckcastFail;
+}
+
+BasicBlock *insertNullCheck(Instruction &Inst, Value *Receiver,
+                            const StringRef &Prefix, DomTreeUpdater *DTU) {
+  LLVMContext &Context = Inst.getContext();
+  BasicBlock *BB = Inst.getParent();
+
+  assert(Receiver->getType() ==
+             PointerType::get(Context, jeandle::AddrSpace::JavaHeapAddrSpace) &&
+         "must be a java object");
+  BasicBlock *NullCheckPass =
+      SplitBlock(BB, &Inst, DTU, nullptr, nullptr, Prefix + "_null_check_pass");
+  BasicBlock *NullCheckFail = BasicBlock::Create(
+      Context, Prefix + "_null_check_fail", BB->getParent(), NullCheckPass);
+
+  BB->getTerminator()->eraseFromParent();
+  IRBuilder<> BuilderOrigin(BB);
+  Value *IfNull = BuilderOrigin.CreateICmp(
+      CmpInst::ICMP_EQ, Receiver,
+      ConstantPointerNull::get(cast<PointerType>(Receiver->getType())));
+  BranchInst *NullCheckBr =
+      BuilderOrigin.CreateCondBr(IfNull, NullCheckFail, NullCheckPass);
+  // Add make.implicit metadata, and the ImplicitNullChecksPass will transform
+  // it into an implicit check.
+  MDNode *MakeImplicit = MDNode::get(Context, {});
+  NullCheckBr->setMetadata(LLVMContext::MD_make_implicit, MakeImplicit);
+
+  if (DTU) {
+    DTU->applyUpdates({{DominatorTree::Insert, BB, NullCheckFail}});
+    DTU->flush();
+  }
+
+  return NullCheckFail;
+}
+
+CallInst *insertJavaTypeAssume(Value *V, jeandle::JavaType T, Instruction *I) {
+  Module *M = I->getModule();
+  Function *AssumeFn = M->getFunction("jeandle.assume_java_type");
+  assert(AssumeFn && "jeandle.assume_java_type must exist in the module");
+
+  IRBuilder<> Builder(I);
+  CallInst *Assume =
+      Builder.CreateCall(AssumeFn, {V},
+                         V->hasName() ? Twine(V->getName()) + ".type_assume"
+                                      : Twine("type_assume"));
+  Assume->setCallingConv(CallingConv::Hotspot_JIT);
+
+  LLVMContext &Context = I->getContext();
+  Assume->addRetAttr(Attribute::get(Context, jeandle::Attribute::JavaKlass,
+                                    std::to_string(T.Klass)));
+  if (T.Exact)
+    Assume->addRetAttr(
+        Attribute::get(Context, jeandle::Attribute::JavaKlassExact));
+
+  return Assume;
+}
+
+int getCurrentDeoptBCI(const CallBase &CB) {
+  return findCurrentDeoptScope(CB).BCI;
+}
+
+Function *getOrInsertJavaMethodFunction(Module &M, StringRef Name,
+                                        FunctionType *Type, uintptr_t Method,
+                                        bool IsAccessor) {
+  FunctionCallee Callee = M.getOrInsertFunction(Name, Type);
+  Function *Func = cast<Function>(Callee.getCallee());
+
+  Func->setCallingConv(CallingConv::Hotspot_JIT);
+  Func->setGC(jeandle::JeandleGC);
+  Func->addFnAttr(llvm::Attribute::get(M.getContext(),
+                                       llvm::jeandle::Attribute::JavaMethod,
+                                       std::to_string(Method)));
+  if (IsAccessor) {
+    Func->addFnAttr(
+        Attribute::get(M.getContext(), jeandle::Attribute::JavaAccessorMethod));
+  }
+  return Func;
+}
+
+uintptr_t getCurrentDeoptMethod(const CallBase &CB, uintptr_t RootMethod) {
+  DeoptScopeInfo Scope = findCurrentDeoptScope(CB);
+  if (Scope.BCIPairStart == 1)
+    return RootMethod;
+
+  if (Scope.BCIPairStart < 3)
+    reportInvalidDeoptBundle(CB, "missing inlinee method before bci");
+
+  OperandBundleUse Deopt = *CB.getOperandBundle(LLVMContext::OB_deopt);
+  auto *Encoding =
+      dyn_cast<ConstantInt>(Deopt.Inputs[Scope.BCIPairStart - 3].get());
+  auto *Method =
+      dyn_cast<ConstantInt>(Deopt.Inputs[Scope.BCIPairStart - 2].get());
+  if (!Encoding || !Encoding->getType()->isIntegerTy(64) || !Method ||
+      !Method->getType()->isIntegerTy(64))
+    reportInvalidDeoptBundle(CB, "invalid inlinee method encoding");
+
+  jeandle::DeoptValueEncoding DeoptInfo =
+      jeandle::DeoptValueEncoding::decode(Encoding->getZExtValue());
+  if (DeoptInfo.valueType() != jeandle::DeoptValueEncoding::MethodType)
+    reportInvalidDeoptBundle(CB, "missing MethodType marker before bci");
+
+  uintptr_t MethodValue = static_cast<uintptr_t>(Method->getZExtValue());
+  if (MethodValue == 0)
+    reportInvalidDeoptBundle(CB, "null inlinee method");
+  return MethodValue;
 }
 
 static std::pair<unsigned, unsigned> computeDeoptStackLayout(CallBase &CB) {

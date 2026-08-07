@@ -274,9 +274,11 @@
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
 #include "llvm/Transforms/Jeandle/JeandleNarrowOopMarker.h"
+#include "llvm/Transforms/Jeandle/RecoverTypeInfo.h"
 #include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"
 #include "llvm/Transforms/Jeandle/SafepointCoverageVerifier.h"
-#include "llvm/Transforms/Jeandle/SafepointElimination.h"
+#include "llvm/Transforms/Jeandle/SafepointPollElimination.h"
+#include "llvm/Transforms/Jeandle/SafepointStripMining.h"
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/ObjCARC.h"
@@ -1762,25 +1764,61 @@ Expected<int> parseJavaOperationLowerOptions(StringRef Params) {
   return Result;
 }
 
-Expected<SafepointEliminationMode>
-parseSafepointEliminationOptions(StringRef Params) {
-  if (Params.empty())
-    return SafepointEliminationMode::Early;
-  std::optional<SafepointEliminationMode> Mode =
-      StringSwitch<std::optional<SafepointEliminationMode>>(Params)
-          .Case("early", SafepointEliminationMode::Early)
-          .Case("inclusive-loop-versioning",
-                SafepointEliminationMode::InclusiveLoopVersioning)
-          .Case("strip-mining", SafepointEliminationMode::StripMining)
-          .Case("cleanup", SafepointEliminationMode::Cleanup)
-          .Case("loop-deletion-prep",
-                SafepointEliminationMode::LoopDeletionPrep)
-          .Default(std::nullopt);
-  if (Mode)
-    return *Mode;
-  return make_error<StringError>(
-      formatv("invalid SafepointElimination mode: '{0}'", Params).str(),
-      inconvertibleErrorCode());
+Expected<SafepointPollEliminationOptions>
+parseSafepointPollEliminationOptions(StringRef Params) {
+  SafepointPollEliminationOptions Result;
+  bool HasMode = false;
+  while (!Params.empty()) {
+    StringRef Param;
+    std::tie(Param, Params) = Params.split(';');
+    if (Param == "defer-empty-loop-deletion") {
+      Result.DeferEmptyLoopDeletion = true;
+      continue;
+    }
+    std::optional<SafepointPollEliminationMode> Mode =
+        StringSwitch<std::optional<SafepointPollEliminationMode>>(Param)
+            .Case("early", SafepointPollEliminationMode::Early)
+            .Case("after-strip-mining",
+                  SafepointPollEliminationMode::AfterStripMining)
+            .Case("loop-deletion-prep",
+                  SafepointPollEliminationMode::LoopDeletionPrep)
+            .Default(std::nullopt);
+    if (!Mode || HasMode)
+      return make_error<StringError>(
+          formatv("invalid SafepointPollElimination option: '{0}'", Param)
+              .str(),
+          inconvertibleErrorCode());
+    Result.Mode = *Mode;
+    HasMode = true;
+  }
+  return Result;
+}
+
+Expected<SafepointStripMiningOptions>
+parseSafepointStripMiningOptions(StringRef Params) {
+  SafepointStripMiningOptions Result;
+  bool HasMode = false;
+  while (!Params.empty()) {
+    StringRef Param;
+    std::tie(Param, Params) = Params.split(';');
+    if (Param == "defer-empty-loop-deletion") {
+      Result.DeferEmptyLoopDeletion = true;
+      continue;
+    }
+    std::optional<SafepointStripMiningMode> Mode =
+        StringSwitch<std::optional<SafepointStripMiningMode>>(Param)
+            .Case("inclusive-loop-versioning",
+                  SafepointStripMiningMode::InclusiveLoopVersioning)
+            .Case("strip-mining", SafepointStripMiningMode::StripMining)
+            .Default(std::nullopt);
+    if (!Mode || HasMode)
+      return make_error<StringError>(
+          formatv("invalid SafepointStripMining option: '{0}'", Param).str(),
+          inconvertibleErrorCode());
+    Result.Mode = *Mode;
+    HasMode = true;
+  }
+  return Result;
 }
 
 } // namespace
@@ -2082,8 +2120,8 @@ Error PassBuilder::parseModulePass(ModulePassManager &MPM,
 #define MODULE_ANALYSIS(NAME, CREATE_PASS)                                     \
   if (Name == "require<" NAME ">") {                                           \
     MPM.addPass(                                                               \
-        RequireAnalysisPass<                                                   \
-            std::remove_reference_t<decltype(CREATE_PASS)>, Module>());        \
+        RequireAnalysisPass<std::remove_reference_t<decltype(CREATE_PASS)>,    \
+                            Module>());                                        \
     return Error::success();                                                   \
   }                                                                            \
   if (Name == "invalidate<" NAME ">") {                                        \
@@ -2228,10 +2266,10 @@ Error PassBuilder::parseCGSCCPass(CGSCCPassManager &CGPM,
   }
 #define CGSCC_ANALYSIS(NAME, CREATE_PASS)                                      \
   if (Name == "require<" NAME ">") {                                           \
-    CGPM.addPass(RequireAnalysisPass<                                          \
-                 std::remove_reference_t<decltype(CREATE_PASS)>,               \
-                 LazyCallGraph::SCC, CGSCCAnalysisManager, LazyCallGraph &,    \
-                 CGSCCUpdateResult &>());                                      \
+    CGPM.addPass(                                                              \
+        RequireAnalysisPass<std::remove_reference_t<decltype(CREATE_PASS)>,    \
+                            LazyCallGraph::SCC, CGSCCAnalysisManager,          \
+                            LazyCallGraph &, CGSCCUpdateResult &>());          \
     return Error::success();                                                   \
   }                                                                            \
   if (Name == "invalidate<" NAME ">") {                                        \
@@ -2479,10 +2517,10 @@ Error PassBuilder::parseLoopPass(LoopPassManager &LPM,
   }
 #define LOOP_ANALYSIS(NAME, CREATE_PASS)                                       \
   if (Name == "require<" NAME ">") {                                           \
-    LPM.addPass(RequireAnalysisPass<                                           \
-                std::remove_reference_t<decltype(CREATE_PASS)>, Loop,          \
-                LoopAnalysisManager, LoopStandardAnalysisResults &,            \
-                LPMUpdater &>());                                              \
+    LPM.addPass(                                                               \
+        RequireAnalysisPass<std::remove_reference_t<decltype(CREATE_PASS)>,    \
+                            Loop, LoopAnalysisManager,                         \
+                            LoopStandardAnalysisResults &, LPMUpdater &>());   \
     return Error::success();                                                   \
   }                                                                            \
   if (Name == "invalidate<" NAME ">") {                                        \
@@ -2670,12 +2708,14 @@ Error PassBuilder::parsePassPipeline(ModulePassManager &MPM,
       Pipeline = {{"function", std::move(*Pipeline)}};
     } else if (isLoopNestPassName(FirstName, LoopPipelineParsingCallbacks,
                                   UseMemorySSA)) {
-      Pipeline = {{"function", {{UseMemorySSA ? "loop-mssa" : "loop",
-                                 std::move(*Pipeline)}}}};
+      Pipeline = {
+          {"function",
+           {{UseMemorySSA ? "loop-mssa" : "loop", std::move(*Pipeline)}}}};
     } else if (isLoopPassName(FirstName, LoopPipelineParsingCallbacks,
                               UseMemorySSA)) {
-      Pipeline = {{"function", {{UseMemorySSA ? "loop-mssa" : "loop",
-                                 std::move(*Pipeline)}}}};
+      Pipeline = {
+          {"function",
+           {{UseMemorySSA ? "loop-mssa" : "loop", std::move(*Pipeline)}}}};
     } else if (isMachineFunctionPassName(
                    FirstName, MachineFunctionPipelineParsingCallbacks)) {
       Pipeline = {{"function", {{"machine-function", std::move(*Pipeline)}}}};

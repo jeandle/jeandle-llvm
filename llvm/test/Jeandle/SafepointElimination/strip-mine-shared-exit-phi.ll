@@ -1,4 +1,4 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>,verify' -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify' -S < %s | FileCheck %s
 
 ; One header recurrence (%s) leaks out through two separate exit LCSSA phis.
 ; The exit fixup resolves each exit phi by its incoming value (header phi ->
@@ -10,7 +10,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define i64 @dup(i64 %n) {
+define i64 @dup(i64 %n) "java-method" {
 entry:
   br label %header
 
@@ -40,8 +40,11 @@ exit:
 
 ; Both exit phis fix up to the outer recurrence, and the loop is strip-mined.
 ; CHECK-LABEL: @dup(
+; CHECK:       header.exit_crit_edge:
+; CHECK:         %split = phi i64 [ %s3.outer, %body.outer ]
+; CHECK:         %split{{[0-9]+}} = phi i64 [ %s3.outer, %body.outer ]
 ; CHECK:       exit:
-; CHECK:         %r1 = phi i64 [ %s.outer, %header.outer ]
-; CHECK:         %r2 = phi i64 [ %s.outer, %header.outer ]
-; CHECK:       header.outer.latch:
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CHECK:         %r1 = phi i64 [ %split, %header.exit_crit_edge ], [ 0, %entry ]
+; CHECK:         %r2 = phi i64 [ %split{{[0-9]+}}, %header.exit_crit_edge ], [ 0, %entry ]
+; CHECK:       body.outer.latch:
+; CHECK:         call hotspotcc void @jeandle.safepoint_poll()

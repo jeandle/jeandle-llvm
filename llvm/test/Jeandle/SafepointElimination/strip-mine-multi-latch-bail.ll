@@ -1,4 +1,4 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
 
 ; A loop with two back-edges (two latches) has no unique latch. Back-edge poll
 ; collection and the CFG surgery both key off a single latch, so strip mining
@@ -6,7 +6,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @ml(i64 %n, i1 %p) {
+define void @ml(i64 %n, i1 %p) "java-method" {
 entry:
   br label %h
 
@@ -36,4 +36,3 @@ x:
 ; CHECK-LABEL: @ml(
 ; CHECK-NOT:   outer
 ; CHECK:         call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv) ]
-; CHECK-NOT:   !poll-coverage

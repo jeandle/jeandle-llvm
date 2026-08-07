@@ -1,4 +1,4 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
 
 ; Inclusive predicate (i <= n) with an unconstrained limit. If n == INT64_MAX,
 ; the saturating batch-end (outer.iv + 999, saturated) pins the clamped inner
@@ -10,7 +10,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @loop(i64 %n) {
+define void @loop(i64 %n) "java-method" {
 entry:
   br label %header
 
@@ -36,4 +36,3 @@ exit:
 ; CHECK-LABEL: @loop(
 ; CHECK-NOT:   outer
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
-; CHECK-NOT:   !poll-coverage

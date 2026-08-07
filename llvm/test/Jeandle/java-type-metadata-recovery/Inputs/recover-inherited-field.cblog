@@ -1,0 +1,5 @@
+# Klass 7 inherits the field at offset 16 from superclass 5; declared type 9.
+# GetFieldType walks 7 -> super chain, finding it on 5.
+GetFieldType 7 16 = 9
+IsUnverifiedInterface 9 = false
+IsEffectivelyFinal 9 = false

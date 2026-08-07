@@ -1,32 +1,31 @@
-; RUN: opt -passes=safepoint-elimination -S < %s | FileCheck %s
+; RUN: opt -passes=safepoint-poll-elimination -jeandle-loop-strip-mining-iter=0 -S < %s | FileCheck %s
 
-; The outer loop has a provable trip count of 10 but contains another loop, so
-; it is not innermost and keeps its poll: with the (unbounded) inner loop in
-; the body, "10 iterations" says nothing about time between polls, and a
-; poll-free short inner loop inside a poll-free short outer loop would
-; compound to budget^2 iterations.
+; Both the inner and outer loops are int counted, so with strip mining off both
+; lose their polls (C2 counted_loop applies to every int counted loop, not only
+; the innermost): each terminates within its IV's type range, so each has a
+; finite time-to-safepoint on its own.
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @nested_outer(i64 %m) gc "safepoint-in-loop-example" {
+define void @nested_outer(i32 %m) "java-method" gc "safepoint-in-loop-example" {
 entry:
   br label %outer.header
 
 outer.header:
-  %i = phi i64 [ 0, %entry ], [ %i.next, %outer.latch ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %outer.latch ]
   br label %inner.header
 
 inner.header:
-  %j = phi i64 [ 0, %outer.header ], [ %j.next, %inner.header ]
+  %j = phi i32 [ 0, %outer.header ], [ %j.next, %inner.header ]
   call hotspotcc void @jeandle.safepoint_poll()
-  %j.next = add nsw i64 %j, 1
-  %inner.cond = icmp slt i64 %j.next, %m
+  %j.next = add nsw i32 %j, 1
+  %inner.cond = icmp slt i32 %j.next, %m
   br i1 %inner.cond, label %inner.header, label %outer.latch
 
 outer.latch:
   call hotspotcc void @jeandle.safepoint_poll()
-  %i.next = add nuw nsw i64 %i, 1
-  %outer.cond = icmp slt i64 %i.next, 10
+  %i.next = add nuw nsw i32 %i, 1
+  %outer.cond = icmp slt i32 %i.next, 10
   br i1 %outer.cond, label %outer.header, label %exit
 
 exit:
@@ -36,7 +35,4 @@ exit:
 !java-method-compilation = !{}
 
 ; CHECK-LABEL: @nested_outer(
-; CHECK:       inner.header:
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll()
-; CHECK:       outer.latch:
-; CHECK-NEXT:    call hotspotcc void @jeandle.safepoint_poll()
+; CHECK-NOT:   call hotspotcc void @jeandle.safepoint_poll

@@ -1,4 +1,4 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
+; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
 
 ; The exit compare %cond has a second use (a select in the body) besides the
 ; exit branch. Strip mining rewrites the compare's limit operand in place to the
@@ -9,7 +9,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define i64 @h(i64 %n) {
+define i64 @h(i64 %n) "java-method" {
 entry:
   br label %header
 
@@ -42,4 +42,3 @@ exit:
 ; CHECK-NOT:   outer
 ; CHECK:       %cond = icmp slt i64 %iv, %n
 ; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %s.next) ]
-; CHECK-NOT:   !poll-coverage

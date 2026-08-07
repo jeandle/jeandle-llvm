@@ -1,5 +1,5 @@
-; RUN: opt -passes='require<memoryssa>,safepoint-elimination<early>,safepoint-elimination<strip-mining>,verify<memoryssa>,verify' \
-; RUN:   -jeandle-enable-strip-mining -verify-analysis-invalidation \
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,require<memoryssa>,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<memoryssa>,verify' \
+; RUN:   -verify-analysis-invalidation \
 ; RUN:   -verify-memoryssa -S < %s | FileCheck %s
 
 ; Early removes one adjacent poll after MemorySSA has already been cached.
@@ -8,7 +8,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @fresh_memoryssa_after_early_mutation(i64 %n) {
+define void @fresh_memoryssa_after_early_mutation(i64 %n) "java-method" {
 entry:
   br label %header
 header:
@@ -27,7 +27,7 @@ exit:
 }
 
 ; CHECK-LABEL: @fresh_memoryssa_after_early_mutation(
-; CHECK:       header.outer:
-; CHECK-COUNT-1: call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CHECK:       body.outer:
+; CHECK-COUNT-1: call hotspotcc void @jeandle.safepoint_poll()
 
 !java-method-compilation = !{}

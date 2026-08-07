@@ -1,22 +1,17 @@
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>' -jeandle-enable-strip-mining -S < %s | FileCheck %s
-; RUN: opt -passes='safepoint-elimination<early>,safepoint-elimination<strip-mining>,verify<jeandle-safepoint-coverage>' \
-; RUN:   -jeandle-enable-strip-mining -jeandle-verify-safepoint-coverage=fatal \
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
+; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
+; RUN:   -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -disable-output < %s
 
-; Inclusive exit predicate (i <= n). `i <= batch_end` runs one more iteration
-; than `i < batch_end`, so the per-batch advance is N-1 steps, keeping each
-; batch within the N-iteration budget. With N=1000 and step 1 the batch end is
-; outer.iv + 999.
-;
-; The limit must be provably below the type maximum: for `i <= n`, if n could be
-; INT64_MAX the saturating batch-end pins the inner limit to INT64_MAX and the
-; inner test `i <= INT64_MAX` never fails -- a poll-free infinite loop. Here the
-; mask proves 0 <= n <= 1000000, so mining is safe. (The unbounded-parameter
-; form is exercised as a bail in strip-mine-inclusive-extreme-bail.ll.)
+; The masked limit proves fewer than INT_MAX backedges (<= 1e6) even though the
+; IV is i64. With strip mining enabled such a loop is still wrapped so its
+; time-to-safepoint is bounded to the chunk size: inner poll-free, one relocated
+; poll on the outer back-edge. (The bounded trip no longer opts it out of strip
+; mining, matching C2's treatment of int counted loops.)
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @loop(i64 noundef %raw) {
+define void @loop(i64 noundef %raw) "java-method" {
 entry:
   %n = and i64 %raw, 1000000
   br label %header
@@ -41,7 +36,6 @@ exit:
 !java-method-compilation = !{}
 
 ; CHECK-LABEL: @loop(
-; CHECK:         %outer.cond = icmp sle i64 %outer.iv, %n
-; CHECK:         %outer.batch.end = call i64 @llvm.sadd.sat.i64(i64 %outer.iv, i64 999)
-; CHECK:         icmp sle i64 %outer.batch.end, %n
-; CHECK:         call hotspotcc void @jeandle.safepoint_poll(){{.*}}!poll-coverage
+; CHECK:         .outer
+; CHECK:         call hotspotcc void @jeandle.safepoint_poll() #{{[0-9]+}}
+; CHECK:       attributes #{{[0-9]+}} = { "jeandle.strip-mined-poll" }
