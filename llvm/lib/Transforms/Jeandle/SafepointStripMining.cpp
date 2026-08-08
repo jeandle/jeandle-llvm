@@ -1040,25 +1040,24 @@ struct FrozenOperands {
 };
 
 // Freeze InitVal/Limit when either may be undef/poison so the duplicated tests
-// in the outer-loop (strip mining) or the cloned slow path (inclusive versioning)
-// agree on a single stable value. Operands already known non-undef are returned
-// unchanged. `B` must be positioned where the freeze should materialize (the
-// preheader terminator for strip mining, the versioning check block for inclusive
-// versioning); `Prefix` selects the freeze value names ("exclusive.*" /
-// "inclusive.*"). In-loop uses of a frozen operand are rewritten to the frozen
-// value. Shared by applyStripMinePlan and applyInclusiveLoopVersioningPlan.
+// in the outer-loop (strip mining) or the cloned slow path (inclusive
+// versioning) agree on a single stable value. Operands already known non-undef
+// are returned unchanged. `B` must be positioned where the freeze should
+// materialize (the preheader terminator for strip mining, the versioning check
+// block for inclusive versioning); `Prefix` selects the freeze value names
+// ("exclusive.*" / "inclusive.*"). In-loop uses of a frozen operand are
+// rewritten to the frozen value. Shared by applyStripMinePlan and
+// applyInclusiveLoopVersioningPlan.
 static FrozenOperands freezeLoopOperands(Loop *L, Value *InitVal, Value *Limit,
                                          IRBuilder<> &B, StringRef Prefix) {
-  Value *StableLimit =
-      isGuaranteedNotToBeUndefOrPoison(Limit)
-          ? Limit
-          : B.CreateFreeze(Limit, Prefix + ".limit.fr");
+  Value *StableLimit = isGuaranteedNotToBeUndefOrPoison(Limit)
+                           ? Limit
+                           : B.CreateFreeze(Limit, Prefix + ".limit.fr");
   Value *StableInit =
-      InitVal == Limit
-          ? StableLimit
-          : (isGuaranteedNotToBeUndefOrPoison(InitVal)
-                 ? InitVal
-                 : B.CreateFreeze(InitVal, Prefix + ".start.fr"));
+      InitVal == Limit ? StableLimit
+                       : (isGuaranteedNotToBeUndefOrPoison(InitVal)
+                              ? InitVal
+                              : B.CreateFreeze(InitVal, Prefix + ".start.fr"));
   replaceLoopUses(L, Limit, StableLimit);
   replaceLoopUses(L, InitVal, StableInit);
   return {StableInit, StableLimit};
@@ -1125,10 +1124,10 @@ void applyInclusiveLoopVersioningPlan(StripMinePlan &Plan, LoopInfo &LI,
 
   // Both versions initially retain their original polls. Re-form dedicated
   // exits before the next pass recomputes MemorySSA and strip-mines only the
-  // guarded version. The NoWrapCheckBB / entry-guard construction above bypasses
-  // DominatorTree maintenance, so re-baseline DT once before forming the exits;
-  // formDedicatedExitBlocks then keeps DT current incrementally (it splits
-  // predecessors through DT), so no second recalculate is needed.
+  // guarded version. The NoWrapCheckBB / entry-guard construction above
+  // bypasses DominatorTree maintenance, so re-baseline DT once before forming
+  // the exits; formDedicatedExitBlocks then keeps DT current incrementally (it
+  // splits predecessors through DT), so no second recalculate is needed.
   DT.recalculate(*F);
   formDedicatedExitBlocks(SlowLoop, &DT, &LI, nullptr, true);
   formDedicatedExitBlocks(FastLoop, &DT, &LI, nullptr, true);
@@ -1167,16 +1166,17 @@ static Value *emitSignedInnerLimit(IRBuilder<> &B, Value *OuterIV, Value *Limit,
   Value *StepN = ConstantInt::get(IVTy, AbsStepN);
   Value *WideIV = B.CreateSExt(OuterIV, WideTy, "outer.iv.wide");
   Value *WideLim = B.CreateSExt(Limit, WideTy, "outer.limit.wide");
-  Value *Diff = Increasing ? B.CreateNSWSub(WideLim, WideIV, "outer.batch.dist")
-                           : B.CreateNSWSub(WideIV, WideLim, "outer.batch.dist");
+  Value *Diff = Increasing
+                    ? B.CreateNSWSub(WideLim, WideIV, "outer.batch.dist")
+                    : B.CreateNSWSub(WideIV, WideLim, "outer.batch.dist");
   Value *ZeroW = ConstantInt::get(WideTy, 0);
-  Value *Rem = B.CreateBinaryIntrinsic(Intrinsic::smax, Diff, ZeroW,
-                                       /*FMFSource=*/nullptr, "outer.batch.rem");
-  Value *StepNW =
-      B.CreateZExt(StepN, WideTy, "outer.batch.stepn.wide");
-  Value *ChunkW = B.CreateBinaryIntrinsic(Intrinsic::smin, Rem, StepNW,
-                                          /*FMFSource=*/nullptr,
-                                          "outer.batch.chunk.wide");
+  Value *Rem =
+      B.CreateBinaryIntrinsic(Intrinsic::smax, Diff, ZeroW,
+                              /*FMFSource=*/nullptr, "outer.batch.rem");
+  Value *StepNW = B.CreateZExt(StepN, WideTy, "outer.batch.stepn.wide");
+  Value *ChunkW =
+      B.CreateBinaryIntrinsic(Intrinsic::smin, Rem, StepNW,
+                              /*FMFSource=*/nullptr, "outer.batch.chunk.wide");
   Value *Chunk = B.CreateTrunc(ChunkW, IVTy, "outer.batch.chunk");
   return Increasing ? B.CreateNSWAdd(OuterIV, Chunk, "outer.inner.limit")
                     : B.CreateNSWSub(OuterIV, Chunk, "outer.inner.limit");
@@ -1193,8 +1193,9 @@ static Value *emitSignedInnerLimit(IRBuilder<> &B, Value *OuterIV, Value *Limit,
 // recalculates the DominatorTree afterwards, so these structural checks do not
 // require it.
 static Loop *reparentAsOuterLoop(Loop *L, BasicBlock *OuterPH,
-                                 BasicBlock *OuterHeader, BasicBlock *InnerEntry,
-                                 BasicBlock *OuterLatch, LoopInfo &LI) {
+                                 BasicBlock *OuterHeader,
+                                 BasicBlock *InnerEntry, BasicBlock *OuterLatch,
+                                 LoopInfo &LI) {
   Loop *OuterL = LI.AllocateLoop();
   if (Loop *ParentL = L->getParentLoop()) {
     auto It = llvm::find(*ParentL, L);
@@ -1216,7 +1217,8 @@ static Loop *reparentAsOuterLoop(Loop *L, BasicBlock *OuterPH,
     OuterL->addBlockEntry(BB);
 
   assert(OuterL->contains(L) && "outer loop must contain the inner loop");
-  assert(L->getParentLoop() == OuterL && "inner's parent must be the outer loop");
+  assert(L->getParentLoop() == OuterL &&
+         "inner's parent must be the outer loop");
   assert(LI.getLoopFor(OuterHeader) == OuterL &&
          LI.getLoopFor(InnerEntry) == OuterL &&
          LI.getLoopFor(OuterLatch) == OuterL &&
@@ -1386,14 +1388,15 @@ static void createOuterSkeleton(StripMinePlan &Plan, Function *F, Type *Ty,
   Frame.OuterIV->addIncoming(InitVal, Frame.OuterPH);
   for (PHINode *HPhi : Plan.LiftedHeaderPhis) {
     PHINode *OP = B.CreatePHI(HPhi->getType(), 2, HPhi->getName() + ".outer");
-    OP->addIncoming(HPhi->getIncomingValueForBlock(Shape.Preheader), Frame.OuterPH);
+    OP->addIncoming(HPhi->getIncomingValueForBlock(Shape.Preheader),
+                    Frame.OuterPH);
     Frame.OuterReducPhis.push_back(OP);
   }
   if (Shape.FirstIterationGuaranteed) {
     // OuterCond is "continue the inner batch" so the br targets are fixed
     // regardless of the original branch polarity.
-    Value *OuterCond =
-        B.CreateICmp(Shape.ContinuePredicate, Frame.OuterIV, Limit, "outer.cond");
+    Value *OuterCond = B.CreateICmp(Shape.ContinuePredicate, Frame.OuterIV,
+                                    Limit, "outer.cond");
     B.CreateCondBr(OuterCond, Frame.InnerEntry, Shape.ExitBB);
   } else {
     // A latch-tested source loop executes once even when its continue
@@ -1423,8 +1426,8 @@ static void clampInnerLimit(StripMinePlan &Plan, Type *Ty, Value *Limit,
     Value *BatchEnd =
         B.CreateBinaryIntrinsic(SatID, Frame.OuterIV, StepN,
                                 /*FMFSource=*/nullptr, "outer.batch.end");
-    Value *KeepEnd =
-        B.CreateICmp(Shape.ContinuePredicate, BatchEnd, Limit, "outer.cap.cond");
+    Value *KeepEnd = B.CreateICmp(Shape.ContinuePredicate, BatchEnd, Limit,
+                                  "outer.cap.cond");
     InnerLimit = B.CreateSelect(KeepEnd, BatchEnd, Limit, "outer.inner.limit");
   } else {
     InnerLimit = emitSignedInnerLimit(B, Frame.OuterIV, Limit, Plan.AbsStepN,
@@ -1436,10 +1439,11 @@ static void clampInnerLimit(StripMinePlan &Plan, Type *Ty, Value *Limit,
 
 // Rewire the inner loop to run as one batch: repoint each header phi's
 // preheader incoming at InnerEntry (fed by the outer recurrence), set the latch
-// exit compare to the clamped per-batch limit, and redirect the exiting branch's
-// exit edge to the outer latch so a completed batch feeds the next outer
-// iteration instead of leaving the loop.
-static void rewireInnerHeaderForBatch(StripMinePlan &Plan, OuterLoopFrame &Frame) {
+// exit compare to the clamped per-batch limit, and redirect the exiting
+// branch's exit edge to the outer latch so a completed batch feeds the next
+// outer iteration instead of leaving the loop.
+static void rewireInnerHeaderForBatch(StripMinePlan &Plan,
+                                      OuterLoopFrame &Frame) {
   const StripMineShape &Shape = Plan.Shape;
   ArrayRef<PHINode *> LiftedHeaderPhis = Plan.LiftedHeaderPhis;
 
@@ -1479,8 +1483,8 @@ static void buildOuterLatch(StripMinePlan &Plan, Type *Ty, Value *Limit,
   if (Shape.FirstIterationGuaranteed) {
     Frame.OuterBr = B.CreateBr(Frame.OuterHeader);
   } else {
-    Value *OuterCond =
-        B.CreateICmp(Shape.ContinuePredicate, Frame.OuterIVNext, Limit, "outer.cond");
+    Value *OuterCond = B.CreateICmp(Shape.ContinuePredicate, Frame.OuterIVNext,
+                                    Limit, "outer.cond");
     Frame.OuterBr = B.CreateCondBr(OuterCond, Frame.OuterHeader, Shape.ExitBB);
   }
   Frame.OuterIV->addIncoming(Frame.OuterIVNext, Frame.OuterLatch);

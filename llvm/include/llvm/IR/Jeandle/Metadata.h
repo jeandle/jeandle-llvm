@@ -38,7 +38,8 @@ public:
   // later strip-mining pass skips it instead of trying to version it again.
   static constexpr const char *InclusiveSlowPath = "jeandle.inclusive.slow";
 
-  static constexpr const char *SkipSafepointCoverageVerifier = "skip-safepoint-coverage-verifier";
+  static constexpr const char *SkipSafepointCoverageVerifier =
+      "skip-safepoint-coverage-verifier";
 };
 
 enum AddrSpace : unsigned {

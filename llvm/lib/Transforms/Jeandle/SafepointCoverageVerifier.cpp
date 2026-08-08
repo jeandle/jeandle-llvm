@@ -121,9 +121,9 @@ SafepointCoverageCheck llvm::jeandle::getSafepointCoverageCheck() {
 PreservedAnalyses SafepointCoverageVerifier::run(Function &F,
                                                  FunctionAnalysisManager &AM) {
   // The verifier is a backstop for normal Java-method compilations. A module
-  // carrying the skip-safepoint-coverage-verifier named metadata opts out — this
-  // is set only for compilation paths with different safepoint semantics (e.g.
-  // intrinsic lowering / runtime stubs), not for every Java method.
+  // carrying the skip-safepoint-coverage-verifier named metadata opts out —
+  // this is set only for compilation paths with different safepoint semantics
+  // (e.g. intrinsic lowering / runtime stubs), not for every Java method.
   if (F.getParent()->getNamedMetadata(
           jeandle::Metadata::SkipSafepointCoverageVerifier))
     return PreservedAnalyses::all();
