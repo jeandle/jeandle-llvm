@@ -447,28 +447,17 @@ bool memoryStateMatchesBackedge(CallInst *Poll, Loop *L, BasicBlock *Header,
   if (!PollAccess)
     return false;
 
-  MemoryAccess *BoundaryState = nullptr;
-  if (isa<MemoryDef>(PollAccess))
-    BoundaryState = PollAccess;
-  else if (auto *Use = dyn_cast<MemoryUse>(PollAccess))
-    BoundaryState = Use->getDefiningAccess();
-  if (!BoundaryState)
-    return false;
+  assert(isa<MemoryDef>(PollAccess) && "safepoint poll must be a MemoryDef");
 
   MemoryPhi *HeaderMemory = MSSA.getMemoryAccess(Header);
   if (HeaderMemory) {
     if (HeaderMemory->getBasicBlockIndex(Latch) < 0)
       return false;
-    return HeaderMemory->getIncomingValueForBlock(Latch) == BoundaryState;
+    return HeaderMemory->getIncomingValueForBlock(Latch) == PollAccess;
   }
 
   // With no loop-header MemoryPhi, only a MemoryUse can be loop-invariant.
-  // Its defining state must originate outside the loop (or be live-on-entry),
-  // so executing it at the outer boundary observes the same memory state.
-  if (!isa<MemoryUse>(PollAccess))
-    return false;
-  return MSSA.isLiveOnEntryDef(BoundaryState) ||
-         !L->contains(BoundaryState->getBlock());
+  return false;
 }
 
 bool isUnmodeledRelocationHazard(const Instruction &I, MemorySSA &MSSA) {
@@ -508,15 +497,11 @@ bool hasNoUnmodeledRelocationHazardAfterPoll(CallInst *Poll, Loop *L,
       if (isUnmodeledRelocationHazard(I, MSSA))
         return false;
 
-    bool HasLoopPredecessor = false;
     for (BasicBlock *Pred : predecessors(BB)) {
       if (!L->contains(Pred))
         return false;
-      HasLoopPredecessor = true;
       Worklist.push_back(Pred);
     }
-    if (!HasLoopPredecessor)
-      return false;
   }
   return ReachedPoll;
 }
