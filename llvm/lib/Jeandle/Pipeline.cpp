@@ -143,6 +143,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
 
   const bool StripMiningEnabled = isStripMiningEnabled();
+  const bool DeferEmptyLoopDeletion = (Level == OptimizationLevel::O3);
 
   // The loop adaptor establishes LoopSimplify + LCSSA form before
   // IndVarSimplify or the strip-mining canonicalization pipeline. On the
@@ -164,11 +165,11 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // loop-tree deletion. Without strip mining, Early also performs that loop
   // deletion directly.
   PM.addPass(createModuleToFunctionPassAdaptor(SafepointPollElimination(
-      SafepointPollEliminationMode::Early, Level == OptimizationLevel::O3)));
+      SafepointPollEliminationMode::Early, DeferEmptyLoopDeletion)));
   addCoverageVerifier(PM);
 
   if (StripMiningEnabled)
-    addStripMiningPasses(PM, Level == OptimizationLevel::O3);
+    addStripMiningPasses(PM, DeferEmptyLoopDeletion);
 
   // TODO: InsertGCBarriers currently inserts high-level barrier calls before
   // O3 because it cannot handle O3 generated memory intrinsics and vector
@@ -176,7 +177,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // optimizations.
   PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
 
-  if (Level == OptimizationLevel::O3) {
+  if (DeferEmptyLoopDeletion) {
     // Re-form LCSSA independently of strip mining, then atomically delete
     // finite empty loops and the polls that prevent their deletion.
     PM.addPass(createModuleToFunctionPassAdaptor(LCSSAPass()));
