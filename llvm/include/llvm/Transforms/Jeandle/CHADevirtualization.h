@@ -14,7 +14,7 @@
 #include "llvm/IR/Jeandle/Deoptimization.h"
 #include "llvm/IR/PassManager.h"
 
-#include <sstream>
+#include <string>
 
 namespace llvm {
 
@@ -91,28 +91,6 @@ struct CHAOptInfo {
   static uintptr_t packDeoptreasonInfo(bool IsStatic, bool IsAccessor,
                                        Deoptimization::DeoptReason Reason) {
     return IsStatic | (IsAccessor << 1) | (Reason << 2);
-  }
-
-  static CHAOptInfo decode(const std::string &Encoding) {
-    CHAOptInfo Info;
-    char Sep;
-    if (Encoding.empty())
-      return Info;
-    std::istringstream Iss(Encoding);
-    Iss >> Info.ConstraintOrHolder >> Sep >> Info.Method;
-    assert(Sep == '#' && "should be");
-    Iss >> Sep >> Info.DeoptReasonOrTargetInfo;
-    assert(Sep == '#' && "should be");
-    Iss >> Sep >> Info.MethodName;
-    assert(Sep == '#' && "should be");
-    return Info;
-  }
-
-  std::string encode() {
-    std::ostringstream Oss;
-    Oss << ConstraintOrHolder << '#' << Method << '#' << DeoptReasonOrTargetInfo
-        << '#' << MethodName;
-    return Oss.str();
   }
 
 private:

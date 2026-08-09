@@ -7,8 +7,8 @@ IsEffectivelyFinal 500 = true
 # branch instead of the explicit equality check.
 IsSubtype 500 500 = true
 # Fix: Exact=true  -> CHA returns the unique target -> the invoke devirtualizes.
-GetCHAOptInfo 100 200 300 500 true 0 -1 = "600#700#50#Optimized_target"
+GetCHAOptInfo 100 200 300 500 true 0 -1 = (600, 700, 50, "Optimized_target")
 # Bug: Exact=false -> CHA returns no target -> the invoke stays virtual.
 # (This entry is what makes the test fail without the typeIntersect fix.)
-GetCHAOptInfo 100 200 300 500 false 0 -1 = ""
+GetCHAOptInfo 100 200 300 500 false 0 -1 = (0, 0, 0, "")
 UpdateCallSite 42 2 false 700 = true

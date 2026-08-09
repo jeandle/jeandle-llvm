@@ -50,6 +50,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 
 #define DEBUG_TYPE "cha-devirtualization"
 
@@ -236,10 +237,11 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
                       << "\n");
     return nullptr;
   }
-  jeandle::CHAOptInfo CHAOptInfo =
-      jeandle::CHAOptInfo::decode(Callbacks.GetCHAOptInfo(
-          Caller, Callee, Holder, /*Unused*/ 0, /*Unused*/ 0,
-          /*Unused*/ jeandle::ILLEGAL, OopId));
+  auto [ConstraintOrHolder, Method, TargetInfo, MethodName] =
+      Callbacks.GetCHAOptInfo(Caller, Callee, Holder, /*Unused*/ 0,
+                              /*Unused*/ 0, /*Unused*/ jeandle::ILLEGAL, OopId);
+  jeandle::CHAOptInfo CHAOptInfo{ConstraintOrHolder, Method, TargetInfo,
+                                 std::move(MethodName)};
   if (CHAOptInfo.Method == 0)
     return nullptr;
 
@@ -434,14 +436,16 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
   }
 
   uintptr_t ScopeCaller = getCurrentDeoptMethod(CB, Caller);
-  auto CHAOptInfo = jeandle::CHAOptInfo::decode(
+  auto [ConstraintOrHolder, Method, DeoptReasonOrTargetInfo, MethodName] =
       Callbacks.GetCHAOptInfo(ScopeCaller, Callee, Holder, ReceiverType.Klass,
-                              ReceiverType.Exact, InvokeKind, OopId));
-  if (CHAOptInfo.constraint() == 0 ||
+                              ReceiverType.Exact, InvokeKind, OopId);
+  jeandle::CHAOptInfo OptInfo{ConstraintOrHolder, Method,
+                              DeoptReasonOrTargetInfo, std::move(MethodName)};
+  if (OptInfo.constraint() == 0 ||
       !Callbacks.UpdateCallSite(static_cast<int64_t>(Id),
-                                CHAOptInfo.isStatic() ? jeandle::StaticCall
-                                                      : jeandle::OptVirtualCall,
-                                IsInvokeBasic, CHAOptInfo.Method)) {
+                                OptInfo.isStatic() ? jeandle::StaticCall
+                                                   : jeandle::OptVirtualCall,
+                                IsInvokeBasic, OptInfo.Method)) {
     return false;
   }
 
@@ -456,12 +460,12 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
     if (!PreCallDeopt)
       return false;
 
-    BasicBlock *CheckInstanceofFail = insertCheckInstanceOf(
-        CB, Receiver, CHAOptInfo.constraint(), Prefix, &DTU);
+    BasicBlock *CheckInstanceofFail =
+        insertCheckInstanceOf(CB, Receiver, OptInfo.constraint(), Prefix, &DTU);
     assert(CheckInstanceofFail && "failed to insert check_instanceof");
 
     IRBuilder<> BuilderFail(CheckInstanceofFail);
-    buildDeoptimize(BuilderFail, *CB.getModule(), CHAOptInfo.deoptReason(),
+    buildDeoptimize(BuilderFail, *CB.getModule(), OptInfo.deoptReason(),
                     jeandle::Deoptimization::Action_none, *PreCallDeopt);
   }
 
@@ -469,9 +473,8 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
   updateStaticOptVirtualCallAttrs(
       CB, getPatchSize(M, jeandle::Metadata::StaticCallPatchSize));
   CB.setCalledFunction(getOrInsertJavaMethodFunction(
-      *CB.getModule(), CHAOptInfo.MethodName, CB.getFunctionType(),
-      CHAOptInfo.Method, CHAOptInfo.isAccessor()));
-
+      *CB.getModule(), OptInfo.MethodName, CB.getFunctionType(), OptInfo.Method,
+      OptInfo.isAccessor()));
   LLVM_DEBUG(dbgs() << "CHA: devirtualized " << CB << "\n");
   DTU.flush();
   return true;

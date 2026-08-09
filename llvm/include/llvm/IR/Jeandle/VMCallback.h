@@ -43,6 +43,10 @@ enum class VMCallbackValueType : uint8_t {
 /// leaves RawValue unspecified (recorded as zero).
 using ConstantFieldResult = std::tuple<int, int64_t>;
 
+/// Constraint or holder, target method, packed deoptimization or target info,
+/// and target method name returned by CHA devirtualization.
+using CHAOptResult = std::tuple<uintptr_t, uintptr_t, uintptr_t, std::string>;
+
 /// Result reported for an inline attempt after LLVM starts processing it.
 /// Keep the numeric values stable because the JVM records them.
 enum class JeandleInlineReason : int {
@@ -179,7 +183,7 @@ enum class JeandleInlineReason : int {
        VMCallbackValueType::Uintptr, VMCallbackValueType::Int), 4)               \
   def(RecordInliningComplete, bool, Bool,                                        \
       (), (), (), 0)                                                             \
-  def(GetCHAOptInfo, std::string, String,                                        \
+  def(GetCHAOptInfo, CHAOptResult, Tuple,                                        \
       (uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4,                   \
        bool a5, int a6, int a7), (a1, a2, a3, a4, a5, a6, a7),                   \
       (VMCallbackValueType::Uintptr, VMCallbackValueType::Uintptr,               \
@@ -278,12 +282,10 @@ enum class JeandleInlineReason : int {
 ///   GetOopKlass         — Returns the actual runtime klass pointer of the
 ///                         constant oop with the given oop id, or 0 if it is
 ///                         unavailable. Pure (id -> klass).
-///   GetCHAOptInfo       — Returns the CHA analysis info for CHA
-///                         devirtualization, or empty if the call site cannot
-///                         be optimized.
-///                         devirtualization, or 0 if the call site cannot
-///                         be optimized. The JVM implementation also keeps
-///                         CallSiteInfo in sync for normal compilation.
+///   GetCHAOptInfo       — Returns (constraint or holder, target method,
+///                         packed deoptimization or target info, target method
+///                         name) for CHA devirtualization. A zero first field
+///                         means the call site cannot be optimized.
 ///   UpdateCallSite
 ///                       — Updates the call site to given destination.
 ///                         This callback has side effects on jvm side.
