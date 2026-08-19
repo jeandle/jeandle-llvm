@@ -15,13 +15,17 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/SimplifyQuery.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
@@ -42,6 +46,7 @@ STATISTIC(NumFieldsFolded, "Number of constant field loads folded");
 STATISTIC(NumKlassesFolded, "Number of jeandle.load_klass calls folded");
 STATISTIC(NumMirrorKlassesFolded,
           "Number of jeandle.load_mirror_klass calls folded");
+STATISTIC(NumGetClassesFolded, "Number of jeandle.get_class calls folded");
 STATISTIC(NumKlassLayoutHelpersFolded,
           "Number of jeandle.layout_helper calls folded");
 STATISTIC(NumKlassInitializedFolded,
@@ -354,6 +359,43 @@ bool isKlassInitializedCall(CallInst *CI) {
          CI->arg_size() == 1;
 }
 
+bool isGetClassCall(CallInst *CI) {
+  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+  return Callee && Callee->getName() == "jeandle.get_class" &&
+         CI->arg_size() == 1;
+}
+
+bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
+                      DominatorTree &DT, const DataLayout &DL) {
+  if (!isGetClassCall(CI) || !isJavaOopType(CI->getType()) || !CB.GetJavaMirror)
+    return false;
+
+  // The frontend emits a null check before Object.getClass. Require LLVM to
+  // prove that the receiver is non-null at this call site as well, so this
+  // fold cannot accidentally remove the Java-required NullPointerException.
+  SimplifyQuery SQ(DL, &DT, nullptr, CI);
+  if (!isKnownNonZero(CI->getArgOperand(0), SQ))
+    return false;
+
+  jeandle::JavaType ReceiverType =
+      jeandle::getJavaType(CI->getArgOperand(0), &DT, CI);
+  if (!ReceiverType.isKnown() || !ReceiverType.Exact)
+    return false;
+
+  int MirrorOopId = CB.GetJavaMirror(ReceiverType.Klass);
+  if (MirrorOopId < 0)
+    return false;
+
+  Module *M = CI->getModule();
+  if (!M)
+    return false;
+  IRBuilder<> Builder(CI);
+  LoadInst *Mirror = createConstOopLoad(*M, Builder, MirrorOopId);
+  CI->replaceAllUsesWith(Mirror);
+  CI->eraseFromParent();
+  return true;
+}
+
 bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
                        const DenseMap<Value *, int> &ConstOops) {
   if (!isLoadKlassCall(CI) || !CB.GetOopKlass)
@@ -656,9 +698,11 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     RoundChanged = false;
     DenseMap<Value *, int> ConstOops = computeConstOops(F);
     ReversePostOrderTraversal<Function *> RPOT(&F);
+    DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
 
     SmallVector<CallInst *, 16> LoadKlassCalls;
     SmallVector<CallInst *, 16> LoadMirrorKlassCalls;
+    SmallVector<CallInst *, 16> GetClassCalls;
     SmallVector<CallInst *, 16> LayoutHelperCalls;
     SmallVector<CallInst *, 16> KlassInitializedCalls;
     SmallVector<LoadInst *, 16> Loads;
@@ -669,6 +713,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
             LoadKlassCalls.push_back(CI);
           if (isLoadMirrorKlassCall(CI))
             LoadMirrorKlassCalls.push_back(CI);
+          if (isGetClassCall(CI))
+            GetClassCalls.push_back(CI);
           if (isLayoutHelperCall(CI))
             LayoutHelperCalls.push_back(CI);
           if (isKlassInitializedCall(CI))
@@ -696,6 +742,16 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
         continue;
       if (foldLoadMirrorKlassCall(CI, *CB, ConstOops)) {
         ++NumMirrorKlassesFolded;
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
+    for (CallInst *CI : GetClassCalls) {
+      if (CI->getParent() == nullptr)
+        continue;
+      if (foldGetClassCall(CI, *CB, DT, DL)) {
+        ++NumGetClassesFolded;
         RoundChanged = true;
         Changed = true;
       }
