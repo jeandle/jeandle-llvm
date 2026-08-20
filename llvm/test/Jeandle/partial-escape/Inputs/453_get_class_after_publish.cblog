@@ -1,0 +1,11 @@
+RequiresStrictLockOrder = 1
+
+HasFinalizer 8 = false
+CanVirtualize 8 = true
+IsBoxed 8 = 9
+
+# Deliberately make Klass 8 foldable while virtual. This PEA-only test records
+# the current boundary: after @publish materializes the receiver, foldGetClass
+# no longer folds it. Future CFF or exact-type folding may remove the call.
+GetJavaMirror 8 = 12
+GetOopHandleName 12 = "oop_handle_Published_12"
