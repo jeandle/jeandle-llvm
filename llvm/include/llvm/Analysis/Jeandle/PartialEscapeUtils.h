@@ -360,11 +360,6 @@ bool isJeandleRegisterFinalizerIfNeeded(const CallBase *CB);
 // require a surviving whole-pool rewrite.
 bool isPEAHandledNonEscapingIntrinsic(const IntrinsicInst *II);
 
-// Extract the Java element basic type from an array klass pointer.
-// TODO: returns std::nullopt when VMCallbacks are unavailable; pending
-// full VMCallbacks integration.
-std::optional<JBasicType> elementTypeForArrayKlass(uintptr_t ArrayKlass);
-
 // Map a JBasicType to its LLVM IR storage type for one element (e.g., Byte→i8,
 // Object→ptr addrspace(1)).  Returns nullptr if Kind == Count.
 Type *llvmElementTypeFor(JBasicType Kind, LLVMContext &Ctx);

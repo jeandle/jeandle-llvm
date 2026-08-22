@@ -5382,14 +5382,15 @@ void Analyzer::processAllocation(CallBase *CB) {
     // resolveFieldOffset) will be eligible. ArrayBaseOffset is always set
     // (per-kind when known, else the VM's Object-kind default) so the
     // resolveAccess header guard never degrades to `< 0`.
-    if (auto Kind = jeandle::pea::elementTypeForArrayKlass(Klass)) {
+    jeandle::JBasicType Kind = jeandle::elementTypeForArrayKlass(Klass);
+    if (Kind != jeandle::JBasicType::Count) {
       VO->ArrayBaseOffset =
-          static_cast<uint32_t>(VMConsts.arrayBaseOffsetFor(*Kind));
+          static_cast<uint32_t>(VMConsts.arrayBaseOffsetFor(Kind));
       if (Type *ElemTy =
-              jeandle::pea::llvmElementTypeFor(*Kind, F.getContext())) {
+              jeandle::pea::llvmElementTypeFor(Kind, F.getContext())) {
         VO->ArrayElementType = ElemTy;
         VO->ArrayIndexScale =
-            static_cast<uint32_t>(VMConsts.elementSizeFor(*Kind));
+            static_cast<uint32_t>(VMConsts.elementSizeFor(Kind));
       }
     } else {
       // Unknown element kind: we cannot pin the per-kind element type, but
