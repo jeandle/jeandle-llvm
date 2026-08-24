@@ -314,20 +314,6 @@ matchFieldLoad(LoadInst *LI, const DenseMap<Value *, int> &ConstOops,
   return FieldLoadMatch{LI, ImmediateGEP, *BaseId, OffsetVal};
 }
 
-std::optional<uintptr_t> getConstantKlassPointer(Value *V) {
-  V = V->stripPointerCasts();
-  if (auto *CE = dyn_cast<ConstantExpr>(V)) {
-    if (CE->getOpcode() != Instruction::IntToPtr || CE->getNumOperands() != 1)
-      return std::nullopt;
-    if (auto *CI = dyn_cast<ConstantInt>(CE->getOperand(0)))
-      return static_cast<uintptr_t>(CI->getZExtValue());
-    return std::nullopt;
-  }
-  if (auto *CI = dyn_cast<ConstantInt>(V))
-    return static_cast<uintptr_t>(CI->getZExtValue());
-  return std::nullopt;
-}
-
 Constant *klassPointerConstant(LLVMContext &Ctx, Type *Ty, uintptr_t Klass) {
   if (Klass == 0 || !Ty->isPointerTy())
     return nullptr;
@@ -366,23 +352,32 @@ bool isGetClassCall(CallInst *CI) {
 }
 
 bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
+                      const DenseMap<Value *, int> &ConstOops,
                       DominatorTree &DT, const DataLayout &DL) {
   if (!isGetClassCall(CI) || !isJavaOopType(CI->getType()) || !CB.GetJavaMirror)
     return false;
 
-  // The frontend emits a null check before Object.getClass. Require LLVM to
-  // prove that the receiver is non-null at this call site as well, so this
-  // fold cannot accidentally remove the Java-required NullPointerException.
-  SimplifyQuery SQ(DL, &DT, nullptr, CI);
-  if (!isKnownNonZero(CI->getArgOperand(0), SQ))
-    return false;
+  Value *Receiver = CI->getArgOperand(0);
+  int MirrorOopId = -1;
+  if (std::optional<int> OopId = lookupConstOop(Receiver, ConstOops)) {
+    // Constant oop path: derive the actual dynamic Klass from object identity.
+    if (!CB.GetOopKlass)
+      return false;
+    uintptr_t Klass = CB.GetOopKlass(*OopId);
+    if (Klass == 0)
+      return false;
+    MirrorOopId = CB.GetJavaMirror(Klass);
+  } else {
+    // Java type path: require exact type and non-null proof to preserve NPE.
+    SimplifyQuery SQ(DL, &DT, nullptr, CI);
+    if (!isKnownNonZero(Receiver, SQ))
+      return false;
 
-  jeandle::JavaType ReceiverType =
-      jeandle::getJavaType(CI->getArgOperand(0), &DT, CI);
-  if (!ReceiverType.isKnown() || !ReceiverType.Exact)
-    return false;
-
-  int MirrorOopId = CB.GetJavaMirror(ReceiverType.Klass);
+    jeandle::JavaType ReceiverType = jeandle::getJavaType(Receiver, &DT, CI);
+    if (!ReceiverType.isKnown() || !ReceiverType.Exact)
+      return false;
+    MirrorOopId = CB.GetJavaMirror(ReceiverType.Klass);
+  }
   if (MirrorOopId < 0)
     return false;
 
@@ -464,12 +459,11 @@ bool foldLayoutHelperCall(CallInst *CI, const jeandle::VMCallbacks &CB) {
       !CB.GetKlassLayoutHelper)
     return false;
 
-  std::optional<uintptr_t> Klass =
-      getConstantKlassPointer(CI->getArgOperand(0));
-  if (!Klass || *Klass == 0)
+  uintptr_t Klass = jeandle::extractKlassConstant(CI->getArgOperand(0));
+  if (Klass == 0)
     return false;
 
-  int LayoutHelper = CB.GetKlassLayoutHelper(*Klass);
+  int LayoutHelper = CB.GetKlassLayoutHelper(Klass);
   if (LayoutHelper == 0)
     return false;
 
@@ -483,16 +477,15 @@ bool foldKlassInitializedCall(CallInst *CI, const jeandle::VMCallbacks &CB) {
       !CB.IsKlassInitialized)
     return false;
 
-  std::optional<uintptr_t> Klass =
-      getConstantKlassPointer(CI->getArgOperand(0));
-  if (!Klass || *Klass == 0)
+  uintptr_t Klass = jeandle::extractKlassConstant(CI->getArgOperand(0));
+  if (Klass == 0)
     return false;
 
   // Initialization is monotonic. A class known to be fully initialized at
   // compile time stays initialized, so replacing the query with true is safe.
   // A false result is only a snapshot: the class may initialize before this
   // code executes, so retain the JavaOp and its dynamic load.
-  if (!CB.IsKlassInitialized(*Klass))
+  if (!CB.IsKlassInitialized(Klass))
     return false;
 
   CI->replaceAllUsesWith(ConstantInt::getTrue(CI->getContext()));
@@ -765,7 +758,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : GetClassCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldGetClassCall(CI, *CB, DT, DL)) {
+      if (foldGetClassCall(CI, *CB, ConstOops, DT, DL)) {
         ++NumGetClassesFolded;
         RoundChanged = true;
         Changed = true;

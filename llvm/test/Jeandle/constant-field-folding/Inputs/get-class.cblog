@@ -1,2 +1,4 @@
+GetOopKlass 0 = 123
+GetOopKlass 1 = 0
 GetJavaMirror 123 = 7
 GetOopHandleName 7 = "oop_handle_Mirror_7"
