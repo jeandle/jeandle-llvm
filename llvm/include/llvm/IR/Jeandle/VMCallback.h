@@ -193,6 +193,9 @@ enum class JeandleInlineReason : int {
   def(GetOopKlass, uintptr_t, Uintptr,                                           \
       (int a1), (a1),                                                            \
       (VMCallbackValueType::Int), 1)                                             \
+  def(GetKlassConstant, uintptr_t, Uintptr,                                      \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
   def(GetJavaMirror, int, Int,                                                   \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
@@ -361,6 +364,9 @@ enum class JeandleInlineReason : int {
 ///   GetOopKlass         — Returns the actual runtime klass pointer of the
 ///                         constant oop with the given oop id, or 0 if it is
 ///                         unavailable. Pure (id -> klass).
+///   GetKlassConstant    — Returns a stable compile-time Klass pointer constant
+///                         for a known Klass, or 0 if unavailable. The VM
+///                         records the Klass dependency before returning it.
 ///   GetJavaMirror       — Given a VM Klass pointer, returns the oop id of its
 ///                         Java mirror (the java.lang.Class object), or -1 if
 ///                         unavailable. Used by PEA's foldGetClass to fold

@@ -60,6 +60,39 @@ entry:
 ; CHECK:         %klass = call hotspotcc ptr @jeandle.load_klass(ptr addrspace(1) %obj)
 ; CHECK-NEXT:    ret ptr %klass
 
+define hotspotcc ptr @fold_exact_type(
+    ptr addrspace(1) nonnull "java-klass"="123456"
+      "java-klass-exact" %obj) #0 gc "hotspotgc" {
+entry:
+  %klass = call hotspotcc ptr @jeandle.load_klass(ptr addrspace(1) %obj)
+  ret ptr %klass
+}
+
+define hotspotcc ptr @keep_nonexact_type(
+    ptr addrspace(1) nonnull "java-klass"="123456" %obj)
+    #0 gc "hotspotgc" {
+entry:
+  %klass = call hotspotcc ptr @jeandle.load_klass(ptr addrspace(1) %obj)
+  ret ptr %klass
+}
+
+define hotspotcc ptr @keep_nullable_exact_type(
+    ptr addrspace(1) "java-klass"="123456" "java-klass-exact" %obj)
+    #0 gc "hotspotgc" {
+entry:
+  %klass = call hotspotcc ptr @jeandle.load_klass(ptr addrspace(1) %obj)
+  ret ptr %klass
+}
+
+; CHECK-LABEL: define hotspotcc ptr @fold_exact_type(
+; CHECK:       ret ptr inttoptr (i64 123456 to ptr)
+
+; CHECK-LABEL: define hotspotcc ptr @keep_nonexact_type(
+; CHECK:         %klass = call hotspotcc ptr @jeandle.load_klass(ptr addrspace(1) %obj)
+
+; CHECK-LABEL: define hotspotcc ptr @keep_nullable_exact_type(
+; CHECK:         %klass = call hotspotcc ptr @jeandle.load_klass(ptr addrspace(1) %obj)
+
 attributes #0 = { "java-method"="1" }
 
 !java-method-compilation = !{}

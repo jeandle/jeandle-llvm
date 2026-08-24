@@ -397,15 +397,30 @@ bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
 }
 
 bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
-                       const DenseMap<Value *, int> &ConstOops) {
-  if (!isLoadKlassCall(CI) || !CB.GetOopKlass)
+                       const DenseMap<Value *, int> &ConstOops,
+                       DominatorTree &DT, const DataLayout &DL) {
+  if (!isLoadKlassCall(CI))
     return false;
 
-  std::optional<int> OopId = lookupConstOop(CI->getArgOperand(0), ConstOops);
-  if (!OopId)
-    return false;
-
-  uintptr_t Klass = CB.GetOopKlass(*OopId);
+  Value *Receiver = CI->getArgOperand(0);
+  uintptr_t Klass = 0;
+  if (std::optional<int> OopId = lookupConstOop(Receiver, ConstOops)) {
+    // Constant oop path: derive the object's exact dynamic Klass.
+    if (!CB.GetOopKlass)
+      return false;
+    Klass = CB.GetOopKlass(*OopId);
+  } else {
+    // Exact Java type path: use the statically known receiver Klass.
+    SimplifyQuery SQ(DL, &DT, nullptr, CI);
+    if (!isKnownNonZero(Receiver, SQ))
+      return false;
+    jeandle::JavaType ReceiverType = jeandle::getJavaType(Receiver, &DT, CI);
+    if (!ReceiverType.isKnown() || !ReceiverType.Exact)
+      return false;
+    if (!CB.GetKlassConstant)
+      return false;
+    Klass = CB.GetKlassConstant(ReceiverType.Klass);
+  }
   Constant *KlassConstant =
       klassPointerConstant(CI->getContext(), CI->getType(), Klass);
   if (!KlassConstant)
@@ -730,7 +745,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : LoadKlassCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldLoadKlassCall(CI, *CB, ConstOops)) {
+      if (foldLoadKlassCall(CI, *CB, ConstOops, DT, DL)) {
         ++NumKlassesFolded;
         RoundChanged = true;
         Changed = true;
