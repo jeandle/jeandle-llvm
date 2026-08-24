@@ -5318,6 +5318,19 @@ void Analyzer::processAllocation(CallBase *CB) {
   const bool IsArray = jeandle::pea::isJeandleNewArray(CB);
   assert((IsInstance ^ IsArray) &&
          "allocation must be either instance or array");
+  (void)IsArray;
+
+  // TODO(pea-new-instance-protocol): migrate all legacy lit IR and callers to
+  // the production three-argument protocol, then require arg_size() == 3 and
+  // remove this two-argument compatibility path.
+  if (IsInstance && CB->arg_size() != 2) {
+    if (CB->arg_size() != 3)
+      return;
+    auto *InitialSlowTest = dyn_cast<ConstantInt>(CB->getArgOperand(2));
+    if (!InitialSlowTest || !InitialSlowTest->getType()->isIntegerTy(1) ||
+        !InitialSlowTest->isZero())
+      return;
+  }
 
   // Refuse to virtualize identity-sensitive allocations.
   // HasFinalizer: classes that override finalize() require HotSpot's
