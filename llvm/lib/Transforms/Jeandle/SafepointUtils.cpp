@@ -70,10 +70,12 @@ bool llvm::jeandle::isGuaranteedSafepointCall(const Instruction &I) {
   const auto *CB = dyn_cast<CallBase>(&I);
   if (!CB || isSafepointPoll(I) ||
       CB->getOperandBundle(LLVMContext::OB_deopt) == std::nullopt ||
-      CB->hasFnAttr(Attribute::NotGuaranteedSafepoint))
+      CB->hasFnAttr(Attribute::NotGuaranteedSafepoint) ||
+      CB->hasFnAttr("gc-leaf-function"))
     return false;
   if (const Function *Callee = CB->getCalledFunction())
-    if (Callee->hasFnAttribute(Attribute::NotGuaranteedSafepoint))
+    if (Callee->hasFnAttribute(Attribute::NotGuaranteedSafepoint) ||
+        Callee->hasFnAttribute("gc-leaf-function"))
       return false;
   return true;
 }
