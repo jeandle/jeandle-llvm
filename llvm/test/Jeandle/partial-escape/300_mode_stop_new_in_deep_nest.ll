@@ -11,7 +11,7 @@
 ; verbatim, even though the body is otherwise trivial enough that without
 ; StopNewInLoopNest it would normally be virtualised.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -49,7 +49,7 @@ body3:
   ; otherwise materialize via materializeAt, here it is REFUSED from
   ; virtualisation entirely so the original invoke survives.
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-                  ptr inttoptr (i64 4444 to ptr), i32 16)
+                  ptr inttoptr (i64 4444 to ptr), i32 16, i1 false)
                to label %ib unwind label %u
 ib:
   call void @sink(ptr addrspace(1) %inner)

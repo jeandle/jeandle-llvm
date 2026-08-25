@@ -12,7 +12,7 @@
 ; field store in place.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use_int(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -23,7 +23,7 @@ entry:
          to label %n1 unwind label %u
 n1:
   %v = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 99999 to ptr), i32 24)
+           ptr inttoptr (i64 99999 to ptr), i32 24, i1 false)
   %f = getelementptr inbounds i8, ptr addrspace(1) %v, i64 8
   store atomic i32 66, ptr addrspace(1) %f unordered, align 4
   %r = load atomic i32, ptr addrspace(1) %f unordered, align 4

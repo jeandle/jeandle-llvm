@@ -19,19 +19,19 @@
 ; through A's OrigAlloc — no cascade coordination, no new allocation invoke,
 ; no materialized-object PHI. Larger group than the 2-/3-object cyclic tests.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define ptr addrspace(1) @cyclic_live_path_4_object_cycle()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16) to label %na unwind label %u1
+  %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false) to label %na unwind label %u1
 na:
-  %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16) to label %nb unwind label %u2
+  %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false) to label %nb unwind label %u2
 nb:
-  %c = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 33333 to ptr), i32 16) to label %nc unwind label %u3
+  %c = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 33333 to ptr), i32 16, i1 false) to label %nc unwind label %u3
 nc:
-  %d = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 44444 to ptr), i32 16) to label %nd unwind label %u4
+  %d = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 44444 to ptr), i32 16, i1 false) to label %nd unwind label %u4
 nd:
   %sa = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic ptr addrspace(1) %b, ptr addrspace(1) %sa unordered, align 8

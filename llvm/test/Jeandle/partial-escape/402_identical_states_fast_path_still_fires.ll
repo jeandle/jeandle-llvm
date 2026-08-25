@@ -8,14 +8,14 @@
 ; materialization. The original allocation is eliminated (the object never
 ; escapes), and the sink receives the folded field value.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_identical_states_fast_path(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %branch unwind label %u
 branch:
   br i1 %c, label %left, label %right

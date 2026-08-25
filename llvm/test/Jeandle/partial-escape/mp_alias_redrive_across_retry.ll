@@ -22,7 +22,7 @@
 ; + clear-effect-buffer + per-phi Aliases.resetAlias): if the alias is not
 ; correctly re-derived after a retry, the @use(i32 7) fold breaks.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
@@ -31,7 +31,7 @@ define void @test_alias_redrive(i1 %c, ptr addrspace(1) %p)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 67890 to ptr), i32 32)
+              ptr inttoptr (i64 67890 to ptr), i32 32, i1 false)
            to label %n unwind label %u
 n:
   %sk = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -39,7 +39,7 @@ n:
   br i1 %c, label %left, label %right
 left:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 12345 to ptr), i32 16)
+              ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
            to label %lcont unwind label %u
 lcont:
   %sl = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 8

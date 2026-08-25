@@ -7,7 +7,7 @@
 ; allocation sites remain intact and the complete merged state is replayed
 ; once onto the Case-C PHI at the actual escape.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare void @sink(ptr addrspace(1))
 
 define void @casec_atomic_unsplittable(i1 %choose, ptr %target)
@@ -16,13 +16,13 @@ entry:
   br i1 %choose, label %right, label %left
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69401 to ptr), i32 16) [ "deopt"(i32 694011) ]
+      ptr inttoptr (i64 69401 to ptr), i32 16, i1 false) [ "deopt"(i32 694011) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 82, ptr addrspace(1) %bf unordered, align 4
   br label %merge
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69401 to ptr), i32 16) [ "deopt"(i32 694012) ]
+      ptr inttoptr (i64 69401 to ptr), i32 16, i1 false) [ "deopt"(i32 694012) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 81, ptr addrspace(1) %af unordered, align 4
   indirectbr ptr %target, [label %merge, label %bypass]
@@ -61,13 +61,13 @@ entry:
   br i1 %choose, label %right, label %left
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69402 to ptr), i32 16) [ "deopt"(i32 694021) ]
+      ptr inttoptr (i64 69402 to ptr), i32 16, i1 false) [ "deopt"(i32 694021) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 92, ptr addrspace(1) %bf unordered, align 4
   br label %merge
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69402 to ptr), i32 16) [ "deopt"(i32 694022) ]
+      ptr inttoptr (i64 69402 to ptr), i32 16, i1 false) [ "deopt"(i32 694022) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 91, ptr addrspace(1) %af unordered, align 4
   callbr void asm "", "!i"() to label %merge [label %bypass]
@@ -110,13 +110,13 @@ entry:
   br i1 %choose, label %right, label %left
 right:
   %right.child = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69403 to ptr), i32 16) [ "deopt"(i32 694031) ]
+      ptr inttoptr (i64 69403 to ptr), i32 16, i1 false) [ "deopt"(i32 694031) ]
   %right.child.field = getelementptr inbounds i8,
       ptr addrspace(1) %right.child, i64 8
   store atomic i32 702,
       ptr addrspace(1) %right.child.field unordered, align 4
   %right.owner = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69404 to ptr), i32 24) [ "deopt"(i32 694041) ]
+      ptr inttoptr (i64 69404 to ptr), i32 24, i1 false) [ "deopt"(i32 694041) ]
   %right.owner.child = getelementptr inbounds i8,
       ptr addrspace(1) %right.owner, i64 16
   store atomic ptr addrspace(1) %right.child,
@@ -124,13 +124,13 @@ right:
   br label %merge
 left:
   %left.child = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69403 to ptr), i32 16) [ "deopt"(i32 694032) ]
+      ptr inttoptr (i64 69403 to ptr), i32 16, i1 false) [ "deopt"(i32 694032) ]
   %left.child.field = getelementptr inbounds i8,
       ptr addrspace(1) %left.child, i64 8
   store atomic i32 701,
       ptr addrspace(1) %left.child.field unordered, align 4
   %left.owner = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69404 to ptr), i32 24) [ "deopt"(i32 694042) ]
+      ptr inttoptr (i64 69404 to ptr), i32 24, i1 false) [ "deopt"(i32 694042) ]
   %left.owner.child = getelementptr inbounds i8,
       ptr addrspace(1) %left.owner, i64 16
   store atomic ptr addrspace(1) %left.child,

@@ -19,21 +19,21 @@
 ; through the peer's OrigAlloc — no cascade coordination and no
 ; materialized-object PHI.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define ptr addrspace(1) @test_three_deep_cyclic() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %nA unwind label %u1
 nA:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
        to label %nB unwind label %u2
 nB:
   %c = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 33333 to ptr), i32 16)
+            ptr inttoptr (i64 33333 to ptr), i32 16, i1 false)
        to label %nC unwind label %u3
 nC:
   %slotA = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
@@ -56,9 +56,9 @@ u3:
 
 ; All three OrigAllocs are retained.
 ; CHECK-LABEL: define ptr addrspace(1) @test_three_deep_cyclic
-; CHECK: %[[A:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16)
-; CHECK: %[[B:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16)
-; CHECK: %[[C:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 33333 to ptr), i32 16)
+; CHECK: %[[A:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
+; CHECK: %[[B:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
+; CHECK: %[[C:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 33333 to ptr), i32 16, i1 false)
 ; No additional allocation invoke is emitted.
 ; CHECK-NOT: pea.mat = invoke
 ; All three field groups use OrigAlloc values — the cycle's back edge C.x = A

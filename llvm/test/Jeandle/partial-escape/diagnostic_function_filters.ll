@@ -40,13 +40,13 @@
 ; RUN:     --implicit-check-not='PEA-DUMP before iter=0 function filter.Target.work()V{{$}}' \
 ; RUN:     --implicit-check-not='PEA-DUMP before iter=0 function filter.Target.work()V.extra{{$}}'
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define void @"filter.Target.work()V"() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 1 to ptr), i32 16)
+            ptr inttoptr (i64 1 to ptr), i32 16, i1 false)
           to label %normal unwind label %unwind
 
 normal:
@@ -60,7 +60,7 @@ unwind:
 define void @"filter.Target.work()V.extra"() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 2 to ptr), i32 16)
+            ptr inttoptr (i64 2 to ptr), i32 16, i1 false)
           to label %normal unwind label %unwind
 
 normal:
@@ -74,7 +74,7 @@ unwind:
 define void @"filter.Target.work()V.extra.decoy"() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 3 to ptr), i32 16)
+            ptr inttoptr (i64 3 to ptr), i32 16, i1 false)
           to label %normal unwind label %unwind
 
 normal:

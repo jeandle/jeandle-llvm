@@ -12,7 +12,7 @@
 ; reachable blocks. So PEA skips the dead loop entirely. This test
 ; documents that contract (dead code is ignored, no crash).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -22,7 +22,7 @@ entry:
 
 dead_prep:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %dead_loop unwind label %u
 dead_loop:
   %i = phi i32 [ 0, %dead_prep ], [ %i1, %dead_body ]

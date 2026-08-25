@@ -6,14 +6,14 @@
 ; them to scalar @use. The convergence check passes once the back-edge
 ; state is stable.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use2(i32, i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_three_iter(i32 %n) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 24)
+            ptr inttoptr (i64 12345 to ptr), i32 24, i1 false)
        to label %prep unwind label %u
 prep:
   %sa = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

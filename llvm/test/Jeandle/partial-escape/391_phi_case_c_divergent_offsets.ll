@@ -10,7 +10,7 @@
 ; 16 only on the right (default 0 on the left), so each folds to a per-entry
 ; PHI of {value, 0}. Both allocations are eliminated.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -20,7 +20,7 @@ entry:
   br i1 %c, label %left, label %right
 left:
   %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 24)
+            ptr inttoptr (i64 12345 to ptr), i32 24, i1 false)
         to label %lstore unwind label %u
 lstore:
   %sl = getelementptr inbounds i8, ptr addrspace(1) %o1, i64 8
@@ -28,7 +28,7 @@ lstore:
   br label %merge
 right:
   %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 24)
+            ptr inttoptr (i64 12345 to ptr), i32 24, i1 false)
         to label %rstore unwind label %u
 rstore:
   %sr = getelementptr inbounds i8, ptr addrspace(1) %o2, i64 16

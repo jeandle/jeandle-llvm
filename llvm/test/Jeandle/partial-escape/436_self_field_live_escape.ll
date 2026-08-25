@@ -7,13 +7,13 @@
 ; stays correct with OrigAlloc as both the field-replay value and the escape
 ; argument (no <badref>, no additional allocation).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @self_field_live_escape() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 12345 to ptr), i32 16) to label %cont unwind label %u
+  %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 12345 to ptr), i32 16, i1 false) to label %cont unwind label %u
 cont:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
   store atomic ptr addrspace(1) %o, ptr addrspace(1) %slot unordered, align 8

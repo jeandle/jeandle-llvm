@@ -14,7 +14,7 @@
 ; writing `store ptr poison` into the materialized array.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_store_bail_leaks_value(i64 %idx) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
@@ -24,7 +24,7 @@ entry:
   to label %n unwind label %u
 n:
   %v = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-  ptr inttoptr (i64 99999 to ptr), i32 24)
+  ptr inttoptr (i64 99999 to ptr), i32 24, i1 false)
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i32 16
   %elem = getelementptr inbounds ptr addrspace(1), ptr addrspace(1) %base, i64 %idx
   store atomic ptr addrspace(1) %v, ptr addrspace(1) %elem unordered, align 4

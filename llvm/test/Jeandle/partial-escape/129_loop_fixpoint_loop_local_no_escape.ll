@@ -6,7 +6,7 @@
 ; AllocSiteToVO cache ensures the same ID is reused across iterations
 ; (otherwise the fixpoint would diverge on Virtuals-set comparison).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -19,7 +19,7 @@ loop:
   br i1 %c, label %body, label %exit
 body:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %st unwind label %u
 st:
   %s = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

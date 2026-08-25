@@ -5320,10 +5320,13 @@ void Analyzer::processAllocation(CallBase *CB) {
          "allocation must be either instance or array");
   (void)IsArray;
 
-  // TODO(pea-new-instance-protocol): migrate all legacy lit IR and callers to
-  // the production three-argument protocol, then require arg_size() == 3 and
-  // remove this two-argument compatibility path.
-  if (IsInstance && CB->arg_size() != 2) {
+  // The third operand of jeandle.new_instance is not an allocation hint. It
+  // selects the runtime slow path, which performs initialization and
+  // instantiation checks with observable exception/side-effect semantics.
+  // PEA does not model that path, so only the exact fast-path form is
+  // virtualizable. In particular, a runtime-unknown value must not be
+  // treated as false merely because the fast path is the common case.
+  if (IsInstance) {
     if (CB->arg_size() != 3)
       return;
     auto *InitialSlowTest = dyn_cast<ConstantInt>(CB->getArgOperand(2));

@@ -8,14 +8,14 @@
 ; The load stays a real load over the offset-8 derived PHI (field[8] holds 111
 ; or 222), so it does NOT fold to field[0]'s default 0.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink_i32(i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_156_derived_phi_offset(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %X = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5555 to ptr), i32 32)
+            ptr inttoptr (i64 5555 to ptr), i32 32, i1 false)
           to label %cont unwind label %u
 cont:
   br i1 %c, label %a1, label %a2

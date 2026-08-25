@@ -19,7 +19,7 @@
 @arrayOopDesc.element_size.long = private constant i32 4
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @safepoint()
 declare i32 @__gxx_personality_v0(...)
 
@@ -259,11 +259,11 @@ entry:
       to label %alloc.child unwind label %unwind
 alloc.child:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68907 to ptr), i32 16)
+      ptr inttoptr (i64 68907 to ptr), i32 16, i1 false)
       to label %alloc.independent unwind label %unwind
 alloc.independent:
   %independent = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68911 to ptr), i32 16)
+      ptr inttoptr (i64 68911 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 body:
   %base = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -313,11 +313,11 @@ entry:
       to label %alloc.a unwind label %unwind
 alloc.a:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68909 to ptr), i32 24)
+      ptr inttoptr (i64 68909 to ptr), i32 24, i1 false)
       to label %alloc.b unwind label %unwind
 alloc.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68910 to ptr), i32 24)
+      ptr inttoptr (i64 68910 to ptr), i32 24, i1 false)
       to label %body unwind label %unwind
 body:
   %outer.base = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16

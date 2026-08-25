@@ -13,7 +13,7 @@
 ; A locked virtual object that does not appear in any slot is still added to
 ; the virtual mapping so deopt restores its lock stack.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(i32, i32)
@@ -23,7 +23,7 @@ define void @locked_vo_no_slot(i32 %a, i32 %b) gc "hotspotgc" personality ptr @_
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 24)
+            ptr inttoptr (i64 12345 to ptr), i32 24, i1 false)
        to label %n unwind label %u
 n:
   %s1 = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

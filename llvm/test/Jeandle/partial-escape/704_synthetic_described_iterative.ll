@@ -7,7 +7,7 @@
 ; the first iteration the source allocations are gone, so later iterations are
 ; a no-op and the descriptor (with the merged field value) survives unchanged.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare void @safepoint()
 
 define void @synthetic_described_iter(i1 %choose) gc "hotspotgc" {
@@ -15,13 +15,13 @@ entry:
   br i1 %choose, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 70401 to ptr), i32 24) [ "deopt"(i32 704011) ]
+      ptr inttoptr (i64 70401 to ptr), i32 24, i1 false) [ "deopt"(i32 704011) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 41, ptr addrspace(1) %af unordered, align 4
   br label %merge
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 70401 to ptr), i32 24) [ "deopt"(i32 704012) ]
+      ptr inttoptr (i64 70401 to ptr), i32 24, i1 false) [ "deopt"(i32 704012) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 42, ptr addrspace(1) %bf unordered, align 4
   br label %merge

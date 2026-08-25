@@ -17,7 +17,7 @@
 ; that arm would eliminate the second allocation and leave @escape(poison).
 ; The winning plan retains both allocations, the original condition, and paths.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc i1
     @jeandle.check_if_value_based(ptr addrspace(1))
 declare void @observe(i32)
@@ -29,12 +29,12 @@ define void @cfg_proof_retry()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %second.alloc unwind label %alloc.unwind
 
 second.alloc:
   %path.object = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %dispatch unwind label %alloc.unwind
 
 dispatch:
@@ -62,8 +62,8 @@ alloc.unwind:
 }
 
 ; CHECK-LABEL: define void @cfg_proof_retry()
-; CHECK: %[[O:[A-Za-z0-9._]+]] = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 7777 to ptr), i32 16)
-; CHECK: %[[PATHOBJ:[A-Za-z0-9._]+]] = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 7777 to ptr), i32 16)
+; CHECK: %[[O:[A-Za-z0-9._]+]] = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
+; CHECK: %[[PATHOBJ:[A-Za-z0-9._]+]] = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
 ; CHECK: %[[ISNULL:[A-Za-z0-9._]+]] = icmp eq ptr addrspace(1) %[[O]], null
 ; CHECK: br i1 %[[ISNULL]], label %null.path, label %nonnull.path
 ; CHECK: null.path:

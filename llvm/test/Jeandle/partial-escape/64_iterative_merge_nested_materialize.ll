@@ -18,7 +18,7 @@
 ; addrspace(1) field PHI at the merge selecting between the inner OrigAlloc
 ; and the per-VO right-arm pointer.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -28,17 +28,17 @@ define void @test_a5_two_outer_shared_inner(i1 %c,
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %outer1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 67890 to ptr), i32 16)
+               ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
             to label %n1 unwind label %u
 n1:
   %outer2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 67890 to ptr), i32 16)
+               ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
             to label %n unwind label %u
 n:
   br i1 %c, label %left, label %right
 left:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 12345 to ptr), i32 16)
+              ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
            to label %lcont unwind label %u
 lcont:
   %s1l = getelementptr inbounds i8, ptr addrspace(1) %outer1, i64 8

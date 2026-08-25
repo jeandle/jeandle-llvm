@@ -13,7 +13,7 @@
 ; B stays virtual until the actual sink (which only references A in this
 ; test); B has nothing observable to materialise for, and its enter folds away.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -24,11 +24,11 @@ entry:
   %lock_a = alloca i64, align 8
   %lock_b = alloca i64, align 8
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 31415 to ptr), i32 16)
+            ptr inttoptr (i64 31415 to ptr), i32 16, i1 false)
        to label %na unwind label %u
 na:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 27182 to ptr), i32 16)
+            ptr inttoptr (i64 27182 to ptr), i32 16, i1 false)
        to label %nb unwind label %u
 nb:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
@@ -55,7 +55,7 @@ u:
 ; materialise via the cascade-on-A path, but the post-conditions we PIN
 ; are A-only.
 ; CHECK-LABEL: define void @test_lockdepth_pre_cascade_metadata
-; CHECK: %[[ORIGA:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 31415 to ptr), i32 16)
+; CHECK: %[[ORIGA:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 31415 to ptr), i32 16, i1 false)
 ; CHECK: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %[[ORIGA]],
 ; CHECK: call void @sink(ptr addrspace(1) %[[ORIGA]])
 ; CHECK: call hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1) %[[ORIGA]],

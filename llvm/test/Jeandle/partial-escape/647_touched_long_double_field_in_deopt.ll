@@ -13,7 +13,7 @@
 ; lo slot's full 64-bit intptr_t on LP64). This test pins the wire side; the
 ; parse/realloc side is exercised end-to-end by the jtreg deopt suite.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32, i64, double)
 declare i32 @__gxx_personality_v0(...)
 
@@ -21,7 +21,7 @@ define void @never_escape_vo_long_double_field(i32 %x, i64 %y, double %z)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 32)
+            ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
        to label %n unwind label %u
 n:
   %s1 = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

@@ -4,14 +4,14 @@
 ; object escapes later in that same merge block, CreatePHI must be applied
 ; before Materialize replays the merged value into the retained allocation.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @same_block_field_phi_materialize(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 100 to ptr), i32 16)
+            ptr inttoptr (i64 100 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %field = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

@@ -10,7 +10,7 @@
 ; arm. The per-VO loop in iter 2 of the do-while sees BOTH preds as
 ; Materialised and synthesises a CreatePHI for the merge.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare void @consume(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -19,7 +19,7 @@ define void @test_caseA_retriggers_per_vo(i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %branch unwind label %u
 branch:
   br i1 %c, label %escape, label %fast

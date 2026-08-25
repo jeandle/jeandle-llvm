@@ -25,14 +25,14 @@
 ; partial-escape feature is deferred. So depth>1 overflow PROPAGATION, while
 ; implemented, is not exercised here.)
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_overflow_nested_outer_body(i32 %n) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %pre = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 7777 to ptr), i32 16)
+              ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
           to label %e.cont unwind label %u
 e.cont:
   %f = getelementptr inbounds i8, ptr addrspace(1) %pre, i64 8

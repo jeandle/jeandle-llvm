@@ -10,7 +10,7 @@
 ; retained allocation. The test below uses @sink2 (a second opaque
 ; consumer on the normal path) to anchor that pointer.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare void @sink2(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -18,7 +18,7 @@ declare i32 @__gxx_personality_v0(...)
 define void @test_293() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %n unwind label %u_a
 n:
   ; First @sink escapes VO_A, materializing it before the invoke.
@@ -39,7 +39,7 @@ u_a:
 
 ; The original allocation is the sole new_instance. Both consumers use it.
 ; CHECK-LABEL: define void @test_293
-; CHECK: %[[ORIG:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16)
+; CHECK: %[[ORIG:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
 ; CHECK-NOT: @jeandle.new_instance
 ; CHECK: invoke void @sink(ptr addrspace(1) %[[ORIG]])
 ; CHECK: call void @sink2(ptr addrspace(1) %[[ORIG]])

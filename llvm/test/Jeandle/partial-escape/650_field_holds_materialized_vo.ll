@@ -13,7 +13,7 @@
 ; (Cell::Bad) would leave %outer undescribable and force it to materialize
 ; too.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32)
 declare void @escape(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -21,11 +21,11 @@ declare i32 @__gxx_personality_v0(...)
 define void @field_holds_materialized_vo(i32 %x, i32 %y) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 100 to ptr), i32 24)
+              ptr inttoptr (i64 100 to ptr), i32 24, i1 false)
            to label %alloc_inner unwind label %u
 alloc_inner:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 200 to ptr), i32 16)
+              ptr inttoptr (i64 200 to ptr), i32 16, i1 false)
            to label %body unwind label %u
 body:
   ; outer: offset 8 = int %x, offset 16 = ref %inner

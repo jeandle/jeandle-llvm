@@ -8,14 +8,14 @@
 ; across the whole loop: allocation, stores, loads and the PHI all fold
 ; away.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink_i32(i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @loop_carried_identity_phi(i32 %n) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 6661 to ptr), i32 32)
+            ptr inttoptr (i64 6661 to ptr), i32 32, i1 false)
        to label %prep unwind label %u
 prep:
   br label %loop

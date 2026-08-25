@@ -10,14 +10,14 @@
 ; the rewritten bundle — is RETAINED (if %a were NeverEscapes too, its
 ; invoke would be eliminated and the bundle would vanish with it).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @multiscope_alloc_bundle(i32 %x) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 200 to ptr), i32 16)
+            ptr inttoptr (i64 200 to ptr), i32 16, i1 false)
        to label %n1 unwind label %u
 n1:
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
@@ -27,7 +27,7 @@ n1:
   ; local 0 is %b; the INNERMOST scope (bci 9) has one i32 local.
   ; (i64 393233 = MethodType marker pair encoding: (6<<16)|T_METADATA(17).)
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 100 to ptr), i32 16)
+            ptr inttoptr (i64 100 to ptr), i32 16, i1 false)
        [ "deopt"(i64 0, i32 5, i32 5, i64 12, ptr addrspace(1) %b,
                  i64 393233, i64 777,
                  i64 1, i32 9, i32 9, i64 10, i32 %x) ]
@@ -50,7 +50,7 @@ u:
 ; RETAINED with the rewritten bundle.
 ; CHECK-LABEL: define void @multiscope_alloc_bundle(
 ; CHECK-NOT: %b = invoke
-; CHECK: %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 100 to ptr), i32 16)
+; CHECK: %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 100 to ptr), i32 16, i1 false)
 ; CHECK-SAME: [ "deopt"(i64 0, i32 5, i32 5, i64 262156, i64 200, i32 1, i64 34359738378, i32 %x, i64 524300, i32 0, i64 393233, i64 777, i64 1, i32 9, i32 9, i64 10, i32 %x) ]
 ; CHECK: call void @sink(ptr addrspace(1) %a)
 ; CHECK-NOT: poison

@@ -7,7 +7,7 @@
 ; monitor pair is fully elided. The materialization is hoisted to the
 ; allocation's normal-dest so it dominates both successors.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -17,7 +17,7 @@ define void @test_partial_escape_with_lock(i1 %c) gc "hotspotgc" personality ptr
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   br i1 %c, label %escape, label %hot

@@ -7,14 +7,14 @@
 ; escape path materializes the virtual VALUE operand — the surviving check must
 ; observe a real pointer, never poison.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc i1 @jeandle.array_store_check(ptr addrspace(1), ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define i1 @test_value_leak_array_nonvirtual(ptr addrspace(1) %arr) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %v = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5555 to ptr), i32 16)
+            ptr inttoptr (i64 5555 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %r = call hotspotcc i1 @jeandle.array_store_check(ptr addrspace(1) %v,

@@ -8,14 +8,14 @@
 ; represented by int64_t, PEA must keep the access real.  It must not rely on
 ; C++ signed wraparound and then eliminate the allocation and access.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define void @nested_min_minus_one() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 73601 to ptr), i32 16)
+      ptr inttoptr (i64 73601 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 body:
   %min = getelementptr i8, ptr addrspace(1) %obj,
@@ -38,7 +38,7 @@ define void @densemap_tombstone_offset() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 73604 to ptr), i32 16)
+      ptr inttoptr (i64 73604 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 body:
   %sentinel = getelementptr i8, ptr addrspace(1) %obj,
@@ -59,7 +59,7 @@ define void @field_endpoint_max_plus_one() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 73602 to ptr), i32 16)
+      ptr inttoptr (i64 73602 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 body:
   %last = getelementptr i8, ptr addrspace(1) %obj,
@@ -80,7 +80,7 @@ define i8 @load_endpoint_max_plus_one() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 73603 to ptr), i32 16)
+      ptr inttoptr (i64 73603 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 body:
   %last = getelementptr i8, ptr addrspace(1) %obj,

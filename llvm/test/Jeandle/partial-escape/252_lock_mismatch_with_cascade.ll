@@ -19,7 +19,7 @@
 ; materialized-object PHI is emitted for either object; owner PHIs are used
 ; only by the balancing exits.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare i32 @__gxx_personality_v0(...)
@@ -32,11 +32,11 @@ entry:
   %pad0.lock = alloca i64, align 8
   %pad1.lock = alloca i64, align 8
   %oA = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 11111 to ptr), i32 16)
+              ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %allocB unwind label %u
 allocB:
   %oB = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 22222 to ptr), i32 16)
+              ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
        to label %branch unwind label %u
 branch:
   br i1 %c, label %then, label %else
@@ -69,8 +69,8 @@ u:
 
 ; CHECK-LABEL: define void @test_lock_mismatch_with_cascade
 ; Both ORIGINAL allocation invokes are RETAINED as the only allocations.
-; CHECK: %oA = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16)
-; CHECK: %oB = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16)
+; CHECK: %oA = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
+; CHECK: %oB = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
 ; No second materialization invoke is emitted.
 ; CHECK-NOT: pea.mat = invoke
 ; Each virtual source is a tail call, while its canonical replay is bare and

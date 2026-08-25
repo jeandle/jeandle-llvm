@@ -8,14 +8,14 @@
 ; should_reexecute i64 + first duplicated-BCI pair) and the outer-scope
 ; stack slot is rewritten to a VORefStackType by vo-id.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @multiscope_stack(i32 %x) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 100 to ptr), i32 16)
+            ptr inttoptr (i64 100 to ptr), i32 16, i1 false)
        to label %n1 unwind label %u
 n1:
   %of = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

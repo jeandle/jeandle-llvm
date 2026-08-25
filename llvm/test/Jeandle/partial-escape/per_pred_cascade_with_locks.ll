@@ -16,7 +16,7 @@
 ; merge sinks.
 ; See PartialEscapeTransform.cpp applyMaterialize (cyclic-field-materialize).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -27,9 +27,9 @@ define void @per_pred_cascade_with_locks(i1 %c, ptr addrspace(1) %pad)
 entry:
   %lock = alloca i64, align 8
   %pad.lock = alloca i64, align 8
-  %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16) to label %oi unwind label %u
+  %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false) to label %oi unwind label %u
 oi:
-  %p = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16) to label %fld unwind label %u
+  %p = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false) to label %fld unwind label %u
 fld:
   %of = getelementptr inbounds i8, ptr addrspace(1) %o, i64 0
   store atomic ptr addrspace(1) %p, ptr addrspace(1) %of unordered, align 8
@@ -60,8 +60,8 @@ u:
 
 ; CHECK-LABEL: define void @per_pred_cascade_with_locks
 ; Both ORIGINAL allocation invokes are RETAINED.
-; CHECK: %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16)
-; CHECK: %p = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16)
+; CHECK: %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
+; CHECK: %p = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
 ; Materialization emits no new allocation invoke.
 ; CHECK-NOT: pea.mat = invoke
 ; Per-pred replayed field stores use OrigAlloc as the stored value (the cycle

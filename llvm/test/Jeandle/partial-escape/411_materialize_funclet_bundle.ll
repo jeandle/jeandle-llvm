@@ -16,7 +16,7 @@
 ; Jeandle does not currently target Windows; this is an IR-defensiveness
 ; rule: PEA must tolerate any legal IR.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @may_throw()
 declare void @sink(ptr addrspace(1))
 declare i32 @__CxxFrameHandler3(...)
@@ -24,7 +24,7 @@ declare i32 @__CxxFrameHandler3(...)
 define void @test_funclet_bundle() personality ptr @__CxxFrameHandler3 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 7 to ptr), i32 16)
+            ptr inttoptr (i64 7 to ptr), i32 16, i1 false)
        to label %afteralloc unwind label %ehalloc
 
 afteralloc:
@@ -49,7 +49,7 @@ ehalloc:
 ; CHECK-LABEL: define void @test_funclet_bundle
 ; The original allocation invoke is retained (allocated outside the funclet,
 ; so it carries no funclet bundle).
-; CHECK: = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 7 to ptr), i32 16)
+; CHECK: = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 7 to ptr), i32 16, i1 false)
 ; Inside the cleanup funclet, the field store is replayed onto OrigAlloc %o.
 ; CHECK: %[[CP:[A-Za-z0-9._]+]] = cleanuppad within none []
 ; CHECK: %{{.*}} = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

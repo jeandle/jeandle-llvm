@@ -10,7 +10,7 @@
 ; inner ObjectID and folds to the inner's compile-time length. Nothing
 ; escapes; both allocations and the field store all disappear.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
 declare hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) readonly)
 declare i32 @__gxx_personality_v0(...)
@@ -22,7 +22,7 @@ entry:
            to label %nA unwind label %u1
 nA:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 67890 to ptr), i32 16)
+              ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
            to label %nB unwind label %u2
 nB:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 8

@@ -12,7 +12,7 @@
 ; not a finalizer-class), then CanVirtualize, sees false, and refuses
 ; to register a VirtualObject — the original new_instance survives.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc i1 @jeandle.check_if_value_based(ptr addrspace(1))
 
 declare i32 @__gxx_personality_v0(...)
@@ -20,7 +20,7 @@ declare i32 @__gxx_personality_v0(...)
 define i1 @test_canvirtualize_bails() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 7777 to ptr), i32 16)
+            ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %r = call hotspotcc i1 @jeandle.check_if_value_based(ptr addrspace(1) %o)

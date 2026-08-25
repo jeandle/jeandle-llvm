@@ -12,7 +12,7 @@
 
 @G_zero = private unnamed_addr constant i32 0
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -20,15 +20,15 @@ define i32 @test_delta_convergence()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %a2 unwind label %u
 a2:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
        to label %a3 unwind label %u
 a3:
   %c = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 33333 to ptr), i32 16)
+            ptr inttoptr (i64 33333 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %v = load i32, ptr @G_zero, align 4

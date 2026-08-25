@@ -28,7 +28,7 @@
 ; a top-level actual argument. Since Jeandle reuses OrigAlloc, every replay is
 ; placed only on the call predecessor and no allocation is created there.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink2(ptr addrspace(1), ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -36,7 +36,7 @@ define void @test_same_twice(i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-             ptr inttoptr (i64 10101 to ptr), i32 24)
+             ptr inttoptr (i64 10101 to ptr), i32 24, i1 false)
          to label %body unwind label %unwind
 body:
   %field = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 8
@@ -73,11 +73,11 @@ define void @test_two_objects(i32 %left, i32 %right)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 20201 to ptr), i32 24)
+           ptr inttoptr (i64 20201 to ptr), i32 24, i1 false)
        to label %alloc.b unwind label %unwind
 alloc.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 20202 to ptr), i32 24)
+           ptr inttoptr (i64 20202 to ptr), i32 24, i1 false)
        to label %body unwind label %unwind
 body:
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
@@ -119,11 +119,11 @@ define void @test_nested_arguments(i32 %outer.value, i32 %child.value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 30301 to ptr), i32 32)
+               ptr inttoptr (i64 30301 to ptr), i32 32, i1 false)
            to label %alloc.child unwind label %unwind
 alloc.child:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 30302 to ptr), i32 24)
+               ptr inttoptr (i64 30302 to ptr), i32 24, i1 false)
            to label %body unwind label %unwind
 body:
   %outer.int = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 8
@@ -170,7 +170,7 @@ define i32 @test_call_or_not(i1 %do.call, i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-             ptr inttoptr (i64 40401 to ptr), i32 24)
+             ptr inttoptr (i64 40401 to ptr), i32 24, i1 false)
          to label %body unwind label %unwind
 body:
   %field = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 8

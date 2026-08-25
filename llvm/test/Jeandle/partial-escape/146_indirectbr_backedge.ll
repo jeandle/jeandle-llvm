@@ -5,7 +5,7 @@
 ; down the conservative output for this unusual terminator, but deliberately
 ; makes no claim that the unsafe-cyclic-blocks safety net fired.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 @labels = external addrspace(1) global [2 x ptr]
@@ -13,7 +13,7 @@ declare i32 @__gxx_personality_v0(...)
 define void @test_indirectbr(i32 %n, ptr %target) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 9999 to ptr), i32 16)
+              ptr inttoptr (i64 9999 to ptr), i32 16, i1 false)
            to label %head unwind label %u
 
 head:

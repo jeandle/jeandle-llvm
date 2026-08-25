@@ -6,7 +6,7 @@
 ; argument. A load through the laundered pointer must therefore resolve
 ; against the original virtual's slot state.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare ptr addrspace(1) @llvm.launder.invariant.group.p1(ptr addrspace(1))
 declare ptr addrspace(1) @llvm.strip.invariant.group.p1(ptr addrspace(1))
 declare void @use(i32)
@@ -15,7 +15,7 @@ declare i32 @__gxx_personality_v0(...)
 define void @test_launder() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   ; Store through the original; load through a launder-then-strip alias.

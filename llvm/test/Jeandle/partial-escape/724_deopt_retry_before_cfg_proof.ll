@@ -9,7 +9,7 @@
 ; the provisional CFG proof, so the winning attempt retains both branch arms
 ; and the allocation that escapes only on %null.path.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc i1
     @jeandle.check_if_value_based(ptr addrspace(1))
 declare hotspotcc void
@@ -23,17 +23,17 @@ define void @deopt_retry_before_cfg_proof()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %alloc.b unwind label %unwind
 
 alloc.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %alloc.path unwind label %unwind
 
 alloc.path:
   %path.object = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %dispatch unwind label %unwind
 
 dispatch:
@@ -75,12 +75,12 @@ define void @different_safepoint_descriptor_is_not_enough()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %alloc.b unwind label %unwind
 
 alloc.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 
 body:
@@ -112,17 +112,17 @@ define void @deleted_safepoint_has_no_obligation()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %alloc.b unwind label %unwind
 
 alloc.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %alloc.receiver unwind label %unwind
 
 alloc.receiver:
   %receiver = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 
 body:
@@ -151,7 +151,7 @@ define void @synthetic_dependency_suppresses_ordinary_leaves(i1 %pick)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %choose unwind label %unwind
 
 choose:
@@ -159,12 +159,12 @@ choose:
 
 left:
   %left.object = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %merge unwind label %unwind
 
 right:
   %right.object = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %merge unwind label %unwind
 
 merge:

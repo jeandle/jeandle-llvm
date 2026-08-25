@@ -23,7 +23,7 @@
 ; One materialize commit per materialize point flattens every object's locks
 ; and lowers them globally depth-sorted.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -43,15 +43,15 @@ entry:
   %la2 = alloca i64, align 8
   %lc3 = alloca i64, align 8
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 11111 to ptr), i32 32)
+              ptr inttoptr (i64 11111 to ptr), i32 32, i1 false)
            to label %na unwind label %u
 na:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 22222 to ptr), i32 32)
+              ptr inttoptr (i64 22222 to ptr), i32 32, i1 false)
            to label %nb unwind label %u
 nb:
   %c_obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 33333 to ptr), i32 32)
+              ptr inttoptr (i64 33333 to ptr), i32 32, i1 false)
            to label %fld unwind label %u
 fld:
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8

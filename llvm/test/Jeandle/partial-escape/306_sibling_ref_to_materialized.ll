@@ -18,18 +18,18 @@
 ; a clean MaterializedRef entry and B's retained OrigAlloc replays the
 ; field-0 store with A's retained pointer.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @sibling_ref() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %n1 unwind label %u
 n1:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 24)
+            ptr inttoptr (i64 22222 to ptr), i32 24, i1 false)
        to label %n2 unwind label %u
 n2:
   ; B.field_0 = A — gives FS[B][0] = VirtualRef(A).
