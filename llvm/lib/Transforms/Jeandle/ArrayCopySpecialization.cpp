@@ -925,13 +925,11 @@ bool generateArrayCopy(CallBase &CI, BasicBlock *&ControlBB,
   // Results are placed here. LLVM represents C2's result_region with a
   // common successor block and explicit CFG edges.
   BasicBlock *ResultRegion = nullptr;
-  {
-    BasicBlock *NormalDest = Invoke.getNormalDest();
-    ResultRegion = BasicBlock::Create(Ctx, "arraycopy.result", F, NormalDest);
-    BranchInst::Create(NormalDest, ResultRegion);
-    NormalDest->replacePhiUsesWith(ControlBB, ResultRegion);
-    Invoke.setNormalDest(ResultRegion);
-  }
+  BasicBlock *NormalDest = Invoke.getNormalDest();
+  ResultRegion = BasicBlock::Create(Ctx, "arraycopy.result", F, NormalDest);
+  BranchInst::Create(NormalDest, ResultRegion);
+  NormalDest->replacePhiUsesWith(ControlBB, ResultRegion);
+  Invoke.setNormalDest(ResultRegion);
   SlowRegion->moveBefore(ResultRegion);
 
   // The slow control path. A checked-copy failure is merged here with
