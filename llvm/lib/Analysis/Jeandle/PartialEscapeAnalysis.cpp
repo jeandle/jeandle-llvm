@@ -8839,8 +8839,7 @@ void Analyzer::validateFinalDeoptObligations() {
     while (!Worklist.empty()) {
       jeandle::ObjectID ID = Worklist.pop_back_val();
       if (ID == jeandle::InvalidObjectID ||
-          ID >= Result.VirtualObjects.size() ||
-          !Visited.insert(ID).second)
+          ID >= Result.VirtualObjects.size() || !Visited.insert(ID).second)
         continue;
       const jeandle::VirtualObject &VObj = *Result.VirtualObjects[ID];
       if (VObj.IsSynthetic) {
@@ -8881,8 +8880,7 @@ void Analyzer::validateFinalDeoptObligations() {
     while (!Worklist.empty()) {
       jeandle::ObjectID ID = Worklist.pop_back_val();
       if (ID == jeandle::InvalidObjectID ||
-          ID >= Result.VirtualObjects.size() ||
-          !Visited.insert(ID).second)
+          ID >= Result.VirtualObjects.size() || !Visited.insert(ID).second)
         continue;
       const jeandle::VirtualObject &VObj = *Result.VirtualObjects[ID];
       if (VObj.IsSynthetic) {

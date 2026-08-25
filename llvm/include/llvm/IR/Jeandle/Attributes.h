@@ -81,8 +81,7 @@ public:
   static constexpr const char *ArrayCopyKindArrayCopy = "arraycopy";
   static constexpr const char *ArrayCopyKindCloneInst = "clone-inst";
   static constexpr const char *ArrayCopyKindCloneArray = "clone-array";
-  static constexpr const char *ArrayCopyKindCloneOopArray =
-      "clone-oop-array";
+  static constexpr const char *ArrayCopyKindCloneOopArray = "clone-oop-array";
 };
 
 } // namespace llvm::jeandle
