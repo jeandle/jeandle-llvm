@@ -106,12 +106,22 @@ struct VMConstants {
   bool UseCompressedClassPointers = true;
   bool UseCompressedOops = true;
 
+  // Arraycopy optimization thresholds supplied by HotSpot VM flags.
+  int64_t ArrayOperationPartialInlineSize = 0;
+  int64_t ArrayCopyLoadStoreMaxElem = 8;
+
   // Convenience accessors.
   int64_t arrayLengthOffset() const { return ArrayLengthOffset; }
   int64_t klassOffset() const { return KlassOffset; }
   int64_t markWordOffset() const { return MarkWordOffset; }
   int64_t defaultMarkWord() const { return DefaultMarkWord; }
   int64_t instanceBaseOffset() const { return InstanceBaseOffset; }
+  int64_t arrayOperationPartialInlineSize() const {
+    return ArrayOperationPartialInlineSize;
+  }
+  int64_t arrayCopyLoadStoreMaxElem() const {
+    return ArrayCopyLoadStoreMaxElem;
+  }
 
   // Returns the array base offset for an element type. Returns -1 if Ty is not
   // a recognised Jeandle element type.

@@ -68,6 +68,20 @@ public:
   static constexpr const char *MhIntrinsicName = "mh-intrinsic-name";
 
   static constexpr const char *MonomorphicTarget = "monomorphic-target";
+
+  /// Classification attributes attached to jeandle.arraycopy call sites.
+  static constexpr const char *ArrayCopyKind = "jeandle.arraycopy.kind";
+
+  static constexpr const char *ValidatedArrayCopy =
+      "jeandle.arraycopy.validated";
+
+  static constexpr const char *ArrayCopyNegativeLengthGuard =
+      "jeandle.arraycopy.negative-length-guard";
+
+  static constexpr const char *ArrayCopyKindArrayCopy = "arraycopy";
+  static constexpr const char *ArrayCopyKindCloneInst = "clone-inst";
+  static constexpr const char *ArrayCopyKindCloneArray = "clone-array";
+  static constexpr const char *ArrayCopyKindCloneOopArray = "clone-oop-array";
 };
 
 } // namespace llvm::jeandle

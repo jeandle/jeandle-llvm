@@ -29,7 +29,6 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/Metadata.h"
-#include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/CheckedArithmetic.h"
@@ -154,18 +153,6 @@ bool isPEAHandledNonEscapingIntrinsic(const IntrinsicInst *II) {
 // ===========================================================================
 // Type / klass helpers
 // ===========================================================================
-
-std::optional<JBasicType> elementTypeForArrayKlass(uintptr_t ArrayKlass) {
-  if (ArrayKlass == 0)
-    return std::nullopt;
-  const jeandle::VMCallbacks *CB = jeandle::getVMCallbacks();
-  if (!CB || !CB->ElementBasicTypeOfArrayKlass)
-    return std::nullopt;
-  int Raw = CB->ElementBasicTypeOfArrayKlass(ArrayKlass);
-  if (Raw < 0 || Raw >= static_cast<int>(JBasicType::Count))
-    return std::nullopt;
-  return static_cast<JBasicType>(Raw);
-}
 
 Type *llvmElementTypeFor(JBasicType Kind, LLVMContext &Ctx) {
   switch (Kind) {
