@@ -63,6 +63,15 @@ enum class JeandleInlineReason : int {
   LLVMInlineFailed,
 };
 
+/// VM policy decision for an inline candidate. Keep the numeric values stable
+/// because callback logs and replay files persist them.
+enum class JeandleInlineDecision : int {
+  Deny = 0,
+  InlineNow,
+  InlineLater,
+  HitNodeCountCutoff,
+};
+
 // =============================================================================
 // Master callback list — add new callbacks here
 // =============================================================================
@@ -208,10 +217,10 @@ enum class JeandleInlineReason : int {
   def(IsKlassInitialized, bool, Bool,                                            \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
-  def(IsOkToInline, bool, Bool,                                                  \
-      (int a1, int a2, uintptr_t a3), (a1, a2, a3),                              \
+  def(GetInlineDecision, int, Int,                                               \
+      (int a1, int a2, uintptr_t a3, bool a4), (a1, a2, a3, a4),                 \
       (VMCallbackValueType::Int, VMCallbackValueType::Int,                       \
-       VMCallbackValueType::Uintptr), 3)                                         \
+       VMCallbackValueType::Uintptr, VMCallbackValueType::Bool), 4)               \
   def(GetInlineCalleeIR, bool, Bool,                                             \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
@@ -386,9 +395,9 @@ enum class JeandleInlineReason : int {
 ///                         instance klass. ConstantFieldFolding only acts on a
 ///                         true result because initialization is monotonic;
 ///                         false retains the dynamic initialization check.
-///   IsOkToInline        — Given an inline scope id, call-site BCI, and callee
-///                         Java method pointer, returns whether the VM allows
-///                         this inline attempt.
+///   GetInlineDecision   — Given an inline scope id, call-site BCI, callee Java
+///                         method pointer, and whether this is a late attempt,
+///                         returns a JeandleInlineDecision value.
 ///   GetInlineCalleeIR   — Given a callee Java method pointer, materializes its
 ///                         LLVM IR into the active module and returns whether
 ///                         the definition is available.
