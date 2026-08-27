@@ -17,8 +17,9 @@
 ; PEA-ON: function(repeated-constant-field-folding),
 ; PEA-ON: {{.*function\(arraycopy-specialization\),}}
 ; PEA-ON: function(type-check-elimination),
-; PEA-ON: {{.*function\(insert-gc-barriers\),}}
 ; PEA-ON: {{.*java-operation-lower\<phase=1\>,}}
+; PEA-ON: {{.*function\(insert-gc-barriers\),}}
+; PEA-ON: {{.*java-operation-lower\<phase=2\>,}}
 
 ; With PEA disabled the inline driver is followed directly by the standard
 ; post-inline cluster and insert-gc-barriers: no pre-PEA cluster, no cleanup,
@@ -30,8 +31,9 @@
 ; PEA-OFF: function(repeated-constant-field-folding),
 ; PEA-OFF: {{.*function\(arraycopy-specialization\),}}
 ; PEA-OFF: {{.*function\(type-check-elimination\),}}
-; PEA-OFF: {{.*function\(insert-gc-barriers\),}}
 ; PEA-OFF: {{.*java-operation-lower\<phase=1\>,}}
+; PEA-OFF: {{.*function\(insert-gc-barriers\),}}
+; PEA-OFF: {{.*java-operation-lower\<phase=2\>,}}
 
 define hotspotcc void @pipeline_gate() {
 entry:

@@ -7,12 +7,13 @@
 ; CHECK: java-operation-lower<phase=0>
 ; CHECK-SAME: cha-devirtualization
 ; CHECK-SAME: jeandle-inline-driver
+; CHECK-SAME: java-operation-lower<phase=1>
 ; CHECK-SAME: safepoint-poll-elimination
 ; CHECK-SAME: safepoint-strip-mining
 ; CHECK-SAME: safepoint-poll-elimination
 ; CHECK-SAME: insert-gc-barriers
 ; CHECK-SAME: safepoint-poll-elimination
-; CHECK-SAME: java-operation-lower<phase=1>
+; CHECK-SAME: java-operation-lower<phase=2>
 ; CHECK-SAME: expand-narrow-oop-cast
 ; CHECK-SAME: rewrite-statepoints-for-gc
 ; CHECK-SAME: jeandle-narrow-oop-marker

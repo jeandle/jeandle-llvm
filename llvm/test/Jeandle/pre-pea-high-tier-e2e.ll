@@ -30,7 +30,7 @@ entry:
   ret void
 }
 
-attributes #0 = { noinline "lower-phase"="1" }
+attributes #0 = { noinline "lower-phase"="2" }
 
 define i32 @test_array_init() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:

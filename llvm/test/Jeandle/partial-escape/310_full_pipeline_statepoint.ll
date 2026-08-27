@@ -165,6 +165,6 @@ u:
 ; CHECK-SAME: "gc-live"
 ; CHECK: gc.relocate
 
-attributes #0 = { noinline "lower-phase"="1" }
+attributes #0 = { noinline "lower-phase"="2" }
 
 !java-method-compilation = !{}
