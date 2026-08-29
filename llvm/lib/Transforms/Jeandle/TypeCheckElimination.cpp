@@ -8,7 +8,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This pass eliminates redundant jeandle.check_instanceof calls by using
+// This pass eliminates redundant Java type-check calls by using
 // compile-time Java type information. It replaces calls with constant true
 // (when the object's type is provably a subtype) or constant false (when the
 // object's exact type is provably not a subtype).
@@ -20,6 +20,7 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
@@ -29,6 +30,19 @@
 #define DEBUG_TYPE "type-check-elimination"
 
 using namespace llvm;
+
+namespace {
+
+void replaceCheckcastWithNullTest(CallBase *CheckCB, Value *Obj) {
+  IRBuilder<> Builder(CheckCB);
+  Value *IsNull = Builder.CreateICmpEQ(
+      Obj, ConstantPointerNull::get(cast<PointerType>(Obj->getType())),
+      "checkcast.null_result");
+  CheckCB->replaceAllUsesWith(IsNull);
+  CheckCB->eraseFromParent();
+}
+
+} // namespace
 
 PreservedAnalyses TypeCheckElimination::run(Function &F,
                                             FunctionAnalysisManager &FAM) {
@@ -40,30 +54,70 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
   assert(CB && CB->IsSubtype && CB->IsInterface && CB->IsObjectKlass &&
          "VMCallbacks must be set");
 
-  Function *CheckFn = M->getFunction("jeandle.check_instanceof");
-  if (!CheckFn)
+  Function *InstanceofFn = M->getFunction("jeandle.check_instanceof");
+  Function *KlassSubtypeFn = M->getFunction("jeandle.check_klass_subtype");
+  Function *CheckCastFn = M->getFunction("jeandle.checkcast");
+  if (!InstanceofFn && !KlassSubtypeFn && !CheckCastFn)
     return PreservedAnalyses::all();
 
   DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
 
-  // Collect all check_instanceof calls/invokes.
+  // checkcast stays visible until JavaOperationLower(1), so TCE must process
+  // it directly instead of relying on an earlier expansion to check_instanceof.
   SmallVector<CallBase *, 16> Checks;
   for (auto &I : instructions(F)) {
     auto *CheckCB = dyn_cast<CallBase>(&I);
-    if (CheckCB && CheckCB->getCalledFunction() == CheckFn)
+    Function *Callee = CheckCB ? CheckCB->getCalledFunction() : nullptr;
+    if ((InstanceofFn && Callee == InstanceofFn) ||
+        (KlassSubtypeFn && Callee == KlassSubtypeFn) ||
+        (CheckCastFn && Callee == CheckCastFn))
       Checks.push_back(CheckCB);
   }
 
   bool Changed = false;
   for (CallBase *CheckCB : Checks) {
+    Function *Callee = CheckCB->getCalledFunction();
+
+    // check_klass_subtype takes two Klass operands, unlike
+    // check_instanceof/checkcast which take (SuperKlass, oop).  Handle this
+    // form before applying the generic JavaType-based oop logic below.
+    if (Callee == KlassSubtypeFn) {
+      uintptr_t SubKlass =
+          jeandle::extractKlassConstant(CheckCB->getArgOperand(0));
+      uintptr_t SuperKlass =
+          jeandle::extractKlassConstant(CheckCB->getArgOperand(1));
+      if (SubKlass == 0 || SuperKlass == 0)
+        continue;
+
+      if (CB->IsSubtype(SubKlass, SuperKlass)) {
+        LLVM_DEBUG(dbgs() << "TCE: known klass subtype, replacing with true: "
+                          << *CheckCB << "\n");
+        CheckCB->replaceAllUsesWith(
+            ConstantInt::getTrue(CheckCB->getType()));
+        CheckCB->eraseFromParent();
+        Changed = true;
+      } else if (jeandle::areKlassesIncompatible(
+                     SubKlass, /*KlassExact=*/true, SuperKlass)) {
+        LLVM_DEBUG(dbgs() << "TCE: incompatible klasses, replacing with false: "
+                          << *CheckCB << "\n");
+        CheckCB->replaceAllUsesWith(
+            ConstantInt::getFalse(CheckCB->getType()));
+        CheckCB->eraseFromParent();
+        Changed = true;
+      }
+      continue;
+    }
+
     uintptr_t SuperKlass =
         jeandle::extractKlassConstant(CheckCB->getArgOperand(0));
     if (SuperKlass == 0)
       continue;
 
-    // --- Fold to true: instanceof java.lang.Object ---
-    // Every non-null object is an instance of Object, and the
-    // check_instanceof helper's IR contract guarantees non-null.
+    const bool IsCheckcast = Callee == CheckCastFn;
+
+    // --- Fold to true: instanceof/checkcast java.lang.Object ---
+    // Every non-null object is an instance of Object. checkcast also succeeds
+    // for null, so this replacement is valid for both helpers.
     if (CB->IsObjectKlass(SuperKlass)) {
       LLVM_DEBUG(dbgs() << "TCE: instanceof Object, replacing with true: "
                         << *CheckCB << "\n");
@@ -74,10 +128,8 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
     }
 
     Value *Obj = CheckCB->getArgOperand(1);
-    // TCE queries JavaType only at jeandle.check_instanceof call sites. The
-    // helper's IR contract requires this oop operand to be non-null, so
-    // check_instanceof-derived sharpening remains sound even though JavaType
-    // itself does not model nullability.
+    // A known subtype makes both helpers true: check_instanceof requires a
+    // non-null oop, while checkcast also succeeds when its oop is null.
     jeandle::JavaType ObjType = jeandle::getJavaType(Obj, &DT, CheckCB);
 
     // --- Fold to true: known subtype ---
@@ -90,12 +142,21 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
       continue;
     }
 
-    // --- Fold to false ---
+    // --- Fold to false or null-test ---
+    // JavaType does not model nullability. An incompatible checkcast therefore
+    // becomes `oop == null`: null casts successfully, while the proven-
+    // incompatible non-null case fails.
     bool FoldToFalse = false;
 
-    if (ObjType.isKnown() && jeandle::areKlassesIncompatible(
-                                 ObjType.Klass, ObjType.Exact, SuperKlass)) {
+    if (ObjType.isKnown() &&
+        jeandle::areKlassesIncompatible(ObjType.Klass, ObjType.Exact,
+                                        SuperKlass)) {
       LLVM_DEBUG(dbgs() << "TCE: incompatible class types\n");
+      if (IsCheckcast) {
+        replaceCheckcastWithNullTest(CheckCB, Obj);
+        Changed = true;
+        continue;
+      }
       FoldToFalse = true;
     }
 
@@ -107,6 +168,11 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
         if (CB->IsSubtype(SuperKlass, Excluded)) {
           LLVM_DEBUG(dbgs()
                      << "TCE: denied by excluded klass " << Excluded << "\n");
+          if (IsCheckcast) {
+            replaceCheckcastWithNullTest(CheckCB, Obj);
+            Changed = true;
+            break;
+          }
           FoldToFalse = true;
           break;
         }

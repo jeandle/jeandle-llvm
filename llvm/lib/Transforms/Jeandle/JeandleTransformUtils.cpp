@@ -187,10 +187,10 @@ static CallInst *createConstraintInst(Value *Receiver, uintptr_t Constraint,
       Builder.CreateIntToPtr(Builder.getInt64(Constraint), KlassTy);
 
   FunctionCallee Callee(CheckFn);
-  CallInst *Checkcast = Builder.CreateCall(Callee, {ConstraintValue, Receiver},
-                                           ArrayRef<OperandBundleDef>{});
-  Checkcast->setCallingConv(CallingConv::Hotspot_JIT);
-  return Checkcast;
+  CallInst *ConstraintCheck = Builder.CreateCall(Callee, {ConstraintValue, Receiver},
+                                                 ArrayRef<OperandBundleDef>{});
+  ConstraintCheck->setCallingConv(CallingConv::Hotspot_JIT);
+  return ConstraintCheck;
 }
 
 void buildDeoptimize(IRBuilder<> &Builder, Module &M,
@@ -223,22 +223,22 @@ BasicBlock *insertCheckInstanceOf(Instruction &Inst, Value *Receiver,
 
   LLVMContext &Context = Inst.getContext();
 
-  BasicBlock *CheckcastPass = SplitBlock(BB, &Inst, DTU, nullptr, nullptr,
-                                         Prefix + "_check_receiver_pass");
-  BasicBlock *CheckcastFail = BasicBlock::Create(
-      Context, Prefix + "_check_receiver_fail", BB->getParent(), CheckcastPass);
+  BasicBlock *CheckPass = SplitBlock(BB, &Inst, DTU, nullptr, nullptr,
+                                     Prefix + "_check_receiver_pass");
+  BasicBlock *CheckFail = BasicBlock::Create(
+      Context, Prefix + "_check_receiver_fail", BB->getParent(), CheckPass);
 
   BB->getTerminator()->eraseFromParent();
   IRBuilder<> BuilderOrigin(BB);
-  CallInst *Checkcast =
-      createConstraintInst(Receiver, Constraint, BuilderOrigin, CheckFn);
+  CallInst *Check = createConstraintInst(Receiver, Constraint, BuilderOrigin,
+                                         CheckFn);
 
-  BuilderOrigin.CreateCondBr(Checkcast, CheckcastPass, CheckcastFail);
+  BuilderOrigin.CreateCondBr(Check, CheckPass, CheckFail);
   if (DTU) {
-    DTU->applyUpdates({{DominatorTree::Insert, BB, CheckcastFail}});
+    DTU->applyUpdates({{DominatorTree::Insert, BB, CheckFail}});
     DTU->flush();
   }
-  return CheckcastFail;
+  return CheckFail;
 }
 
 BasicBlock *insertNullCheck(Instruction &Inst, Value *Receiver,

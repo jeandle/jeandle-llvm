@@ -71,9 +71,11 @@ struct JavaType {
 /// by examining dominating type guards that constrain the value's type at the
 /// point of the context instruction.
 ///
-/// JavaType does not model nullability. Sharpening derived from
-/// jeandle.check_instanceof is therefore only sound for consumers whose IR/API
-/// contract guarantees that the queried oop is non-null at the check site.
+/// JavaType does not model nullability. A successful jeandle.checkcast(K, V)
+/// therefore contributes the nullable type constraint "V is null or an
+/// instance of K"; consumers that require an actual object must establish
+/// non-nullness separately. Sharpening from jeandle.check_instanceof relies on
+/// that helper's non-null oop contract.
 ///
 /// The query traces through a limited set of IR patterns:
 /// - PHI nodes (with cycle detection for loop back-edges)
@@ -85,6 +87,7 @@ struct JavaType {
 /// - Or (i1) of two traced conditions
 /// - Xor i1 %a, true: logical NOT
 /// - Direct jeandle.check_instanceof calls
+/// - Direct jeandle.checkcast calls
 /// Unrecognized patterns conservatively return unknown ({}).
 JavaType getJavaType(Value *V, DominatorTree *DT = nullptr,
                      Instruction *Context = nullptr);
