@@ -130,16 +130,18 @@ bool jeandle::areKlassesIncompatible(uintptr_t Klass, bool KlassExact,
          (!CB->IsSubtype(OtherKlass, Klass) && !CB->IsInterface(OtherKlass));
 }
 
-/// Return true if F is jeandle.check_instanceof.
-static bool isCheckInstanceofFn(const Function *F) {
-  return F && F->getName() == "jeandle.check_instanceof";
+/// Return true if F is a Java type-check helper whose boolean result directly
+/// describes the relation between its klass and oop operands.
+static bool isJavaTypeCheckFn(const Function *F) {
+  return F && (F->getName() == "jeandle.check_instanceof" ||
+               F->getName() == "jeandle.checkcast");
 }
 
-/// If CB is a call/invoke to jeandle.check_instanceof, return the super klass
-/// and obj.
-static bool isCheckInstanceofCall(const CallBase *CB, uintptr_t &Klass,
-                                  Value *&Obj) {
-  if (!isCheckInstanceofFn(CB->getCalledFunction()))
+/// If CB is a call/invoke to a recognized Java type-check helper, return its
+/// super klass and oop operands.
+static bool isJavaTypeCheckCall(const CallBase *CB, uintptr_t &Klass,
+                                Value *&Obj) {
+  if (!isJavaTypeCheckFn(CB->getCalledFunction()))
     return false;
   Klass = extractKlassConstant(CB->getArgOperand(0));
   Obj = CB->getArgOperand(1);
@@ -416,9 +418,9 @@ static JavaType getBaseJavaType(Value *V,
         if (Visited.count(IncPN))
           continue; // Skip cyclic incoming.
       }
-      // JavaType does not model nullability. Any positive facts derived from
-      // jeandle.check_instanceof remain sound here only because current
-      // consumers query it under check_instanceof's non-null oop contract.
+      // JavaType does not model nullability. A positive type describes the
+      // referenced object's Klass when the value is non-null; null remains a
+      // legal value on paths established by jeandle.checkcast.
       JavaType IncType = getBaseJavaType(Inc, Visited);
       if (IncType.isUnknown())
         return {};
@@ -455,15 +457,15 @@ static JavaType getBaseJavaType(Value *V,
 }
 
 // =============================================================================
-// Condition tracing: trace from a branch condition to a check_instanceof call
+// Condition tracing: trace from a branch condition to a Java type-check call
 // =============================================================================
 
 namespace {
 
-/// Result of tracing a branch condition back to jeandle.check_instanceof calls.
+/// Result of tracing a branch condition back to Java type-check calls.
 ///
 /// Given a conditional branch `br i1 %cond, label %true_bb, label %false_bb`,
-/// traceToCheckInstanceof determines type constraints for each branch:
+/// traceToTypeCheck determines type constraints for each branch:
 ///
 ///   True-branch constraints (condition is true):
 ///   - TrueKlass: positive constraint — obj IS this type (0 if unknown).
@@ -629,35 +631,37 @@ static bool isNullCheckPath(BasicBlock *IncomingBB, Value *Obj,
   return false;
 }
 
-/// Recursively trace a branch condition back to a jeandle.check_instanceof
-/// call on QueryObj. Returns a matched TraceResult if successful, or an
-/// unmatched TraceResult ({Klass=0}) if the condition cannot be linked to a
-/// check_instanceof on QueryObj.
-static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
-                                          SmallPtrSetImpl<Value *> &Visited,
-                                          DominatorTree &DT) {
+/// Recursively trace a branch condition back to jeandle.check_instanceof or
+/// jeandle.checkcast on QueryObj. Returns an unmatched TraceResult if the
+/// condition cannot be linked to a recognized type check on QueryObj.
+static TraceResult traceToTypeCheck(Value *Cond, Value *QueryObj,
+                                    SmallPtrSetImpl<Value *> &Visited,
+                                    DominatorTree &DT) {
   QueryObj = QueryObj->stripPointerCastsAndAliases();
   // Avoid infinite recursion on cyclic value graphs.
   if (!Visited.insert(Cond).second)
     return {}; // Already visited — no match on this path.
 
-  // --- Base case: direct call/invoke to jeandle.check_instanceof ---
+  // --- Base case: direct call/invoke to a Java type-check helper ---
   if (auto *CB = dyn_cast<CallBase>(Cond)) {
     uintptr_t Klass = 0;
     Value *Obj = nullptr;
-    if (isCheckInstanceofCall(CB, Klass, Obj) &&
+    if (isJavaTypeCheckCall(CB, Klass, Obj) &&
         Obj->stripPointerCastsAndAliases() == QueryObj) {
       TraceResult R;
-      R.TrueKlass = Klass;             // check passed → obj IS Klass
-      R.FalseExclusions.insert(Klass); // check failed → obj IS NOT Klass
+      // check_instanceof requires a non-null oop. checkcast additionally
+      // succeeds for null, which is still represented soundly because
+      // JavaType's Klass describes the value only when it is non-null.
+      R.TrueKlass = Klass;
+      R.FalseExclusions.insert(Klass);
       return R;
     }
-    return {}; // Not a check_instanceof on QueryObj.
+    return {}; // Not a recognized type check on QueryObj.
   }
 
   // --- ICmp: comparisons that test the result of a type check ---
   //
-  // The value being compared ultimately derives from a check_instanceof, which
+  // The value being compared ultimately derives from a type check, which
   // returns i1 (0 or 1). It may have been widened (e.g., zext i1 to i32), but
   // the only meaningful values are 0 (check failed) and 1 (check passed).
   //
@@ -712,9 +716,9 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
 
       if (ResultForZero != ResultForOne) {
         // The comparison discriminates between 0 and 1 — it tells us whether
-        // the underlying check_instanceof passed or failed. Now trace the
-        // non-constant operand to find that check_instanceof.
-        TraceResult R = traceToCheckInstanceof(Val, QueryObj, Visited, DT);
+        // the underlying type check passed or failed. Now trace the
+        // non-constant operand to find that check.
+        TraceResult R = traceToTypeCheck(Val, QueryObj, Visited, DT);
         if (!R.matched())
           return {}; // Val doesn't trace to a check — no match.
         if (ResultForOne)
@@ -740,7 +744,7 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
   // (e.g., `zext i1 %check_instanceof_result to i32`)
   if (auto *Cast = dyn_cast<CastInst>(Cond)) {
     if (isa<ZExtInst>(Cast) || isa<SExtInst>(Cast) || isa<TruncInst>(Cast))
-      return traceToCheckInstanceof(Cast->getOperand(0), QueryObj, Visited, DT);
+      return traceToTypeCheck(Cast->getOperand(0), QueryObj, Visited, DT);
     return {}; // Other casts (bitcast, fpcast, ...) — not meaningful here.
   }
 
@@ -750,9 +754,9 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
   if (auto *BO = dyn_cast<BinaryOperator>(Cond)) {
     if (BO->getOpcode() == Instruction::And) {
       TraceResult L =
-          traceToCheckInstanceof(BO->getOperand(0), QueryObj, Visited, DT);
+          traceToTypeCheck(BO->getOperand(0), QueryObj, Visited, DT);
       TraceResult R =
-          traceToCheckInstanceof(BO->getOperand(1), QueryObj, Visited, DT);
+          traceToTypeCheck(BO->getOperand(1), QueryObj, Visited, DT);
       if (L.matched() && R.matched()) {
         TraceResult M;
         // True-branch: both L and R are true → AllOf.
@@ -788,9 +792,9 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
     // False-branch: both operands are false → AllOf (both constraints hold).
     if (BO->getOpcode() == Instruction::Or) {
       TraceResult L =
-          traceToCheckInstanceof(BO->getOperand(0), QueryObj, Visited, DT);
+          traceToTypeCheck(BO->getOperand(0), QueryObj, Visited, DT);
       TraceResult R =
-          traceToCheckInstanceof(BO->getOperand(1), QueryObj, Visited, DT);
+          traceToTypeCheck(BO->getOperand(1), QueryObj, Visited, DT);
       if (L.matched() && R.matched()) {
         TraceResult M;
         // True-branch: at least one of L, R is true → OneOf.
@@ -841,7 +845,7 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
 
       if (NonConstVal) {
         TraceResult R =
-            traceToCheckInstanceof(NonConstVal, QueryObj, Visited, DT);
+            traceToTypeCheck(NonConstVal, QueryObj, Visited, DT);
         if (!R.matched())
           return {};
         // xor with true inverts the condition → swap True/False.
@@ -870,7 +874,7 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
     auto *TrueConst = dyn_cast<ConstantInt>(TrueVal);
     auto *FalseConst = dyn_cast<ConstantInt>(FalseVal);
 
-    // Both constant → no check_instanceof involved.
+    // Both constant → no type check involved.
     if (TrueConst && FalseConst)
       return {};
 
@@ -879,7 +883,7 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
       bool IsZero = TrueConst ? TrueConst->isZero() : FalseConst->isZero();
       Value *NonConstVal = TrueConst ? FalseVal : TrueVal;
       TraceResult R =
-          traceToCheckInstanceof(NonConstVal, QueryObj, Visited, DT);
+          traceToTypeCheck(NonConstVal, QueryObj, Visited, DT);
       if (!R.matched())
         return {};
       TraceResult M;
@@ -902,10 +906,10 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
     }
 
     // Both non-constant: OneOf merge.
-    TraceResult T = traceToCheckInstanceof(TrueVal, QueryObj, Visited, DT);
+    TraceResult T = traceToTypeCheck(TrueVal, QueryObj, Visited, DT);
     if (!T.matched())
       return {}; // True arm doesn't trace — no match.
-    TraceResult F = traceToCheckInstanceof(FalseVal, QueryObj, Visited, DT);
+    TraceResult F = traceToTypeCheck(FalseVal, QueryObj, Visited, DT);
     if (!F.matched())
       return {}; // False arm doesn't trace — no match.
     TraceResult M;
@@ -953,8 +957,8 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
         continue;
       }
 
-      // Non-constant incoming: must trace to a check_instanceof.
-      TraceResult R = traceToCheckInstanceof(Inc, QueryObj, Visited, DT);
+      // Non-constant incoming: must trace to a type check.
+      TraceResult R = traceToTypeCheck(Inc, QueryObj, Visited, DT);
       if (!R.matched())
         return {}; // This incoming doesn't trace to a check — no match.
       if (!HaveMatch) {
@@ -1059,7 +1063,7 @@ JavaType jeandle::sharpenFromDominators(Value *V, Instruction *Context,
 
     SmallPtrSet<Value *, 16> TraceVisited;
     TraceResult TR =
-        traceToCheckInstanceof(BI->getCondition(), V, TraceVisited, DT);
+        traceToTypeCheck(BI->getCondition(), V, TraceVisited, DT);
     if (!TR.matched())
       continue;
 
@@ -1218,7 +1222,7 @@ static JavaType getJavaTypeImpl(Value *V, DominatorTree &DT,
 JavaType jeandle::getJavaType(Value *V, DominatorTree *DT,
                               Instruction *Context) {
   // Strip pointer casts at the API boundary so that downstream identity
-  // comparisons (traceToCheckInstanceof, isNullCheckPath) work correctly
+  // comparisons (traceToTypeCheck, isNullCheckPath) work correctly
   // even when optimization passes introduce bitcast/addrspacecast wrappers.
   V = V->stripPointerCastsAndAliases();
 
