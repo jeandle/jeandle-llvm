@@ -20,3 +20,12 @@ IsUnverifiedInterface 9 = false
 IsEffectivelyFinal 9 = false
 IsUnverifiedInterface 8 = false
 IsEffectivelyFinal 8 = false
+
+IsInterface 7 = false
+GetSecondarySupers 7 = []
+IsInterface 8 = false
+GetSecondarySupers 8 = []
+IsInterface 9 = false
+GetSecondarySupers 9 = []
+IsInterface 30 = false
+GetSecondarySupers 30 = []

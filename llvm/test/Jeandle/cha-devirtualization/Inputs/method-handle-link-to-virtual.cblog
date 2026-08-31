@@ -9,3 +9,10 @@ UpdateCallSite 18 1 true 135644198485800 = true
 UpdateCallSite 18 2 false 135644198486144 = true
 GetSignatureAccessingKlass 135644198485800 = 2148289048
 GetSignatureArgType 135644198485800 -1 = 12
+
+IsInterface 2148287488 = false
+GetSecondarySupers 2148287488 = []
+IsInterface 2148289576 = false
+GetSecondarySupers 2148289576 = []
+IsInterface 2148289048 = false
+GetSecondarySupers 2148289048 = []

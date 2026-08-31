@@ -10,3 +10,10 @@ IsEffectivelyFinal 9 = true
 # No object-array klass reaches the dispatch: element query returns 0.
 ArrayElementKlass 5 = 0
 ArrayElementKlass 7 = 0
+
+IsInterface 5 = false
+GetSecondarySupers 5 = []
+IsInterface 7 = false
+GetSecondarySupers 7 = []
+IsInterface 9 = false
+GetSecondarySupers 9 = []

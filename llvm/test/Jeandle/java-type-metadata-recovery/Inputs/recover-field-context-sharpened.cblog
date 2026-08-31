@@ -5,3 +5,8 @@ ArrayElementKlass 30 = 0
 GetFieldType 30 16 = 31
 IsUnverifiedInterface 31 = false
 IsEffectivelyFinal 31 = false
+
+IsInterface 30 = false
+GetSecondarySupers 30 = []
+IsInterface 31 = false
+GetSecondarySupers 31 = []

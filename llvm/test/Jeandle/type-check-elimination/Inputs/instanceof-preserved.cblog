@@ -1,3 +1,6 @@
 # Unknown type: no type info on obj, checking instanceof MyRunnable (klass 4).
 # Cannot eliminate => preserved.
 IsObjectKlass 4 = false
+
+IsInterface 4 = false
+GetSecondarySupers 4 = []

@@ -2,3 +2,8 @@
 # interface: the load must stay untyped.
 ArrayElementKlass 20 = 25
 IsUnverifiedInterface 25 = true
+
+IsInterface 20 = false
+GetSecondarySupers 20 = []
+IsInterface 25 = false
+GetSecondarySupers 25 = []

@@ -19,6 +19,7 @@
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/Support/Debug.h"
+#include <cstdint>
 
 #define DEBUG_TYPE "java-type"
 
@@ -229,10 +230,53 @@ static void normalizeExcludedKlasses(JavaType &T) {
   }
 }
 
+static SmallDenseSet<uintptr_t, 2>
+getFullInterfaces(uintptr_t Klass,
+                  const SmallDenseSet<uintptr_t, 2> &PartialInterfaces) {
+  const VMCallbacks *CB = getVMCallbacks();
+  assert(CB && CB->GetSecondarySupers && CB->IsInterface &&
+         "VMCallbacks must be set");
+  SmallDenseSet<uintptr_t, 2> Result;
+  if (Klass != 0) {
+    if (CB->IsInterface(Klass)) {
+      Result.insert(Klass);
+    }
+    std::vector<uintptr_t> KlassInterfaces = CB->GetSecondarySupers(Klass);
+    for (uintptr_t I : KlassInterfaces) {
+      Result.insert(I);
+    }
+  }
+  SmallDenseSet<uintptr_t, 2> IncInterfaces = Result;
+  while (!IncInterfaces.empty()) {
+    SmallDenseSet<uintptr_t, 2> NewIncInterfaces;
+    for (uintptr_t I : IncInterfaces) {
+      std::vector<uintptr_t> SuperInterfaces = CB->GetSecondarySupers(I);
+      for (uintptr_t SI : SuperInterfaces) {
+        if (!Result.contains(SI)) {
+          NewIncInterfaces.insert(SI);
+          Result.insert(SI);
+        }
+      }
+    }
+    IncInterfaces = NewIncInterfaces;
+  }
+  return Result;
+}
+
+jeandle::JavaType::JavaType(uintptr_t Klass, bool Exact)
+    : Klass(Klass), Exact(Exact) {
+  this->Interfaces = getFullInterfaces(Klass, {});
+}
+
 JavaType jeandle::typeUnion(JavaType A, JavaType B) {
+  JavaType Result;
+  for (uintptr_t I : A.Interfaces) {
+    if (B.Interfaces.contains(I)) {
+      Result.Interfaces.insert(I);
+    }
+  }
   if (A.Klass == 0 && B.Klass == 0) {
     // Both have unknown positive type. Intersect exclusions.
-    JavaType Result;
     if (!A.ExcludedKlasses.empty() && !B.ExcludedKlasses.empty())
       Result.ExcludedKlasses =
           intersectExcludedKlasses(A.ExcludedKlasses, B.ExcludedKlasses);
@@ -243,7 +287,6 @@ JavaType jeandle::typeUnion(JavaType A, JavaType B) {
     if (A.Klass == 0)
       std::swap(A, B);
     // Drop positive type (value could come from the unknown side).
-    JavaType Result;
     // Preserve exclusions from B that are also excluded by A's knowledge.
     if (!B.ExcludedKlasses.empty()) {
       for (uintptr_t E : B.ExcludedKlasses) {
@@ -257,7 +300,6 @@ JavaType jeandle::typeUnion(JavaType A, JavaType B) {
     }
     return Result;
   }
-  JavaType Result;
   if (A.Klass == B.Klass) {
     Result.Klass = A.Klass;
     Result.Exact = A.Exact && B.Exact;
@@ -280,7 +322,12 @@ JavaType jeandle::typeUnion(JavaType A, JavaType B) {
 
 JavaType jeandle::typeIntersect(JavaType A, JavaType B) {
   JavaType Result;
-
+  for (uintptr_t I : A.Interfaces) {
+    Result.Interfaces.insert(I);
+  }
+  for (uintptr_t I : B.Interfaces) {
+    Result.Interfaces.insert(I);
+  }
   // Positive type: pick the more specific one.
   if (A.isKnown() && B.isKnown()) {
     const VMCallbacks *CB = getVMCallbacks();
@@ -395,8 +442,9 @@ static JavaType getBaseJavaType(Value *V,
     if (std::optional<int> Id = getOopHandleId(LI->getPointerOperand())) {
       const VMCallbacks *CB = getVMCallbacks();
       if (CB && CB->GetOopKlass) {
-        if (uintptr_t Klass = CB->GetOopKlass(*Id); Klass != 0)
+        if (uintptr_t Klass = CB->GetOopKlass(*Id); Klass != 0) {
           return {Klass, /*Exact=*/true};
+        }
       }
     }
     return {};
@@ -487,13 +535,16 @@ namespace {
 /// produces TrueExclusions = {A, B} (both checks failed on true-branch).
 struct TraceResult {
   uintptr_t TrueKlass = 0;
+  SmallDenseSet<uintptr_t, 2> TrueInterfaces;
   SmallDenseSet<uintptr_t, 2> TrueExclusions;
   uintptr_t FalseKlass = 0;
+  SmallDenseSet<uintptr_t, 2> FalseInterfaces;
   SmallDenseSet<uintptr_t, 2> FalseExclusions;
 
   bool matched() const {
-    return TrueKlass != 0 || !TrueExclusions.empty() || FalseKlass != 0 ||
-           !FalseExclusions.empty();
+    return TrueKlass != 0 || !TrueInterfaces.empty() ||
+           !TrueExclusions.empty() || FalseKlass != 0 ||
+           !FalseInterfaces.empty() || !FalseExclusions.empty();
   }
 };
 
@@ -554,6 +605,28 @@ static uintptr_t computeLCA(uintptr_t A, uintptr_t B) {
   const VMCallbacks *CB = getVMCallbacks();
   assert(CB && CB->GetCommonSuperKlass && "VMCallbacks must be set");
   return CB->GetCommonSuperKlass(A, B);
+}
+
+static SmallDenseSet<uintptr_t, 2>
+unionFullInterfaces(const SmallDenseSet<uintptr_t, 2> &InterfacesA,
+                    const SmallDenseSet<uintptr_t, 2> &InterfacesB) {
+  SmallDenseSet<uintptr_t, 2> R;
+  for (uintptr_t I : InterfacesA) {
+    if (InterfacesB.contains(I)) {
+      R.insert(I);
+    }
+  }
+  return R;
+}
+
+static SmallDenseSet<uintptr_t, 2>
+intersectFullInterfaces(const SmallDenseSet<uintptr_t, 2> &A,
+                        const SmallDenseSet<uintptr_t, 2> &B) {
+  SmallDenseSet<uintptr_t, 2> Result = A;
+  for (uintptr_t I : B) {
+    Result.insert(I);
+  }
+  return Result;
 }
 
 /// Check if IncomingBB is reached only when Obj is null.
@@ -648,7 +721,8 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
     if (isCheckInstanceofCall(CB, Klass, Obj) &&
         Obj->stripPointerCastsAndAliases() == QueryObj) {
       TraceResult R;
-      R.TrueKlass = Klass;             // check passed → obj IS Klass
+      R.TrueKlass = Klass; // check passed → obj IS Klass
+      R.TrueInterfaces = getFullInterfaces(Klass, {});
       R.FalseExclusions.insert(Klass); // check failed → obj IS NOT Klass
       return R;
     }
@@ -725,6 +799,7 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
           // The comparison returns true when val=0 (check failed).
           // Swap True ↔ False constraints.
           std::swap(R.TrueKlass, R.FalseKlass);
+          std::swap(R.TrueInterfaces, R.FalseInterfaces);
           std::swap(R.TrueExclusions, R.FalseExclusions);
           return R;
         }
@@ -757,10 +832,14 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
         TraceResult M;
         // True-branch: both L and R are true → AllOf.
         M.TrueKlass = pickMostSpecific(L.TrueKlass, R.TrueKlass);
+        M.TrueInterfaces =
+            intersectFullInterfaces(L.TrueInterfaces, R.TrueInterfaces);
         M.TrueExclusions = L.TrueExclusions;
         unionExcludedKlasses(M.TrueExclusions, R.TrueExclusions);
         // False-branch: at least one of L, R is false → OneOf.
         M.FalseKlass = computeLCA(L.FalseKlass, R.FalseKlass);
+        M.FalseInterfaces =
+            unionFullInterfaces(L.FalseInterfaces, R.FalseInterfaces);
         M.FalseExclusions =
             intersectExcludedKlasses(L.FalseExclusions, R.FalseExclusions);
         return M;
@@ -772,12 +851,14 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
       if (L.matched()) {
         TraceResult M;
         M.TrueKlass = L.TrueKlass;
+        M.TrueInterfaces = L.TrueInterfaces;
         M.TrueExclusions = L.TrueExclusions;
         return M;
       }
       if (R.matched()) {
         TraceResult M;
         M.TrueKlass = R.TrueKlass;
+        M.TrueInterfaces = R.TrueInterfaces;
         M.TrueExclusions = R.TrueExclusions;
         return M;
       }
@@ -795,10 +876,14 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
         TraceResult M;
         // True-branch: at least one of L, R is true → OneOf.
         M.TrueKlass = computeLCA(L.TrueKlass, R.TrueKlass);
+        M.TrueInterfaces =
+            unionFullInterfaces(L.TrueInterfaces, R.TrueInterfaces);
         M.TrueExclusions =
             intersectExcludedKlasses(L.TrueExclusions, R.TrueExclusions);
         // False-branch: both L and R are false → AllOf.
         M.FalseKlass = pickMostSpecific(L.FalseKlass, R.FalseKlass);
+        M.FalseInterfaces =
+            intersectFullInterfaces(L.FalseInterfaces, R.FalseInterfaces);
         M.FalseExclusions = L.FalseExclusions;
         unionExcludedKlasses(M.FalseExclusions, R.FalseExclusions);
         return M;
@@ -810,12 +895,14 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
       if (L.matched()) {
         TraceResult M;
         M.FalseKlass = L.FalseKlass;
+        M.FalseInterfaces = L.FalseInterfaces;
         M.FalseExclusions = L.FalseExclusions;
         return M;
       }
       if (R.matched()) {
         TraceResult M;
         M.FalseKlass = R.FalseKlass;
+        M.FalseInterfaces = R.FalseInterfaces;
         M.FalseExclusions = R.FalseExclusions;
         return M;
       }
@@ -846,6 +933,7 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
           return {};
         // xor with true inverts the condition → swap True/False.
         std::swap(R.TrueKlass, R.FalseKlass);
+        std::swap(R.TrueInterfaces, R.FalseInterfaces);
         std::swap(R.TrueExclusions, R.FalseExclusions);
         return R;
       }
@@ -887,12 +975,14 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
         // Constant false: on the select's true-branch, the constant arm can't
         // be selected → the non-constant arm was selected and is true.
         M.TrueKlass = R.TrueKlass;
+        M.TrueInterfaces = R.TrueInterfaces;
         M.TrueExclusions = R.TrueExclusions;
         // False-branch: could be constant false or R false → no useful info.
       } else {
         // Constant true: on the select's false-branch, the constant arm can't
         // be selected → the non-constant arm was selected and is false.
         M.FalseKlass = R.FalseKlass;
+        M.FalseInterfaces = R.FalseInterfaces;
         M.FalseExclusions = R.FalseExclusions;
         // True-branch: could be constant true or R true → no useful info.
       }
@@ -910,9 +1000,12 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
       return {}; // False arm doesn't trace — no match.
     TraceResult M;
     M.TrueKlass = computeLCA(T.TrueKlass, F.TrueKlass);
+    M.TrueInterfaces = unionFullInterfaces(T.TrueInterfaces, F.TrueInterfaces);
     M.TrueExclusions =
         intersectExcludedKlasses(T.TrueExclusions, F.TrueExclusions);
     M.FalseKlass = computeLCA(T.FalseKlass, F.FalseKlass);
+    M.TrueInterfaces =
+        unionFullInterfaces(T.FalseInterfaces, F.FalseInterfaces);
     M.FalseExclusions =
         intersectExcludedKlasses(T.FalseExclusions, F.FalseExclusions);
     if (!M.matched())
@@ -963,9 +1056,13 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
       } else {
         // OneOf merge: LCA for klass, intersect for exclusions.
         M.TrueKlass = computeLCA(M.TrueKlass, R.TrueKlass);
+        M.TrueInterfaces =
+            unionFullInterfaces(M.TrueInterfaces, R.TrueInterfaces);
         M.TrueExclusions =
             intersectExcludedKlasses(M.TrueExclusions, R.TrueExclusions);
         M.FalseKlass = computeLCA(M.FalseKlass, R.FalseKlass);
+        M.FalseInterfaces =
+            unionFullInterfaces(M.FalseInterfaces, R.FalseInterfaces);
         M.FalseExclusions =
             intersectExcludedKlasses(M.FalseExclusions, R.FalseExclusions);
       }
@@ -976,10 +1073,12 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
     if (HaveMatch) {
       if (HasConstantFalse) {
         M.FalseKlass = 0;
+        M.FalseInterfaces.clear();
         M.FalseExclusions.clear();
       }
       if (HasConstantTrue) {
         M.TrueKlass = 0;
+        M.TrueInterfaces.clear();
         M.TrueExclusions.clear();
       }
     }
@@ -1047,9 +1146,7 @@ JavaType jeandle::sharpenFromDominators(Value *V, Instruction *Context,
         LLVM_DEBUG(dbgs() << "JavaType: sharpened " << *V << " to exact klass "
                           << Exact << " from dominating klass guard in "
                           << BB->getName() << "\n");
-        JavaType ExactType;
-        ExactType.Klass = Exact;
-        ExactType.Exact = true;
+        JavaType ExactType = {Exact, true};
         Best = typeIntersect(Best, ExactType);
       }
       // A failed exact-class guard does not imply that the receiver is not an
@@ -1064,6 +1161,7 @@ JavaType jeandle::sharpenFromDominators(Value *V, Instruction *Context,
       continue;
 
     uintptr_t Klass = 0;
+    const SmallDenseSet<uintptr_t, 2> *Interfaces = nullptr;
     const SmallDenseSet<uintptr_t, 2> *Exclusions = nullptr;
 
     if (BB == ContextBB) {
@@ -1078,9 +1176,11 @@ JavaType jeandle::sharpenFromDominators(Value *V, Instruction *Context,
       bool FalseIsDest = (FalseBB == DestBB);
       if (TrueIsDest && !FalseIsDest) {
         Klass = TR.TrueKlass;
+        Interfaces = &TR.TrueInterfaces;
         Exclusions = &TR.TrueExclusions;
       } else if (FalseIsDest && !TrueIsDest) {
         Klass = TR.FalseKlass;
+        Interfaces = &TR.FalseInterfaces;
         Exclusions = &TR.FalseExclusions;
       }
       // Both successors are DestBB (duplicate edges): no outcome information.
@@ -1096,9 +1196,11 @@ JavaType jeandle::sharpenFromDominators(Value *V, Instruction *Context,
       BasicBlockEdge FalseEdge(BB, FalseBB);
       if (DT.dominates(TrueEdge, ContextBB)) {
         Klass = TR.TrueKlass;
+        Interfaces = &TR.TrueInterfaces;
         Exclusions = &TR.TrueExclusions;
       } else if (DT.dominates(FalseEdge, ContextBB)) {
         Klass = TR.FalseKlass;
+        Interfaces = &TR.FalseInterfaces;
         Exclusions = &TR.FalseExclusions;
       }
     }
@@ -1121,6 +1223,14 @@ JavaType jeandle::sharpenFromDominators(Value *V, Instruction *Context,
       } else if (CB->IsSubtype(Klass, Best.Klass)) {
         Best.Klass = Klass;
         Best.Exact = IsExact;
+      }
+    }
+    if (Interfaces) {
+      for (uintptr_t I : *Interfaces) {
+        LLVM_DEBUG(dbgs() << "JavaType: sharpened " << *V << " to interface "
+                          << I << " from dominating check in " << BB->getName()
+                          << "\n");
+        Best.Interfaces.insert(I);
       }
     }
     if (Exclusions) {

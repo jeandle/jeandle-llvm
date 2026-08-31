@@ -5,3 +5,6 @@ IsUnverifiedInterface 5 = false
 IsEffectivelyFinal 5 = false
 # No object-array klass reaches the dispatch: element query returns 0.
 ArrayElementKlass 5 = 0
+
+IsInterface 5 = false
+GetSecondarySupers 5 = []

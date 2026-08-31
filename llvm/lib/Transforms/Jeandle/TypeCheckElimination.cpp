@@ -81,7 +81,8 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
     jeandle::JavaType ObjType = jeandle::getJavaType(Obj, &DT, CheckCB);
 
     // --- Fold to true: known subtype ---
-    if (ObjType.isKnown() && CB->IsSubtype(ObjType.Klass, SuperKlass)) {
+    if (ObjType.isKnown() && (CB->IsSubtype(ObjType.Klass, SuperKlass) ||
+                              ObjType.Interfaces.contains(SuperKlass))) {
       LLVM_DEBUG(dbgs() << "TCE: known subtype, replacing with true: "
                         << *CheckCB << "\n");
       CheckCB->replaceAllUsesWith(ConstantInt::getTrue(CheckCB->getType()));

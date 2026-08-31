@@ -1,0 +1,20 @@
+IsSubtype 1 2 = false
+IsSubtype 2 1 = true
+IsSubtype 2 3 = false
+IsSubtype 3 2 = false
+IsInterface 1 = false
+IsInterface 2 = true
+IsInterface 3 = true
+IsObjectKlass 2 = false
+IsObjectKlass 3 = false
+IsEffectivelyFinal 2 = false
+IsEffectivelyFinal 3 = false
+
+IsSubtype 1 3 = false
+IsSubtype 3 1 = true
+IsSubtype 2 2 = true
+IsSubtype 3 3 = true
+
+GetSecondarySupers 1 = []
+GetSecondarySupers 2 = []
+GetSecondarySupers 3 = []

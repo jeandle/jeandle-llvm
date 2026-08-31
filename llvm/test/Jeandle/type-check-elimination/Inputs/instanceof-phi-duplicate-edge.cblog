@@ -7,3 +7,7 @@ IsObjectKlass 22 = false
 IsSubtype 5 22 = false
 IsInterface 5 = false
 IsSubtype 22 5 = true
+
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+GetSecondarySupers 5 = []

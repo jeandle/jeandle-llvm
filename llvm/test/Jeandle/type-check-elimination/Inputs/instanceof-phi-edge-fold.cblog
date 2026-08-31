@@ -11,3 +11,9 @@ IsInterface 5 = false
 GetCommonSuperKlass 5 9 = 5
 GetCommonSuperKlass 22 9 = 22
 IsSubtype 22 22 = true
+
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+GetSecondarySupers 5 = []
+IsInterface 9 = false
+GetSecondarySupers 9 = []

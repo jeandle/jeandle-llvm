@@ -7,3 +7,10 @@ GetFieldType 10 16 = 7
 # No object-array klass reaches the dispatch: element query returns 0.
 ArrayElementKlass 5 = 0
 ArrayElementKlass 10 = 0
+
+IsInterface 5 = false
+GetSecondarySupers 5 = []
+IsInterface 7 = false
+GetSecondarySupers 7 = []
+IsInterface 10 = false
+GetSecondarySupers 10 = []

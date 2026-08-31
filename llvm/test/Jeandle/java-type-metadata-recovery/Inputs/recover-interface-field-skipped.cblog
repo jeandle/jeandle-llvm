@@ -3,3 +3,8 @@ GetFieldType 5 16 = 8
 IsUnverifiedInterface 8 = true
 # No object-array klass reaches the dispatch: element query returns 0.
 ArrayElementKlass 5 = 0
+
+IsInterface 5 = false
+GetSecondarySupers 5 = []
+IsInterface 8 = false
+GetSecondarySupers 8 = []

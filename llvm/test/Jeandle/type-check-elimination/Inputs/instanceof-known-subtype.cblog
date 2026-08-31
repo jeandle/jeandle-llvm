@@ -21,3 +21,9 @@ IsEffectivelyFinal 5 = false
 IsSubtype 5 3 = false
 IsSubtype 5 3 = false
 IsInterface 5 = false
+
+GetSecondarySupers 3 = []
+IsInterface 4 = false
+GetSecondarySupers 4 = []
+
+GetSecondarySupers 5 = []

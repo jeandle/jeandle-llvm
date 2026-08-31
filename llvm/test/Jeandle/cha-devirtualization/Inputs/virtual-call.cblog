@@ -1,2 +1,5 @@
 GetCHAOptInfo 100 200 300 500 false 0 -1 = (600, 100, 100, "caller")
 UpdateCallSite 42 2 false 100 = true
+
+IsInterface 500 = false
+GetSecondarySupers 500 = []

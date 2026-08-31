@@ -12,3 +12,6 @@ GetCHAOptInfo 100 200 300 500 true 0 -1 = (600, 700, 50, "Optimized_target")
 # (This entry is what makes the test fail without the typeIntersect fix.)
 GetCHAOptInfo 100 200 300 500 false 0 -1 = (0, 0, 0, "")
 UpdateCallSite 42 2 false 700 = true
+
+IsInterface 500 = false
+GetSecondarySupers 500 = []

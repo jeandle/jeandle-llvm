@@ -41,6 +41,8 @@ struct JavaType {
   /// The Klass pointer (from HotSpot JVM). 0 means unknown.
   uintptr_t Klass = 0;
 
+  SmallDenseSet<uintptr_t, 2> Interfaces;
+
   /// If true, the value is exactly this class, not a subclass.
   bool Exact = false;
 
@@ -49,14 +51,18 @@ struct JavaType {
   /// Only the most general (uppermost) excluded classes are stored;
   /// more specific subtypes are implied.
   SmallDenseSet<uintptr_t, 2> ExcludedKlasses;
-
-  bool isUnknown() const { return Klass == 0 && ExcludedKlasses.empty(); }
+  JavaType() = default;
+  JavaType(uintptr_t Klass, bool Exact);
+  bool isUnknown() const {
+    return Klass == 0 && Interfaces.empty() && ExcludedKlasses.empty();
+  }
   bool isKnown() const { return Klass != 0; }
   bool hasExclusions() const { return !ExcludedKlasses.empty(); }
 
   bool operator==(const JavaType &Other) const {
     return Klass == Other.Klass && Exact == Other.Exact &&
-           ExcludedKlasses == Other.ExcludedKlasses;
+           ExcludedKlasses == Other.ExcludedKlasses &&
+           Interfaces == Other.Interfaces;
   }
 
   bool operator!=(const JavaType &Other) const { return !(*this == Other); }

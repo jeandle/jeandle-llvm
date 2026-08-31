@@ -7,3 +7,10 @@ IsSubtype 22 20 = true
 ArrayElementKlass 22 = 23
 IsUnverifiedInterface 23 = false
 IsEffectivelyFinal 23 = false
+
+IsInterface 20 = false
+GetSecondarySupers 20 = []
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+IsInterface 23 = false
+GetSecondarySupers 23 = []

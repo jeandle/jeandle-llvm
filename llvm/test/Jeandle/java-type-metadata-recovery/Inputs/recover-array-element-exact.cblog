@@ -2,3 +2,9 @@
 ArrayElementKlass 20 = 21
 IsUnverifiedInterface 21 = false
 IsEffectivelyFinal 21 = true
+
+
+IsInterface 20 = false
+GetSecondarySupers 20 = []
+IsInterface 21 = false
+GetSecondarySupers 21 = []

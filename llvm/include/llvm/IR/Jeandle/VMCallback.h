@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <string>
 #include <tuple>
+#include <vector>
 
 namespace llvm::jeandle {
 
@@ -262,7 +263,10 @@ enum class JeandleInlineReason : int {
        VMCallbackValueType::Int), 5)                                             \
   def(UpdateToStaticOptVirtualCall, bool, Bool,                                  \
       (int64_t a1), (a1),                                                        \
-      (VMCallbackValueType::Long), 1)
+      (VMCallbackValueType::Long), 1)                                            \
+  def(GetSecondarySupers, std::vector<uintptr_t>, Array,                         \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)
 // clang-format on
 
 // =============================================================================
@@ -465,6 +469,9 @@ enum class JeandleInlineReason : int {
 ///                         index, excluding the receiver and not a JVM
 ///                         stack-slot index.
 ///                         Callers must only query reference parameters.
+///   GetSecondarySupers
+///                       — Returns the secondary super klass pointers of the
+///                       input klass
 
 struct VMCallbacks {
   ALL_JEANDLE_VM_CALLBACKS(DEF_VM_CALLBACK_FIELD)
