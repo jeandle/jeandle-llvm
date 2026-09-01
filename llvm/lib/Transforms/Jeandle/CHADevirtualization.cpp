@@ -126,9 +126,11 @@ void copyAttributeAndMetadata(InvokeInst &OldCB, InvokeInst &NewCB,
   for (unsigned I = 0; I < ArgSize; ++I)
     NewArgAttrs.push_back(OldAttrs.getParamAttrs(I));
 
-  AttributeList NewAttrs =
-      AttributeList::get(OldCB.getContext(), OldAttrs.getFnAttrs(),
-                         OldAttrs.getRetAttrs(), NewArgAttrs);
+  AttributeSet RetAttrs = OldCB.getType() == NewCB.getType()
+                              ? OldAttrs.getRetAttrs()
+                              : AttributeSet{};
+  AttributeList NewAttrs = AttributeList::get(
+      OldCB.getContext(), OldAttrs.getFnAttrs(), RetAttrs, NewArgAttrs);
 
   NewCB.setAttributes(NewAttrs);
   NewCB.setCallingConv(OldCB.getCallingConv());
@@ -147,11 +149,14 @@ InvokeInst *createNewCB(InvokeInst &CB, bool IsMonomorphicTarget, int PatchSize,
                         const StringRef &MethodName,
                         const StringRef &ByteCodeName, uintptr_t Holder,
                         uint64_t Id, jeandle::CHADestKind DestKind,
-                        bool IsAccessor) {
+                        bool IsAccessor,
+                        bool RemoveTrailingMemberNameArg = true) {
   SmallVector<OperandBundleDef, 4> Bundles;
   CB.getOperandBundlesAsDefs(Bundles);
   SmallVector<Value *, 8> NewArgs;
-  for (unsigned I = 0, E = CB.arg_size() - 1; I != E; ++I) {
+  unsigned ArgSize =
+      CB.arg_size() - static_cast<unsigned>(RemoveTrailingMemberNameArg);
+  for (unsigned I = 0; I != ArgSize; ++I) {
     NewArgs.push_back(CB.getArgOperand(I));
   }
 
@@ -220,7 +225,7 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
   assert(Id >= 0 && Id <= 0xffffffff && "must be 32 bits.");
   assert(Callee != 0 && Holder != 0 && "should be a java call");
 
-  // The final argument for _invokeBasic intrinsic is the MemberName oop handle.
+  // The final argument for _linkTo* intrinsics is the MemberName oop handle.
   // Optimization is only safe when the handle can be identified as a constant.
   int OopId = getOperandOopHandleLoadId(CB, CB.arg_size() - 1);
   if (OopId == -1) {
@@ -358,19 +363,98 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
                      CHAOptInfo.isAccessor());
 }
 
+InvokeInst *optimizeInvokeBasic(InvokeInst &CB,
+                                const jeandle::VMCallbacks &Callbacks,
+                                uintptr_t Caller) {
+  uintptr_t Callee = 0;
+  uintptr_t Holder = 0;
+  uint64_t Id = 0;
+  getFunctionJavaMethod(*CB.getCalledFunction(), Callee);
+  getUIntPtrFnAttr(CB, jeandle::Attribute::DeclaredHolder, Holder);
+  getUIntFnAttr(CB, jeandle::Attribute::StatepointID, Id);
+  if (Callee == 0 || Holder == 0 || Id > 0xffffffff)
+    return nullptr;
+
+  int OopId = getOperandOopHandleLoadId(CB, 0);
+  if (OopId == -1)
+    return nullptr;
+
+  uintptr_t ScopeCaller = getCurrentDeoptMethod(CB, Caller);
+  auto [ConstraintOrHolder, Method, TargetInfo, MethodName] =
+      Callbacks.GetCHAOptInfo(ScopeCaller, Callee, Holder,
+                              /*ReceiverKlass=*/0, /*IsExact=*/false,
+                              jeandle::ILLEGAL, OopId);
+  jeandle::CHAOptInfo CHAOptInfo{ConstraintOrHolder, Method, TargetInfo,
+                                 std::move(MethodName)};
+  if (CHAOptInfo.Method == 0)
+    return nullptr;
+
+  bool IsStatic = CHAOptInfo.isStatic();
+  unsigned ExpectedArgSize =
+      static_cast<unsigned>(CHAOptInfo.argsNum()) + !IsStatic;
+  if (ExpectedArgSize != CB.arg_size())
+    return nullptr;
+
+  SmallVector<Type *, 8> ArgTypes;
+  if (!IsStatic)
+    ArgTypes.push_back(java2llvm(jeandle::T_OBJECT, CB.getContext()));
+  for (int I = 0; I < CHAOptInfo.argsNum(); ++I) {
+    Type *ArgType =
+        java2llvm(static_cast<jeandle::HotspotBasicType>(
+                      Callbacks.GetSignatureArgType(CHAOptInfo.Method, I)),
+                  CB.getContext());
+    if (!ArgType)
+      return nullptr;
+    ArgTypes.push_back(ArgType);
+  }
+  for (unsigned I = 0; I < ArgTypes.size(); ++I) {
+    if (ArgTypes[I] != CB.getArgOperand(I)->getType())
+      return nullptr;
+  }
+
+  Type *RetType =
+      java2llvm(static_cast<jeandle::HotspotBasicType>(
+                    Callbacks.GetSignatureArgType(CHAOptInfo.Method, -1)),
+                CB.getContext());
+  if (!RetType || (!CB.getType()->isVoidTy() && RetType != CB.getType()))
+    return nullptr;
+
+  jeandle::CHADestKind DestKind =
+      IsStatic ? jeandle::StaticCall : jeandle::OptVirtualCall;
+  if (!Callbacks.UpdateCallSite(static_cast<int64_t>(Id), DestKind,
+                                /*NeedAttached=*/true, CHAOptInfo.Method))
+    return nullptr;
+
+  FunctionType *FuncType = FunctionType::get(RetType, ArgTypes, false);
+  StringRef Bytecode = IsStatic ? "invokestatic" : "invokespecial";
+  return createNewCB(
+      CB, /*IsMonomorphicTarget=*/true,
+      getPatchSize(CB.getModule(), jeandle::Metadata::StaticCallPatchSize),
+      FuncType, CHAOptInfo.Method, CHAOptInfo.MethodName, Bytecode,
+      CHAOptInfo.holder(), Id, DestKind, CHAOptInfo.isAccessor(),
+      /*RemoveTrailingMemberNameArg=*/false);
+}
+
 bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
                       DomTreeUpdater &DTU,
                       const jeandle::VMCallbacks &Callbacks, uintptr_t Caller) {
   using jeandle::JavaType;
 
-  // linkTo* intrinsics first need their MemberName operand removed and their
-  // invoke rebuilt. Feed the rebuilt call back through this path so ordinary
-  // CHA refinement can run on it as well. _invokeBasic is handled in place.
-  bool IsInvokeBasic = false;
+  // linkTo* intrinsics need their MemberName operand removed and their invoke
+  // rebuilt. Feed the rebuilt call back through this path so ordinary CHA
+  // refinement can run on it as well. _invokeBasic is optimized separately.
   if (CB.hasFnAttr(jeandle::Attribute::MhIntrinsicName)) {
     StringRef IntrinsicName =
         CB.getFnAttr(jeandle::Attribute::MhIntrinsicName).getValueAsString();
-    if (IntrinsicName != "_invokeBasic") {
+    if (IntrinsicName == "_invokeBasic") {
+      InvokeInst *NewCB = optimizeInvokeBasic(CB, Callbacks, Caller);
+      if (!NewCB)
+        return false;
+      if (!CB.getType()->isVoidTy())
+        CB.replaceAllUsesWith(NewCB);
+      CB.eraseFromParent();
+      return true;
+    } else {
       InvokeInst *NewCB =
           optimizeMhIntrinsic(CB, F, DT, DTU, Callbacks, Caller, IntrinsicName);
       if (NewCB) {
@@ -381,15 +465,12 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
       }
       return false;
     }
-    IsInvokeBasic = true;
   }
 
   Module *M = CB.getModule();
 
   // Calls already known to have a monomorphic target need no further work.
-  // _invokeBasic is the exception because its constant oop handle still needs
-  // to be resolved to the underlying Java method.
-  if (CB.hasFnAttr(jeandle::Attribute::MonomorphicTarget) && !IsInvokeBasic)
+  if (CB.hasFnAttr(jeandle::Attribute::MonomorphicTarget))
     return false;
 
   Attribute BC = CB.getFnAttr(jeandle::Attribute::Bytecode);
@@ -408,30 +489,17 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
   getUIntPtrFnAttr(CB, jeandle::Attribute::DeclaredHolder, Holder);
   getUIntFnAttr(CB, jeandle::Attribute::StatepointID, Id);
   assert(Id >= 0 && Id <= 0xffffffff && "must be 32 bits.");
-  // CHADevirtualization normal path only handles invokevirtual,
-  // invokeinterface, or methodhandle intrinsic with _invokeBasic intrinsic ID.
+  // The normal CHA path only handles invokevirtual and invokeinterface.
   assert(Callee != 0 && Holder != 0 &&
          (InvokeKind == jeandle::InvokeVirtual ||
-          InvokeKind == jeandle::InvokeInterface || IsInvokeBasic) &&
+          InvokeKind == jeandle::InvokeInterface) &&
          "should be a java call");
 
   jeandle::JavaType ReceiverType = jeandle::getJavaType(Receiver, &DT, &CB);
-  int OopId = -1;
-  if (IsInvokeBasic) {
-    // _invokeBasic can be resolved only when its MethodHandle receiver is a
-    // known VM oop handle.
-    OopId = getOperandOopHandleLoadId(CB, 0);
-    if (OopId == -1) {
-      LLVM_DEBUG(dbgs() << "optimize_method_handle_intrinsic: _invokeBasic: "
-                        << "receiver is not constant\n");
-      return false;
-    }
-  }
-
   uintptr_t ScopeCaller = getCurrentDeoptMethod(CB, Caller);
   auto [ConstraintOrHolder, Method, DeoptReasonOrTargetInfo, MethodName] =
       Callbacks.GetCHAOptInfo(ScopeCaller, Callee, Holder, ReceiverType.Klass,
-                              ReceiverType.Exact, InvokeKind, OopId);
+                              ReceiverType.Exact, InvokeKind, /*OopId=*/-1);
   jeandle::CHAOptInfo OptInfo{ConstraintOrHolder, Method,
                               DeoptReasonOrTargetInfo, std::move(MethodName)};
   if (OptInfo.constraint() == 0 ||
@@ -443,29 +511,25 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
   if (!Callbacks.UpdateCallSite(static_cast<int64_t>(Id),
                                 OptInfo.isStatic() ? jeandle::StaticCall
                                                    : jeandle::OptVirtualCall,
-                                IsInvokeBasic, OptInfo.Method)) {
+                                /*NeedAttached=*/false, OptInfo.Method)) {
     return false;
   }
 
   int BCI = getCurrentDeoptBCI(CB);
   std::string Prefix = "cha_bci_" + std::to_string(BCI);
 
-  // Ordinary virtual/interface calls need a speculative type guard. A
-  // constant _invokeBasic receiver already identifies its target, so no
-  // additional receiver guard is necessary.
-  if (!IsInvokeBasic) {
-    std::optional<OperandBundleDef> PreCallDeopt = createPreCallDeoptBundle(CB);
-    if (!PreCallDeopt)
-      return false;
+  // Virtual/interface calls need a speculative receiver type guard.
+  std::optional<OperandBundleDef> PreCallDeopt = createPreCallDeoptBundle(CB);
+  if (!PreCallDeopt)
+    return false;
 
-    BasicBlock *CheckInstanceofFail =
-        insertCheckInstanceOf(CB, Receiver, OptInfo.constraint(), Prefix, &DTU);
-    assert(CheckInstanceofFail && "failed to insert check_instanceof");
+  BasicBlock *CheckInstanceofFail =
+      insertCheckInstanceOf(CB, Receiver, OptInfo.constraint(), Prefix, &DTU);
+  assert(CheckInstanceofFail && "failed to insert check_instanceof");
 
-    IRBuilder<> BuilderFail(CheckInstanceofFail);
-    buildDeoptimize(BuilderFail, *CB.getModule(), OptInfo.deoptReason(),
-                    jeandle::Deoptimization::Action_none, *PreCallDeopt);
-  }
+  IRBuilder<> BuilderFail(CheckInstanceofFail);
+  buildDeoptimize(BuilderFail, *CB.getModule(), OptInfo.deoptReason(),
+                  jeandle::Deoptimization::Action_none, *PreCallDeopt);
 
   // Retarget the invoke after the VM call-site record has been updated.
   updateStaticOptVirtualCallAttrs(
