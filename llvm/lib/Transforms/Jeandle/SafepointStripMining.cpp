@@ -294,7 +294,7 @@ std::optional<StripMineShape> checkStripMineShape(Loop *L, const IVInfo &IV,
   bool FirstIterationGuaranteed =
       SE.isLoopEntryGuardedByCond(L, ContinuePred, Start, Limit) ||
       SE.isKnownPredicate(ContinuePred, SE.applyLoopGuards(Start, L),
-                           SE.applyLoopGuards(Limit, L));
+                          SE.applyLoopGuards(Limit, L));
   // NE is equivalent to the normalized relational predicate only when the
   // entry order and unit step prove that the IV reaches the limit without
   // passing it. A post-tested skeleton preserves the mandatory first
@@ -415,10 +415,11 @@ bool isHeaderEntryPoll(CallInst *P, BasicBlock *Header) {
 // header phi is normally current-iteration state, even when it also happens to
 // be the latch input of another copy/swap recurrence. An invariant self
 // recurrence is safe; a header-entry poll is also supported by relocating it
-// to the batch entry rather than its latch. Other operands must be loop-invariant,
-// a latch-carried next value, or a pure cast chain rooted at such a next value.
-// The returned plans are consumed verbatim during relocation, keeping the
-// eligibility proof and materialization behavior in sync.
+// to the batch entry rather than its latch. Other operands must be
+// loop-invariant, a latch-carried next value, or a pure cast chain rooted at
+// such a next value. The returned plans are consumed verbatim during
+// relocation, keeping the eligibility proof and materialization behavior in
+// sync.
 std::optional<SmallVector<DeoptBoundaryValue, 8>>
 analyzeDeoptBoundaryValues(CallInst *P, Loop *L, BasicBlock *Header,
                            BasicBlock *Latch) {
@@ -839,10 +840,10 @@ buildStripMinePlanWithIV(Loop *L, const IVInfo &IV, ICmpInst *ExitCmp,
     HeaderPhis.push_back({&Phi, Phi.getIncomingValueForBlock(Shape.Preheader),
                           Phi.getIncomingValueForBlock(Shape.Latch)});
 
-  bool PollAtEntry = llvm::any_of(*DeoptBoundaryValues,
-                                 [](const DeoptBoundaryValue &V) {
-                                   return V.EntryPhi != nullptr;
-                                 });
+  bool PollAtEntry =
+      llvm::any_of(*DeoptBoundaryValues, [](const DeoptBoundaryValue &V) {
+        return V.EntryPhi != nullptr;
+      });
   return StripMinePlan{L,
                        Shape,
                        IV.Phi,
@@ -1287,15 +1288,15 @@ static Loop *reparentAsOuterLoop(Loop *L, BasicBlock *OuterPH,
 // Relocate the poll to the matching outer iteration boundary, immediately
 // before OuterBr: clone it with the deopt operands remapped to the outer
 // recurrences, and tag the clone as the strip-mined poll. Entry-state phis
-// map by identity to the current outer phis at the batch entry. Latch-carried next
-// values are remapped to the outer PHIs; optimizer-introduced cast chains are
-// rebuilt from those outer values and cached in Remap. A loop-invariant latch
-// value (e.g. a phi whose latch operand is a constant) is skipped: it needs no
-// remap, and keying Remap on it would spuriously rewrite an unrelated but equal
-// constant elsewhere in the deopt bundle. The bci/frame layout in the deopt
-// bundle is carried over verbatim — no LLVM pass may synthesize a poll, only
-// relocate one. The strip-mined-poll attribute is the contract the coverage
-// verifier trusts without re-deriving the bound, and the marker the
+// map by identity to the current outer phis at the batch entry. Latch-carried
+// next values are remapped to the outer PHIs; optimizer-introduced cast chains
+// are rebuilt from those outer values and cached in Remap. A loop-invariant
+// latch value (e.g. a phi whose latch operand is a constant) is skipped: it
+// needs no remap, and keying Remap on it would spuriously rewrite an unrelated
+// but equal constant elsewhere in the deopt bundle. The bci/frame layout in the
+// deopt bundle is carried over verbatim — no LLVM pass may synthesize a poll,
+// only relocate one. The strip-mined-poll attribute is the contract the
+// coverage verifier trusts without re-deriving the bound, and the marker the
 // after-strip-mining poll elimination keys on; marking the poll itself means
 // the marker cannot outlive the coverage it certifies.
 static void relocatePollToOuterBoundary(StripMinePlan &Plan, Value *OuterIV,
