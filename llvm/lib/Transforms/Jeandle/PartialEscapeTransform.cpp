@@ -389,8 +389,7 @@ static bool replayStoredValueMatches(Value *Actual, Value *ExpectedSemantic,
   if (Actual == ExpectedSemantic)
     return true;
   if (!Actual || !ExpectedSemantic || !ExpectedStorage ||
-      Actual->getType() != ExpectedStorage ||
-      !ExpectedStorage->isPointerTy() ||
+      Actual->getType() != ExpectedStorage || !ExpectedStorage->isPointerTy() ||
       !ExpectedSemantic->getType()->isPointerTy() ||
       ExpectedStorage->getPointerAddressSpace() !=
           jeandle::AddrSpace::NarrowOopAddrSpace ||
@@ -528,8 +527,7 @@ static bool matchExistingReplaySuffix(
         SmallVector<Instruction *, 8> Candidate;
         for (const ExpectedReplayOperation &Op : llvm::reverse(Group.Fields)) {
           auto *Store = dyn_cast_or_null<StoreInst>(At);
-          if (!Store ||
-              Store->isVolatile() || !Store->isAtomic() ||
+          if (!Store || Store->isVolatile() || !Store->isAtomic() ||
               Store->getSyncScopeID() != SyncScope::System ||
               Store->getOrdering() != AtomicOrdering::Unordered ||
               Store->hasMetadataOtherThanDebugLoc())
@@ -564,8 +562,7 @@ static bool matchExistingReplaySuffix(
               Op.StoredValue->getType()->isPointerTy() &&
               cast<PointerType>(Op.StorageType)->getAddressSpace() ==
                   jeandle::AddrSpace::NarrowOopAddrSpace &&
-              cast<PointerType>(Op.StoredValue->getType())
-                      ->getAddressSpace() ==
+              cast<PointerType>(Op.StoredValue->getType())->getAddressSpace() ==
                   jeandle::AddrSpace::JavaHeapAddrSpace) {
             auto *Encode = dyn_cast_or_null<AddrSpaceCastInst>(At);
             if (Encode && Encode->getType() == Op.StorageType &&
@@ -875,12 +872,12 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
     if (FE.Storage.LLVMType && StoreV->getType() != FE.Storage.LLVMType) {
       if (isa<ConstantPointerNull>(StoreV) &&
           FE.Storage.LLVMType->isPointerTy()) {
-        StoreV = ConstantPointerNull::get(
-            cast<PointerType>(FE.Storage.LLVMType));
+        StoreV =
+            ConstantPointerNull::get(cast<PointerType>(FE.Storage.LLVMType));
       } else if (StoreV->getType()->isPointerTy() &&
                  FE.Storage.LLVMType->isPointerTy()) {
         StoreV = SB.CreateAddrSpaceCast(StoreV, FE.Storage.LLVMType,
-                                       "pea.encode.oop");
+                                        "pea.encode.oop");
       } else {
         // Incompatible primitive slots are already handled conservatively by
         // the analyzer; retain the original value type for replay.
@@ -890,9 +887,8 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
             cast<Instruction>(StoreV)->getParent() != nullptr) &&
            "materialize replay value must be a constant, argument, or "
            "in-IR instruction");
-    Value *Slot =
-        SB.CreateInBoundsGEP(I8, MatVal, SB.getInt64(FE.Storage.Offset),
-                             "pea.matslot");
+    Value *Slot = SB.CreateInBoundsGEP(
+        I8, MatVal, SB.getInt64(FE.Storage.Offset), "pea.matslot");
     // Natural alignment = the field type's store size rounded up to a power of
     // two (atomic-unordered stores MUST be naturally aligned; ABI align may be
     // smaller than store size, e.g. i64 under the default datalayout). Derived
@@ -1113,8 +1109,8 @@ void jeandle::EliminateStoreEffect::apply(jeandle::TransformContext &Ctx) {
 }
 
 void jeandle::PlaceInstructionEffect::apply(jeandle::TransformContext &Ctx) {
-  Instruction *I = dyn_cast_or_null<Instruction>(
-      static_cast<Value *>(InstructionToPlace));
+  Instruction *I =
+      dyn_cast_or_null<Instruction>(static_cast<Value *>(InstructionToPlace));
   Instruction *TargetI =
       dyn_cast_or_null<Instruction>(static_cast<Value *>(Target));
   if (!I || I->getParent() || !TargetI || !TargetI->getParent())

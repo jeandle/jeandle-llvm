@@ -1276,12 +1276,11 @@ private:
   };
   struct SemanticOopCastKeyHash {
     size_t operator()(const SemanticOopCastKey &K) const {
-      return static_cast<size_t>(hash_combine(hash_value(K.Store),
-                                               hash_value(K.NarrowOop)));
+      return static_cast<size_t>(
+          hash_combine(hash_value(K.Store), hash_value(K.NarrowOop)));
     }
   };
-  std::unordered_map<SemanticOopCastKey, WeakTrackingVH,
-                     SemanticOopCastKeyHash>
+  std::unordered_map<SemanticOopCastKey, WeakTrackingVH, SemanticOopCastKeyHash>
       SemanticOopCastCache;
 
   // Per-VO record of LLVM pointer-PHIs that processBlockPhis
@@ -2902,21 +2901,19 @@ Value *Analyzer::coerceToType(Value *V, Type *LoadTy,
   if (VTy->isPointerTy() && LoadTy->isPointerTy()) {
     unsigned VAS = VTy->getPointerAddressSpace();
     unsigned LAS = LoadTy->getPointerAddressSpace();
-    const bool VIsOop =
-        VAS == jeandle::AddrSpace::JavaHeapAddrSpace ||
-        VAS == jeandle::AddrSpace::NarrowOopAddrSpace;
-    const bool LIsOop =
-        LAS == jeandle::AddrSpace::JavaHeapAddrSpace ||
-        LAS == jeandle::AddrSpace::NarrowOopAddrSpace;
+    const bool VIsOop = VAS == jeandle::AddrSpace::JavaHeapAddrSpace ||
+                        VAS == jeandle::AddrSpace::NarrowOopAddrSpace;
+    const bool LIsOop = LAS == jeandle::AddrSpace::JavaHeapAddrSpace ||
+                        LAS == jeandle::AddrSpace::NarrowOopAddrSpace;
     if (!VIsOop || !LIsOop)
       return nullptr;
     if (VAS == LAS)
       return V;
     if (isa<ConstantPointerNull>(V))
       return ConstantPointerNull::get(cast<PointerType>(LoadTy));
-    Instruction *Cast = CastInst::Create(
-        Instruction::AddrSpaceCast, V, LoadTy, "pea.coerce.oop",
-        /*InsertBefore=*/nullptr);
+    Instruction *Cast = CastInst::Create(Instruction::AddrSpaceCast, V, LoadTy,
+                                         "pea.coerce.oop",
+                                         /*InsertBefore=*/nullptr);
     return ownAndSchedulePlacement(Cast);
   }
 
@@ -4020,8 +4017,9 @@ void Analyzer::processBlockPhis(BasicBlock *BB, jeandle::EffectList &Out) {
     // previous pass left on this PHI — the resolution above already consumed
     // it (a self-referencing back-edge incoming resolves through it), and
     // the cases below re-assign it as needed. Leaving a stale alias in place
-    // would both trip addVirtualAlias's uniqueness assert on a repeated
-    // Case-B decision and mis-resolve the PHI when the decision flips.
+    // would mis-resolve the PHI when the decision flips. Same-ID
+    // re-registration is idempotent, but an ID-changing decision must rebind
+    // the PHI before addVirtualAlias can accept it.
     Aliases.resetAlias(&Phi);
     if (!AnyVirtual)
       continue;
@@ -5434,10 +5432,10 @@ void Analyzer::processAllocation(CallBase *CB) {
     jeandle::ObjectID ID = It->second;
     if (!Eligible.lookup(ID))
       return; // poisoned in a prior iteration — leave the original alloc.
-    // Re-register the alias and the virtual ObjectState in CurrentState.
-    // Aliases.addVirtualAlias asserts !already-aliased, so call only when
-    // the cache restore has wiped the entry (the common case under
-    // restoreLoopSnapshot, which restores Aliases to its pre-loop state).
+    // Re-register the alias only when the cache restore has wiped the entry
+    // (the common case under restoreLoopSnapshot, which restores Aliases to its
+    // pre-loop state). addVirtualAlias accepts same-ID repeats but still
+    // rejects an alias already bound to a different ObjectID.
     if (!Aliases.getVirtualAlias(CB))
       Aliases.addVirtualAlias(CB, ID, /*IsWholeObject=*/true);
     if (!CurrentState.hasObjectState(ID))
@@ -5558,8 +5556,7 @@ void Analyzer::processAllocation(CallBase *CB) {
           static_cast<uint32_t>(VMConsts.arrayBaseOffsetFor(Kind));
       if (Type *ElemTy =
               jeandle::pea::llvmElementTypeFor(Kind, F.getContext())) {
-        if (Kind == jeandle::JBasicType::Object &&
-            VMConsts.UseCompressedOops &&
+        if (Kind == jeandle::JBasicType::Object && VMConsts.UseCompressedOops &&
             DL.getPointerSize(jeandle::AddrSpace::NarrowOopAddrSpace) !=
                 DL.getPointerSize(jeandle::AddrSpace::JavaHeapAddrSpace))
           ElemTy = PointerType::get(F.getContext(),
@@ -5859,8 +5856,8 @@ bool Analyzer::processStore(StoreInst *SI) {
   // resolve_cap_02_opaque_inttoptr_escape.ll under
   // llvm/test/Jeandle/partial-escape/.
   auto materializeStoredValue = [&] {
-    if (auto RefID =
-            jeandle::pea::resolveVirtualRef(SemanticVal, CurrentState, Aliases, DL)) {
+    if (auto RefID = jeandle::pea::resolveVirtualRef(SemanticVal, CurrentState,
+                                                     Aliases, DL)) {
       materializeAt(*RefID, SI, MatReason::Unhandled);
     } else {
       assert(!debugReferencesLiveVirtualObject(SemanticVal) &&

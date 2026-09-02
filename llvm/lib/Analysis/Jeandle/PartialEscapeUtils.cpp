@@ -350,11 +350,10 @@ Value *stripPointerCastsAndOffsets(Value *Ptr, const DataLayout &DL,
       unsigned SrcAS = SrcPT->getAddressSpace();
       bool SameWideAS = DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
                         SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace;
-      bool WideNarrowPair =
-          (DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
-           SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
-          (DstAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
-           SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace);
+      bool WideNarrowPair = (DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                             SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
+                            (DstAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
+                             SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace);
       if (!SameWideAS && !WideNarrowPair) {
         if (OutOffset)
           *OutOffset = Offset;
@@ -520,11 +519,10 @@ resolveVirtualIdentityImpl(Value *V, const PEABlockState &State,
     unsigned SrcAS = SrcPT->getAddressSpace();
     bool SameWideAS = DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
                       SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace;
-    bool WideNarrowPair =
-        (DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
-         SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
-        (DstAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
-         SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace);
+    bool WideNarrowPair = (DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                           SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
+                          (DstAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
+                           SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace);
     if (!SameWideAS && !WideNarrowPair)
       return VirtualIdentityResult::unknown();
     return resolveVirtualIdentityImpl(ASC->getOperand(0), State, Aliases, DL,
@@ -737,11 +735,10 @@ static bool isProvablyDistinctFromVirtualImpl(
     unsigned DstAS = DstPT->getAddressSpace();
     bool SameWideAS = SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
                       DstAS == jeandle::AddrSpace::JavaHeapAddrSpace;
-    bool WideNarrowPair =
-        (SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
-         DstAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
-        (SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
-         DstAS == jeandle::AddrSpace::JavaHeapAddrSpace);
+    bool WideNarrowPair = (SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                           DstAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
+                          (SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
+                           DstAS == jeandle::AddrSpace::JavaHeapAddrSpace);
     if (!SameWideAS && !WideNarrowPair)
       return false;
     return isProvablyDistinctFromVirtualImpl(ASC->getOperand(0), TargetID,

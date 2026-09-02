@@ -88,8 +88,7 @@ int VirtualObject::getOrCreateFieldIndex(int64_t Offset, Type *Ty,
     if (PointerAS != jeandle::AddrSpace::JavaHeapAddrSpace &&
         PointerAS != jeandle::AddrSpace::NarrowOopAddrSpace)
       return -1;
-    uint64_t PointerByteSize =
-        DL.getPointerSize(PointerAS);
+    uint64_t PointerByteSize = DL.getPointerSize(PointerAS);
     if (PointerByteSize == 0 ||
         PointerByteSize > std::numeric_limits<uint8_t>::max())
       return -1;
@@ -148,8 +147,7 @@ int VirtualObject::getOrCreateFieldIndex(int64_t Offset, Type *Ty,
   auto NewIt = Fields.insert(It, New);
   return static_cast<int>(NewIt - Fields.begin());
 }
-const VirtualObject::FieldDesc *
-VirtualObject::findField(int64_t Offset) const {
+const VirtualObject::FieldDesc *VirtualObject::findField(int64_t Offset) const {
   auto It = std::lower_bound(
       Fields.begin(), Fields.end(), Offset,
       [](const FieldDesc &F, int64_t Off) { return F.Offset < Off; });
@@ -157,7 +155,6 @@ VirtualObject::findField(int64_t Offset) const {
     return nullptr;
   return &*It;
 }
-
 
 // Strip identity-preserving wrappers (freeze, bitcast, zext, sext) from an
 // index Value. Used by matchArrayElementGEP to canonicalize the index so
@@ -394,8 +391,10 @@ FieldValue FieldValue::materializedRef(Value *Ptr) {
 Constant *FieldValue::defaultFor(Type *FieldType) {
   assert(FieldType);
   if (FieldType->isPointerTy()) {
-    assert((FieldType->getPointerAddressSpace() == jeandle::AddrSpace::JavaHeapAddrSpace ||
-            FieldType->getPointerAddressSpace() == jeandle::AddrSpace::NarrowOopAddrSpace) &&
+    assert((FieldType->getPointerAddressSpace() ==
+                jeandle::AddrSpace::JavaHeapAddrSpace ||
+            FieldType->getPointerAddressSpace() ==
+                jeandle::AddrSpace::NarrowOopAddrSpace) &&
            "reference default must be a Java oop pointer");
     return ConstantPointerNull::get(cast<PointerType>(FieldType));
   }
@@ -500,8 +499,7 @@ void AliasMap::addVirtualAlias(Value *V, ObjectID ID, bool IsWholeObject) {
   assert(V && ID != InvalidObjectID);
   auto It = VirtualAliases.find(V);
   if (It != VirtualAliases.end()) {
-    assert(It->second == ID &&
-           "value already aliased to a different object");
+    assert(It->second == ID && "value already aliased to a different object");
   } else {
     VirtualAliases[V] = ID;
   }
