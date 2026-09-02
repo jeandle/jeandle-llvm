@@ -243,6 +243,12 @@ public:
   // callers treat -1 as "keep everything real" (conservative escape).
   int getOrCreateFieldIndex(int64_t Offset, Type *Ty, const DataLayout &DL);
 
+  // Return the tracked field descriptor at an exact byte offset, or nullptr
+  // when the slot has not been observed yet. Materialization uses this to
+  // retain the physical storage type (notably the 32-bit narrow-oop type)
+  // while FieldValue keeps the semantic Java-heap pointer type.
+  const FieldDesc *findField(int64_t Offset) const;
+
   // Result of matching a GEP against the array's element-address pattern.
   // Index is the (possibly symbolic) Value* that names the Java-level
   // element index; ElementType is the per-element LLVM type. Callers must
@@ -543,6 +549,7 @@ public:
     ReplaceCall,
     EliminateStore,
     EliminateAllocation,
+    PlaceInstruction,
     Materialize,
     CreatePHI,
     // Atomically replace one safepoint's complete deoptimization object pool.
@@ -569,8 +576,15 @@ public:
   uint32_t SeqNo = 0;
 
 private:
-  // The one virtual object whose ordinary IR mutation this effect performs.
-  // A deopt-pool rewrite spans zero or more objects and has no mutation owner.
+  // The virtual object whose ordinary IR mutation this effect owns. Ordinary
+  // effects are attached to exactly one VO so commit() can validate their
+  // dependencies and drop/retain them as a unit when that VO becomes
+  // ineligible. InvalidObjectID denotes an effect that is deliberately
+  // independent of any one VO: RewriteDeoptPool rewrites one complete
+  // safepoint pool and may cover several (or no) VOs, while
+  // PlaceInstruction only parents an analysis-created instruction at its
+  // program point. Ownerless effects must therefore not participate in the
+  // per-VO ineligibility cascade.
   ObjectID MutationOwner = InvalidObjectID;
 
 public:
@@ -592,8 +606,10 @@ public:
   virtual Kind getKind() const = 0;
 
   bool hasValidMutationOwner() const {
-    return getKind() == Kind::RewriteDeoptPool ? !hasMutationOwner()
-                                               : hasMutationOwner();
+    return (getKind() == Kind::RewriteDeoptPool ||
+            getKind() == Kind::PlaceInstruction)
+               ? !hasMutationOwner()
+               : hasMutationOwner();
   }
 
   // The IR instruction this effect rewrites/erases, or null for effects that
@@ -683,6 +699,27 @@ public:
   }
 };
 
+// Parent an analysis-created instruction at its modeled program point.
+class PlaceInstructionEffect : public Effect {
+public:
+  // Both handles are weak: an earlier ordinary effect may erase the modeled
+  // store before this placement runs.
+  WeakTrackingVH Target;
+  WeakTrackingVH InstructionToPlace;
+
+  Kind getKind() const override { return Kind::PlaceInstruction; }
+  static bool classof(const Effect *E) {
+    return E->getKind() == Kind::PlaceInstruction;
+  }
+  Instruction *getTarget() const override {
+    return dyn_cast_or_null<Instruction>((Value *)Target);
+  }
+  void apply(TransformContext &Ctx) override;
+  std::unique_ptr<Effect> clone() const override {
+    return std::make_unique<PlaceInstructionEffect>(*this);
+  }
+};
+
 // Rewrite the original allocation invoke into an unconditional branch (dropping
 // the unwind edge) or erase a call alloc. Applied in the cfg-kill phase.
 class EliminateAllocationEffect : public Effect {
@@ -719,8 +756,15 @@ public:
   // Per-offset snapshot of a virtual object's field values at a
   // materialization point.
   struct FieldEntry {
-    int64_t Offset;
+    // Physical slot description. Value's declared type is the semantic Java
+    // value (AS1 for references), whereas compressed-oop fields are physically
+    // stored as AS3 pointers.
+    VirtualObject::FieldDesc Storage;
     FieldValue Value;
+
+    FieldEntry() : Storage{0, nullptr, 0, false} {}
+    FieldEntry(const VirtualObject::FieldDesc &FD, const FieldValue &FV)
+        : Storage(FD), Value(FV) {}
   };
 
   // WeakTrackingVH so erasing the insertion-point instruction auto-nulls the
