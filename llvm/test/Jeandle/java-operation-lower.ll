@@ -31,26 +31,26 @@
 ;CHECK:   ret i32 1
 ;CHECK: }
 ;CHECK: attributes #0 = { "noinline" "use-compressed-oops" }
-;CHECK: attributes #1 = { "lower-phase"="1" "noinline" }
+;CHECK: attributes #1 = { "lower-phase"="2" "noinline" }
 
 ; from:
 ;                                    root
 ;                                     |
 ;       +-----------+-----------------+-----------------+
 ;       |           |                 |                 |
-; test0(phase0)  test3(phase1)  test4(phase0)  test5(phase0)
+; test0(phase0)  test3(phase2)  test4(phase0)  test5(phase0)
 ;                   |                 |                 |
 ;                   |                 |                 |
-;                test1(phase0)  test1(phase0)  test2(phase1)
+;                test1(phase0)  test1(phase0)  test2(phase2)
 ; to:
 ;                                    root
 ;                                     |
 ;       +-----------+-----------------+-----------------+
 ;       |           |                 |                 |
-;    inined  test3(phase1)         inlined           inlined
+;    inined  test3(phase2)         inlined           inlined
 ;                   |                 |                 |
 ;                   |                 |                 |
-;                inlined           inlined         test2(phase1)
+;                inlined           inlined         test2(phase2)
 define hotspotcc i32 @root(ptr addrspace(1) %0) #0 gc "hotspotgc" {
 entry:
   br label %bci_0
@@ -114,4 +114,4 @@ define i32 @test2(i32 %super_kid, ptr addrspace(1) captures(none) %oop) #2 {
 
 attributes #0 = { "use-compressed-oops" "noinline"}
 attributes #1 = { "lower-phase"="0" "noinline"}
-attributes #2 = { "lower-phase"="1" "noinline"}
+attributes #2 = { "lower-phase"="2" "noinline"}

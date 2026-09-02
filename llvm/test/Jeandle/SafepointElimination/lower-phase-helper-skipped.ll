@@ -11,7 +11,7 @@
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
-define void @helper(i64 %n) "lower-phase"="1" gc "stub" {
+define void @helper(i64 %n) "lower-phase"="2" gc "stub" {
 entry:
   br label %loop
 
