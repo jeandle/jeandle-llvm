@@ -174,7 +174,14 @@ bool llvm::jeandle::isMarkedStripMinedInner(Loop &L) {
   BasicBlock *OuterLatch = Outer->getLoopLatch();
   if (!OuterLatch)
     return false;
-  return llvm::any_of(*OuterLatch, isStripMinedPoll);
+  if (llvm::any_of(*OuterLatch, isStripMinedPoll))
+    return true;
+  // A rotated entry poll is relocated to the per-batch inner preheader,
+  // after the outer entry test, rather than onto the outer backedge.
+  BasicBlock *InnerEntry = L.getLoopPreheader();
+  return InnerEntry && Outer->contains(InnerEntry) &&
+         InnerEntry->getSinglePredecessor() == Outer->getHeader() &&
+         llvm::any_of(*InnerEntry, isStripMinedPoll);
 }
 
 bool llvm::jeandle::backedgeCountProvablyLessThan(Loop &L,
