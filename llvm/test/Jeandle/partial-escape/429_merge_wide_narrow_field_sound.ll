@@ -12,14 +12,14 @@
 ; carries a defensive entry-defaults guard so the merge stays sound if
 ; the width-conflict bail is ever relaxed.)
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i64)
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_merge_wide_narrow_field(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-  ptr inttoptr (i64 12345 to ptr), i32 32)
+  ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
   to label %split unwind label %u
 split:
   br i1 %c, label %p1, label %p2

@@ -18,7 +18,7 @@
 ; intentionally the same in both modes, so the stats oracle distinguishes the
 ; analysis decisions.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -52,7 +52,7 @@ hdr3:
   br i1 %c3, label %body3, label %exit3
 body3:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-                  ptr inttoptr (i64 4444 to ptr), i32 16)
+                  ptr inttoptr (i64 4444 to ptr), i32 16, i1 false)
                to label %ib unwind label %u
 ib:
   call void @sink(ptr addrspace(1) %inner)

@@ -9,7 +9,7 @@
 ; through that historical bundle while auditing %result at @safepoint would
 ; spuriously reject %o even though both safepoints describe it.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @produce()
 declare void @safepoint()
 declare i32 @__gxx_personality_v0(...)
@@ -18,7 +18,7 @@ define void @call_result_deopt_bundle_not_dependency()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 
 body:

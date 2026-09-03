@@ -6,7 +6,7 @@
 ; on one path, and another value that aliases to the same virtual on
 ; the other) carry the alias.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -14,7 +14,7 @@ define void @test_icmp_eq_chained_phi(i1 %c1, i1 %c2)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   br i1 %c1, label %a, label %b

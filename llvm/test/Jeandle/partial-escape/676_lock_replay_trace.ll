@@ -11,7 +11,7 @@
 ; by the transform. It covers a single replay, a same-site interleaved cascade,
 ; and mutually exclusive predecessor plans for one logical merge consumer.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -21,7 +21,7 @@ define void @trace_single_replay() gc "hotspotgc" personality ptr @__gxx_persona
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 10101 to ptr), i32 16)
+            ptr inttoptr (i64 10101 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
@@ -44,15 +44,15 @@ entry:
   %la2 = alloca i64, align 8
   %lc3 = alloca i64, align 8
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 20101 to ptr), i32 16)
+           ptr inttoptr (i64 20101 to ptr), i32 16, i1 false)
        to label %alloc.b unwind label %unwind
 alloc.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 20102 to ptr), i32 16)
+           ptr inttoptr (i64 20102 to ptr), i32 16, i1 false)
        to label %alloc.c unwind label %unwind
 alloc.c:
   %c = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 20103 to ptr), i32 16)
+           ptr inttoptr (i64 20103 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
@@ -94,7 +94,7 @@ entry:
   %right.outer = alloca i64, align 8
   %right.inner = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 30101 to ptr), i32 16)
+           ptr inttoptr (i64 30101 to ptr), i32 16, i1 false)
        to label %branch unwind label %unwind
 branch:
   br i1 %choose, label %left, label %right
@@ -156,11 +156,11 @@ define void @trace_mixed_consumers_same_site(i2 %path, i1 %p.to.m, i32 %v)
 entry:
   %x.lock = alloca i64, align 8
   %x = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 40101 to ptr), i32 16)
+           ptr inttoptr (i64 40101 to ptr), i32 16, i1 false)
        to label %alloc.y unwind label %unwind
 alloc.y:
   %y = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 40102 to ptr), i32 16)
+           ptr inttoptr (i64 40102 to ptr), i32 16, i1 false)
        to label %locked unwind label %unwind
 locked:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
@@ -221,11 +221,11 @@ entry:
   %x.lock = alloca i64, align 8
   %y.lock = alloca i64, align 8
   %x = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 50101 to ptr), i32 16)
+           ptr inttoptr (i64 50101 to ptr), i32 16, i1 false)
        to label %alloc.y unwind label %unwind
 alloc.y:
   %y = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 50102 to ptr), i32 16)
+           ptr inttoptr (i64 50102 to ptr), i32 16, i1 false)
        to label %locked unwind label %unwind
 locked:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(

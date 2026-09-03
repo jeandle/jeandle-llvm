@@ -7,7 +7,7 @@
 ; tracked field write is replayed onto OrigAlloc before the escape and no
 ; materialized-object PHI is needed at the merge; the return consumes OrigAlloc.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -15,7 +15,7 @@ define ptr addrspace(1) @test_mixed_merge_with_field_writes(i1 %c, i32 %v)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   br i1 %c, label %then, label %else

@@ -14,7 +14,7 @@
 ; Mirrors the standard virtualizing-EA deopt encoding: an eliminated monitor
 ; entry carrying a virtual-object owner reference.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(i32, i32)
@@ -24,7 +24,7 @@ define void @virtual_vo_lock_in_deopt(i32 %a, i32 %b) gc "hotspotgc" personality
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 24)
+            ptr inttoptr (i64 12345 to ptr), i32 24, i1 false)
        to label %n unwind label %u
 n:
   %s1 = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

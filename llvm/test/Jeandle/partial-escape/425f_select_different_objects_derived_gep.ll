@@ -7,18 +7,18 @@
 ; select, which would poison both arms. Both allocations survive and the
 ; select/load read valid addresses.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_select_different_objects_derived_gep(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 1 to ptr), i32 32)
+            ptr inttoptr (i64 1 to ptr), i32 32, i1 false)
          to label %n unwind label %u
 n:
   %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 2 to ptr), i32 32)
+            ptr inttoptr (i64 2 to ptr), i32 32, i1 false)
          to label %m unwind label %u
 m:
   %g1 = getelementptr inbounds i8, ptr addrspace(1) %o1, i64 16

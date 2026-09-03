@@ -6,9 +6,11 @@
 ;   return array[3];
 ;
 ; JavaOpLengthFolding folds both jeandle.arraylength calls to 10, making the
-; trip count constant; the pre-PEA full unroll straight-lines the loop into
-; constant-offset stores (and the constant-folded bounds checks die); PEA
-; then virtualizes the whole array and folds the final load to 0.
+; trip count constant. The pre-PEA unroll policy is forced-only, so PEA
+; conservatively retains the loop-mutated array. The default O3 pipeline later
+; straight-lines the loop into constant-offset stores, removes the folded
+; bounds checks, and folds the final load to 0. The retained allocation must be
+; lowered through a GC statepoint.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
 declare hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) readonly)
@@ -30,7 +32,7 @@ entry:
   ret void
 }
 
-attributes #0 = { noinline "lower-phase"="1" }
+attributes #0 = { noinline "lower-phase"="2" }
 
 define i32 @test_array_init() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
@@ -69,8 +71,9 @@ u:
 }
 
 ; CHECK-LABEL: define {{.*}}@test_array_init
-; CHECK-NOT: jeandle.new_array
+; CHECK: @llvm.experimental.gc.statepoint{{.*}}@jeandle.new_array
 ; CHECK-NOT: jeandle.arraylength
+; CHECK-COUNT-10: store atomic i32 0
 ; CHECK: ret i32 0
 
 !java-method-compilation = !{}

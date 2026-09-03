@@ -7,7 +7,7 @@
 ; downstream InstCombine reaped it — invisible in iterative mode but
 ; observable in single-shot PEA lit runs.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -15,7 +15,7 @@ define void @test_caseB_phi_eliminated(i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %branch unwind label %u
 branch:
   br i1 %c, label %left, label %right

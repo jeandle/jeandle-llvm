@@ -7,7 +7,7 @@
 ; materialized virtual coexisting with an outer-loop carried virtual that
 ; still converges on a stable header merged state B.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -15,7 +15,7 @@ declare i32 @__gxx_personality_v0(...)
 define void @test_inner_materialized_outer_carried(i32 %n, i32 %m) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 40901 to ptr), i32 16)
+            ptr inttoptr (i64 40901 to ptr), i32 16, i1 false)
        to label %prep unwind label %u
 prep:
   %s = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -33,7 +33,7 @@ iloop:
   br i1 %cj, label %ibody, label %oend
 ibody:
   %p = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 40902 to ptr), i32 16)
+            ptr inttoptr (i64 40902 to ptr), i32 16, i1 false)
        to label %ist unwind label %u
 ist:
   call void @sink(ptr addrspace(1) %p)

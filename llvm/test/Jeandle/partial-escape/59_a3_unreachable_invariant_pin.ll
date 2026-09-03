@@ -22,7 +22,7 @@
 ; merge, escape on the if-then arm, virtual on the if-else arm. The merge
 ; sees mixed-state but alloc dominates.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -33,7 +33,7 @@ entry:
 n:
   ; Alloc here dominates the merge below by SSA.
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %inner_if unwind label %u
 inner_if:
   br i1 %c0, label %t1, label %e1

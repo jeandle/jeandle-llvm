@@ -15,7 +15,7 @@
 ; (the slow path is only exposed later by JavaOperationLower, which this test
 ; does not run).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 
@@ -25,7 +25,7 @@ define void @atomic_monitor_pair() gc "hotspotgc" personality ptr @__gxx_persona
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 777 to ptr), i32 16)
+            ptr inttoptr (i64 777 to ptr), i32 16, i1 false)
        to label %locked unwind label %u
 locked:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(

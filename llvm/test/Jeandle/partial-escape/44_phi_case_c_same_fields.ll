@@ -6,7 +6,7 @@
 ; per-pred allocations are eliminated; the per-entry field PHI collapses to
 ; the common constant; the post-merge load folds to that constant.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define i32 @test_casec_same_fields(i1 %c)
@@ -15,7 +15,7 @@ entry:
   br i1 %c, label %left, label %right
 left:
   %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %lstore unwind label %u
 lstore:
   %sl = getelementptr inbounds i8, ptr addrspace(1) %o1, i64 8
@@ -23,7 +23,7 @@ lstore:
   br label %merge
 right:
   %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %rstore unwind label %u
 rstore:
   %sr = getelementptr inbounds i8, ptr addrspace(1) %o2, i64 8

@@ -83,6 +83,20 @@ static cl::opt<bool> EnableHistogramVectorization(
     "enable-histogram-loop-vectorization", cl::init(false), cl::Hidden,
     cl::desc("Enables autovectorization of some loops containing histograms"));
 
+/// Java heap element stores remain unordered atomics until late lowering.
+/// Early-exit loop legality may nevertheless treat primitive unordered stores
+/// like simple stores when the shared Jeandle vectorizer option is enabled.
+/// Reference stores, volatile accesses, and stronger orderings stay rejected.
+static bool isVectorizablePrimitiveStore(const StoreInst *SI) {
+  if (SI->isSimple())
+    return true;
+  if (!VectorizerParams::IgnoreAtomicity || SI->isVolatile() ||
+      !SI->isAtomic() || SI->getOrdering() != AtomicOrdering::Unordered)
+    return false;
+  Type *Ty = SI->getValueOperand()->getType();
+  return Ty->isIntegerTy() || Ty->isFloatingPointTy();
+}
+
 /// Maximum vectorization interleave count.
 static const unsigned MaxInterleaveFactor = 16;
 
@@ -1808,7 +1822,8 @@ bool LoopVectorizationLegality::isVectorizableEarlyExitLoop() {
   for (auto *BB : TheLoop->blocks())
     for (auto &I : *BB) {
       if (I.mayWriteToMemory()) {
-        if (isa<StoreInst>(&I) && cast<StoreInst>(&I)->isSimple()) {
+        if (isa<StoreInst>(&I) &&
+            isVectorizablePrimitiveStore(cast<StoreInst>(&I))) {
           HasSideEffects = true;
           continue;
         }

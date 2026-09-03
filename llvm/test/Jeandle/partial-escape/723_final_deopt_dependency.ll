@@ -15,7 +15,7 @@
 ; commit drops the equality replacement owned by %a.  The surviving deopt root
 ; therefore depends on %b, whose allocation must not be eliminated.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc i1
     @jeandle.check_if_value_based(ptr addrspace(1))
 declare void @safepoint()
@@ -30,12 +30,12 @@ define void @final_deopt_dependency()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %alloc.b unwind label %unwind
 
 alloc.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 
 body:
@@ -71,12 +71,12 @@ define void @final_deopt_ssa_shapes(i1 %pick)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %alloc.b unwind label %unwind
 
 alloc.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 
 body:

@@ -19,17 +19,17 @@
 ; onto its OrigAlloc and the cycle resolves through the peer's OrigAlloc — no
 ; cascade coordination, no additional allocation, no materialized-object PHI.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define ptr addrspace(1) @test_cyclic_nested() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %nA unwind label %u1
 nA:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
        to label %nB unwind label %u2
 nB:
   %slotA = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
@@ -47,8 +47,8 @@ u2:
 
 ; Both OrigAllocs (klass 11111 = A, klass 22222 = B) are retained.
 ; CHECK-LABEL: define ptr addrspace(1) @test_cyclic_nested
-; CHECK: %[[A:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16)
-; CHECK: %[[B:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16)
+; CHECK: %[[A:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
+; CHECK: %[[B:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
 ; No additional allocation invoke is emitted.
 ; CHECK-NOT: pea.mat = invoke
 ; Both field groups use OrigAlloc values — the back edge B.g = A resolves

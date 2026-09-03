@@ -8,7 +8,7 @@
 ; its virtual enter/exit pair eliminated. The held PHI routes only the replayed
 ; m1 path through the surviving real exit, keeping every input path balanced.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -21,7 +21,7 @@ entry:
   %lk = alloca i64, align 8
   %guard.lk = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 24)
+            ptr inttoptr (i64 11111 to ptr), i32 24, i1 false)
        to label %n unwind label %u
 n:
   br i1 %c0, label %lockpath, label %alt

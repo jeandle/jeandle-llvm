@@ -1,4 +1,4 @@
-; RUN: opt -S -passes="java-operation-lower<phase=0>,insert-gc-barriers,java-operation-lower<phase=1>" %s 2>&1 | FileCheck %s
+; RUN: opt -S -passes="java-operation-lower<phase=0>,insert-gc-barriers,java-operation-lower<phase=2>" %s 2>&1 | FileCheck %s
 
 ; CHECK: %derived.pointer = getelementptr inbounds i8, ptr addrspace(1) %dst, i64 24
 ; CHECK-NEXT: %0 = load atomic ptr addrspace(1), ptr addrspace(1) %derived.pointer unordered, align 8
@@ -46,6 +46,6 @@ entry:
   ret void
 }
 
-attributes #0 = { noinline "lower-phase"="1" }
+attributes #0 = { noinline "lower-phase"="2" }
 
 !java-method-compilation = !{}

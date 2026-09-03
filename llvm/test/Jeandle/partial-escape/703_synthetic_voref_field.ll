@@ -6,25 +6,25 @@
 ; transitively (not a direct bundle operand), so the transitive descriptor
 ; closure must describe it. Mirrors nested virtual-object descriptors + id back-ref.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare void @safepoint()
 
 define void @synthetic_with_inner_field(i1 %c) gc "hotspotgc" {
 entry:
   %inner = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 70302 to ptr), i32 16) [ "deopt"(i32 703001) ]
+      ptr inttoptr (i64 70302 to ptr), i32 16, i1 false) [ "deopt"(i32 703001) ]
   %innerf = getelementptr inbounds i8, ptr addrspace(1) %inner, i64 8
   store atomic i32 77, ptr addrspace(1) %innerf unordered, align 4
   br i1 %c, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 70301 to ptr), i32 24) [ "deopt"(i32 703011) ]
+      ptr inttoptr (i64 70301 to ptr), i32 24, i1 false) [ "deopt"(i32 703011) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic ptr addrspace(1) %inner, ptr addrspace(1) %af unordered, align 8
   br label %merge
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 70301 to ptr), i32 24) [ "deopt"(i32 703012) ]
+      ptr inttoptr (i64 70301 to ptr), i32 24, i1 false) [ "deopt"(i32 703012) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic ptr addrspace(1) %inner, ptr addrspace(1) %bf unordered, align 8
   br label %merge

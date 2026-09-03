@@ -1,6 +1,6 @@
 ; RUN: opt -S -verify-each -passes="require<partial-escape-analysis>,partial-escape-transform" %s | FileCheck %s
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @safepoint()
 declare void @escape(ptr addrspace(1))
 declare void @may_throw()
@@ -14,7 +14,7 @@ define void @same_block_loop_field(i32 %limit)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 69101 to ptr), i32 16)
+           ptr inttoptr (i64 69101 to ptr), i32 16, i1 false)
        to label %init unwind label %unwind
 init:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -50,7 +50,7 @@ define void @diamond_loop_field(i1 %pick, i32 %limit)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 69102 to ptr), i32 16)
+           ptr inttoptr (i64 69102 to ptr), i32 16, i1 false)
        to label %init unwind label %unwind
 init:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -98,7 +98,7 @@ define void @casec_inner_side_entry(i1 %bypass, i1 %pick)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 69103 to ptr), i32 24)
+               ptr inttoptr (i64 69103 to ptr), i32 24, i1 false)
            to label %dispatch unwind label %unwind
 dispatch:
   %outer.field = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -107,11 +107,11 @@ choose:
   br i1 %pick, label %left, label %right
 left:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 69104 to ptr), i32 16)
+           ptr inttoptr (i64 69104 to ptr), i32 16, i1 false)
        to label %inner.merge unwind label %unwind
 right:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 69104 to ptr), i32 16)
+           ptr inttoptr (i64 69104 to ptr), i32 16, i1 false)
        to label %inner.merge unwind label %unwind
 inner.merge:
   %inner = phi ptr addrspace(1) [ %a, %left ], [ %b, %right ]
@@ -144,11 +144,11 @@ define void @available_materialized_oop_invoke(i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 69105 to ptr), i32 24)
+               ptr inttoptr (i64 69105 to ptr), i32 24, i1 false)
            to label %alloc.inner unwind label %alloc.unwind
 alloc.inner:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 69106 to ptr), i32 16)
+               ptr inttoptr (i64 69106 to ptr), i32 16, i1 false)
            to label %body unwind label %alloc.unwind
 body:
   %outer.value = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 8
@@ -190,11 +190,11 @@ define i32 @transitive_fallback_invoke()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 69107 to ptr), i32 24)
+               ptr inttoptr (i64 69107 to ptr), i32 24, i1 false)
            to label %alloc.outer unwind label %alloc.unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 69108 to ptr), i32 24)
+               ptr inttoptr (i64 69108 to ptr), i32 24, i1 false)
            to label %body unwind label %alloc.unwind
 body:
   %child.value = getelementptr inbounds i8, ptr addrspace(1) %child, i64 8

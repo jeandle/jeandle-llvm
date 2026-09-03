@@ -8,7 +8,7 @@
 ; live safepoint must retain the virtual root and descriptor without forcing a
 ; retry that disables virtualization.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @dead_safepoint()
 declare void @live_safepoint()
 declare i32 @__gxx_personality_v0(...)
@@ -17,7 +17,7 @@ define void @dead_block_deopt_has_no_obligation()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 72601 to ptr), i32 16)
+      ptr inttoptr (i64 72601 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 
 body:

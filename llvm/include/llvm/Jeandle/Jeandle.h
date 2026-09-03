@@ -18,7 +18,7 @@
 namespace llvm::jeandle {
 
 void optimize(Module &M, OptimizationLevel Level = OptimizationLevel::O3,
-              PipelineMode Mode = PipelineMode::MethodCompilation);
+              PipelineMode Mode = PipelineMode::MethodCompilation, TargetMachine *TM = nullptr);
 
 } // end namespace llvm::jeandle
 

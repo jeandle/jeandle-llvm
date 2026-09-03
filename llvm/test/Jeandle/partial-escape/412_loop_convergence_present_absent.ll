@@ -14,7 +14,7 @@
 ; would falsely converge and drop the required materialization — a miscompile.
 ; The sound result keeps the allocation live and the escape store intact.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 @G = external addrspace(1) global ptr addrspace(1)
@@ -22,7 +22,7 @@ declare i32 @__gxx_personality_v0(...)
 define void @test_present_absent(i32 %n) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 4242 to ptr), i32 16)
+            ptr inttoptr (i64 4242 to ptr), i32 16, i1 false)
        to label %preheader unwind label %u
 preheader:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8

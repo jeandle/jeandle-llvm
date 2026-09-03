@@ -19,7 +19,7 @@
 ; virtual/materialized state remains path-local.  Loop retries must neither
 ; lose nor duplicate the one point-local replay emitted at the first escape.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare void @sink(ptr addrspace(1))
 
 ; The Case-C identity is defined before the loop and first escapes in the loop.
@@ -29,13 +29,13 @@ entry:
   br i1 %choose, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69501 to ptr), i32 24) [ "deopt"(i32 695011) ]
+      ptr inttoptr (i64 69501 to ptr), i32 24, i1 false) [ "deopt"(i32 695011) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 91, ptr addrspace(1) %af unordered, align 4
   br label %preheader
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69501 to ptr), i32 24) [ "deopt"(i32 695012) ]
+      ptr inttoptr (i64 69501 to ptr), i32 24, i1 false) [ "deopt"(i32 695012) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 92, ptr addrspace(1) %bf unordered, align 4
   br label %preheader
@@ -88,13 +88,13 @@ loop:
   br i1 %choose, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69502 to ptr), i32 16) [ "deopt"(i32 695021) ]
+      ptr inttoptr (i64 69502 to ptr), i32 16, i1 false) [ "deopt"(i32 695021) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 101, ptr addrspace(1) %af unordered, align 4
   br label %merge
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69502 to ptr), i32 16) [ "deopt"(i32 695022) ]
+      ptr inttoptr (i64 69502 to ptr), i32 16, i1 false) [ "deopt"(i32 695022) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 102, ptr addrspace(1) %bf unordered, align 4
   br label %merge

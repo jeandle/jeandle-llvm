@@ -4,7 +4,7 @@
 ; iteration enters and exits the monitor on the body-local obj. Without
 ; escape, the lock pair elides and the alloc disappears.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare void @use(i32)
@@ -20,7 +20,7 @@ loop:
   br i1 %c, label %body, label %exit
 body:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 3333 to ptr), i32 16)
+            ptr inttoptr (i64 3333 to ptr), i32 16, i1 false)
        to label %lk unwind label %u
 lk:
   call hotspotcc void @jeandle.monitorenter_with_thin_lock(

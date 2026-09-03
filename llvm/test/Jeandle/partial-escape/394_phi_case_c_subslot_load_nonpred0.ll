@@ -13,7 +13,7 @@
 ; the pointer PHI carries the two allocations. This is the conservative-but-
 ; sound outcome. (Regression guard: the merge must NOT crash on the bail.)
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -23,7 +23,7 @@ entry:
   br i1 %c, label %left, label %right
 left:
   %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 32)
+            ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
         to label %lstore unwind label %u
 lstore:
   %l24 = getelementptr inbounds i8, ptr addrspace(1) %o1, i64 24
@@ -31,7 +31,7 @@ lstore:
   br label %merge
 right:
   %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 32)
+            ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
         to label %rstore unwind label %u
 rstore:
   %r8 = getelementptr inbounds i8, ptr addrspace(1) %o2, i64 8

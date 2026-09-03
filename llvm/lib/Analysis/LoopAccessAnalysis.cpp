@@ -148,6 +148,13 @@ static cl::opt<bool, true> HoistRuntimeChecks(
     cl::location(VectorizerParams::HoistRuntimeChecks), cl::init(true));
 bool VectorizerParams::HoistRuntimeChecks;
 
+static cl::opt<bool, true> VectorizerIgnoreAtomicity(
+    "vectorizer-ignore-atomicity",
+    cl::desc("Allow vectorizing atomic unordered loads/stores"),
+    cl::location(VectorizerParams::IgnoreAtomicity), cl::init(false));
+
+bool VectorizerParams::IgnoreAtomicity;
+
 bool VectorizerParams::isInterleaveForced() {
   return ::VectorizationInterleave.getNumOccurrences() > 0;
 }
@@ -2588,7 +2595,9 @@ bool LoopAccessInfo::analyzeLoop(AAResults *AA, const LoopInfo *LI,
           HasComplexMemInst = true;
           continue;
         }
-        if (!Ld->isSimple() && !IsAnnotatedParallel) {
+        if (!Ld->isSimple() && !IsAnnotatedParallel &&
+            !(VectorizerIgnoreAtomicity && Ld->isUnordered() &&
+              !Ld->getType()->isPointerTy())) {
           recordAnalysis("NonSimpleLoad", Ld)
               << "read with atomic ordering or volatile read";
           LLVM_DEBUG(dbgs() << "LAA: Found a non-simple load.\n");
@@ -2612,7 +2621,9 @@ bool LoopAccessInfo::analyzeLoop(AAResults *AA, const LoopInfo *LI,
           HasComplexMemInst = true;
           continue;
         }
-        if (!St->isSimple() && !IsAnnotatedParallel) {
+        if (!St->isSimple() && !IsAnnotatedParallel &&
+            !(VectorizerIgnoreAtomicity && St->isUnordered() &&
+              !St->getValueOperand()->getType()->isPointerTy())) {
           recordAnalysis("NonSimpleStore", St)
               << "write with atomic ordering or volatile write";
           LLVM_DEBUG(dbgs() << "LAA: Found a non-simple store.\n");

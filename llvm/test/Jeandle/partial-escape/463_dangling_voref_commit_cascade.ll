@@ -14,7 +14,7 @@
 ; allocation stays real with its tracked store replayed onto OrigAlloc
 ; immediately before the escaping call.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32)
 declare void @sinkp(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -22,13 +22,13 @@ declare i32 @__gxx_personality_v0(...)
 define void @dangling_voref2(i32 %x) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 200 to ptr), i32 16)
+            ptr inttoptr (i64 200 to ptr), i32 16, i1 false)
        to label %n1 unwind label %u
 n1:
   %if1 = getelementptr inbounds i8, ptr addrspace(1) %inner, i64 8
   store atomic i32 %x, ptr addrspace(1) %if1 unordered, align 4
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 100 to ptr), i32 24)
+            ptr inttoptr (i64 100 to ptr), i32 24, i1 false)
        to label %n2 unwind label %u
 n2:
   %of2 = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -52,7 +52,7 @@ u:
 ; %inner's tracked store is replayed onto OrigAlloc before the escaping
 ; call; no poison.
 ; CHECK-LABEL: define void @dangling_voref2(
-; CHECK: %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 200 to ptr), i32 16)
+; CHECK: %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 200 to ptr), i32 16, i1 false)
 ; CHECK-NOT: new_instance
 ; CHECK: call void @sink(i32 %x) [ "deopt"(i32 99, i32 99, i64 262156, i64 100, i32 1, i64 68720001036, i32 1, i64 4295229452, i64 200, i32 1, i64 34359738378, i32 %x, i64 524300, i32 0) ]
 ; CHECK: %pea.matslot = getelementptr inbounds i8, ptr addrspace(1) %inner, i64 8

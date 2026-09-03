@@ -8,7 +8,7 @@
 ; live.lpad's state, so the nested outer -> inner virtual-object chain remains
 ; available for load folding and deopt description.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32) nounwind
 declare hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) readonly)
 declare void @may_throw()
@@ -19,13 +19,13 @@ define i32 @folded_invoke_transitive_dead_merge()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %inner = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 71602 to ptr), i32 24)
+      ptr inttoptr (i64 71602 to ptr), i32 24, i1 false)
       [ "deopt"(i32 716021) ]
   %inner.field = getelementptr inbounds i8, ptr addrspace(1) %inner, i64 16
   store atomic i32 73, ptr addrspace(1) %inner.field unordered, align 4
 
   %outer = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 71601 to ptr), i32 24)
+      ptr inttoptr (i64 71601 to ptr), i32 24, i1 false)
       [ "deopt"(i32 716011) ]
   %outer.field = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
   store atomic ptr addrspace(1) %inner, ptr addrspace(1) %outer.field unordered, align 8

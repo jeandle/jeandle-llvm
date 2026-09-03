@@ -8,18 +8,18 @@
 ; derived argument must not trigger a bail-all that marks BOTH objects
 ; ineligible (which would leave %b's tracked store at its original site).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink2(ptr addrspace(1), ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_mixed_args() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 32)
+           ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
        to label %n1 unwind label %u
 n1:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 22222 to ptr), i32 32)
+           ptr inttoptr (i64 22222 to ptr), i32 32, i1 false)
        to label %n2 unwind label %u
 n2:
   %f = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8

@@ -11,7 +11,7 @@
 ; edge effect or split is needed. `D` remains a non-escaping path, and the
 ; then-arm escape replays the tracked field store onto %o before sinking it.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -19,7 +19,7 @@ define void @repro(i1 %c, i1 %c2, i32 %v)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   br i1 %c, label %then, label %else

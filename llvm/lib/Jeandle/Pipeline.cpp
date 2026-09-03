@@ -32,12 +32,16 @@
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
+#include "llvm/Transforms/Scalar/ConstraintElimination.h"
+#include "llvm/Transforms/Scalar/DeadStoreElimination.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Transforms/Scalar/InductiveRangeCheckElimination.h"
 #include "llvm/Transforms/Scalar/IndVarSimplify.h"
 #include "llvm/Transforms/Scalar/InstSimplifyPass.h"
 #include "llvm/Transforms/Scalar/LICM.h"
 #include "llvm/Transforms/Scalar/LoopDeletion.h"
+#include "llvm/Transforms/Scalar/LoopIdiomRecognize.h"
 #include "llvm/Transforms/Scalar/LoopPassManager.h"
 #include "llvm/Transforms/Scalar/LoopRotation.h"
 #include "llvm/Transforms/Scalar/LoopUnrollPass.h"
@@ -76,11 +80,17 @@ static cl::opt<InlinePolicy> JeandleInlinePolicy(
                           "Inline accessor methods only"),
                clEnumValN(InlinePolicy::Off, "off", "Disable inlining")));
 
-Pipeline::Pipeline(OptimizationLevel Level, LLVMContext &Ctx, PipelineMode Mode)
+Pipeline::Pipeline(OptimizationLevel Level, LLVMContext &Ctx, PipelineMode Mode,
+                   TargetMachine *TM)
     : SI(Ctx, /*DebugLogging=*/false) {
   SI.registerCallbacks(PIC, &MAM);
 
-  PassBuilder PB(nullptr, PipelineTuningOptions(), std::nullopt, &PIC);
+  PipelineTuningOptions PTO;
+  // Jeandle uses LLVM's native SLP vectorizer for straight-line Java
+  // stores exposed by pre-PEA unrolling. Keep the pass implementation native;
+  // only opt in through the standard PassBuilder tuning option.
+  PTO.SLPVectorization = true;
+  PassBuilder PB(TM, PTO, std::nullopt, &PIC);
 
   // Register all the basic analyses with the managers.
   PB.registerModuleAnalyses(MAM);
@@ -100,25 +110,26 @@ static void addCoverageVerifier(ModulePassManager &PM) {
     PM.addPass(createModuleToFunctionPassAdaptor(SafepointCoverageVerifier()));
 }
 
-// Prepare strip-mining candidates by exposing array-length exits and scalar
-// comparisons, then hoisting guaranteed invariant header work before rotation
-// applies its duplication budget. The second, speculative LICM cleans up the
-// rotated loop. FunctionToLoopPassAdaptor establishes LoopSimplify and LCSSA
-// form before running the loop pipeline.
-static void addPreparationForStripMining(ModulePassManager &PM) {
+// Canonicalize loops and move invariant guards out of their fast paths before
+// safepoint elimination. Unswitching invalidates and requeues specialized
+// loops, allowing LoopRotate to run again until the primary counted exit is on
+// the latch. The final loop cleanup exposes that shape to strip mining.
+static void addEarlyLoopInvariantAndCanonicalizationOpts(ModulePassManager &PM) {
   PM.addPass(createModuleToFunctionPassAdaptor(EarlyCSEPass()));
   PM.addPass(createModuleToFunctionPassAdaptor(InstCombinePass()));
   PM.addPass(createModuleToFunctionPassAdaptor(SimplifyCFGPass()));
   LoopPassManager LPM;
-  LICMOptions PreRotateLICMOptions;
-  PreRotateLICMOptions.AllowSpeculation = false;
-  LPM.addPass(LICMPass(PreRotateLICMOptions));
   LPM.addPass(LoopRotatePass(true, false));
+
   LPM.addPass(LICMPass(LICMOptions()));
+  LPM.addPass(SimpleLoopUnswitchPass(/*NonTrivial=*/true));
+  LPM.addPass(LICMPass(LICMOptions()));
+  LPM.addPass(SimpleLoopUnswitchPass(/*NonTrivial=*/true));
+
   // IndVarSimplify canonicalizes the IV and strengthens SCEV no-wrap flags (via
   // SimplifyIndVar's getStrengthenedNoWrapFlagsFromBinOp), so the strip-mining
   // no-wrap proofs can rely on SCEV flags instead of hand-derived bounds.
-  LPM.addPass(IndVarSimplifyPass());
+  LPM.addPass(IndVarSimplifyPass(/*WidenIndVars=*/false));
   PM.addPass(createModuleToFunctionPassAdaptor(
       createFunctionToLoopPassAdaptor(std::move(LPM), true)));
 }
@@ -140,10 +151,31 @@ static void addStripMiningPasses(ModulePassManager &PM,
   addCoverageVerifier(PM);
 }
 
+static void addRangeCheckOptPipeline(ModulePassManager &PM) {
+  FunctionPassManager FPM;
+  // Prepare exact Java range-check branches without relying on the ordering
+  // of LLVM's default O3 pipeline. The frontend deliberately emits no
+  // widenable conditions or llvm.experimental.guard intrinsics, so
+  // LoopPredication, GuardWidening, and LowerWidenableCondition would be
+  // no-ops here. IRCE directly recognizes the ordinary conditional branches.
+  FPM.addPass(InstCombinePass());
+  FPM.addPass(SimplifyCFGPass());
+  FPM.addPass(ConstraintEliminationPass());
+
+  FPM.addPass(IRCEPass());
+
+  FPM.addPass(InstCombinePass());
+  FPM.addPass(SimplifyCFGPass());
+
+  PM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+}
+
 ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
                                                  OptimizationLevel Level,
                                                  PipelineMode Mode) {
   ModulePassManager PM;
+  const bool StripMiningEnabled = isStripMiningEnabled();
+  const bool DeferEmptyLoopDeletion = (Level == OptimizationLevel::O3);
   PM.addPass(JavaOperationLower(0));
   FunctionPassManager PreCHACleanup;
   PreCHACleanup.addPass(InstSimplifyPass());
@@ -173,6 +205,30 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
       break;
     }
   }
+
+  PM.addPass(createModuleToFunctionPassAdaptor(JavaOpLengthFolding()));
+  PM.addPass(JavaOperationLower(1));
+  addEarlyLoopInvariantAndCanonicalizationOpts(PM);
+
+  // With strip mining enabled, Early handles only non-loop blocks. Loop polls
+  // remain available to strip mining, then AfterStripMining performs the full
+  // loop-tree deletion. Without strip mining, Early also performs that loop
+  // deletion directly.
+  PM.addPass(createModuleToFunctionPassAdaptor(SafepointPollElimination(
+      SafepointPollEliminationMode::Early, DeferEmptyLoopDeletion)));
+  addCoverageVerifier(PM);
+
+  if (StripMiningEnabled)
+    addStripMiningPasses(PM, DeferEmptyLoopDeletion);
+
+  if (DeferEmptyLoopDeletion) {
+    // Re-form LCSSA independently of strip mining, then atomically delete
+    // finite empty loops and the polls that prevent their deletion.
+    PM.addPass(createModuleToFunctionPassAdaptor(LCSSAPass()));
+    PM.addPass(createModuleToFunctionPassAdaptor(SafepointPollElimination(
+        SafepointPollEliminationMode::LoopDeletionPrep)));
+  }
+
   // ==== PEA segment ====
   // Everything below up to InsertGCBarriers exists to serve PEA: the
   // high-tier loop-optimization cluster that exposes virtualization
@@ -193,7 +249,6 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     // after PEA — it bloats the analysed loop body without giving PEA any
     // new precision).
     FunctionPassManager PrePEAHighTier;
-    PrePEAHighTier.addPass(JavaOpLengthFolding());
     // Re-establish the canonical loop form; the inline driver may have
     // introduced loops that are not in simplified form.
     PrePEAHighTier.addPass(LoopSimplifyPass());
@@ -203,7 +258,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
       // compute trip counts for, deletion removes side-effect-free loops.
       LoopPassManager CanonicalizeLPM;
       CanonicalizeLPM.addPass(LoopRotatePass());
-      CanonicalizeLPM.addPass(IndVarSimplifyPass());
+      CanonicalizeLPM.addPass(IndVarSimplifyPass(/*WidenIndVars=*/false));
       CanonicalizeLPM.addPass(LoopDeletionPass());
       PrePEAHighTier.addPass(
           createFunctionToLoopPassAdaptor(std::move(CanonicalizeLPM)));
@@ -281,6 +336,12 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     //       rounds.
     PM.addPass(createModuleToFunctionPassAdaptor(PartialEscapeIterative()));
   }
+
+  // Keep exact range-check elimination after safepoint strip mining. IRCE can
+  // reshape loops, so run it only after safepoint analysis has consumed the
+  // canonical counted-loop form.
+  addRangeCheckOptPipeline(PM);
+
   // Post-inline type recovery + TCE — unconditional. Runs for both PEA-on
   // (cleans up PEA's materializations) and PEA-off (the default config) so
   // RecoverTypeInfo re-attaches !java-klass metadata stripped by the inline
@@ -293,50 +354,8 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(ArrayCopySpecialization()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
 
-  const bool StripMiningEnabled = isStripMiningEnabled();
-  const bool DeferEmptyLoopDeletion = (Level == OptimizationLevel::O3);
-
-  // The loop adaptor establishes LoopSimplify + LCSSA form before
-  // IndVarSimplify or the strip-mining canonicalization pipeline. On the
-  // strip-mining-OFF path, IndVarSimplify also strengthens SCEV no-wrap flags
-  // on the frontend's bare (flagless) IV increments, so Early can prove that a
-  // loop's maximum backedge count is strictly below INT_MAX
-  // (IsIntCountedEquivalent) and drop all of its polls.
-  if (StripMiningEnabled) {
-    addPreparationForStripMining(PM);
-  } else {
-    LoopPassManager LPM;
-    LPM.addPass(IndVarSimplifyPass());
-    PM.addPass(createModuleToFunctionPassAdaptor(
-        createFunctionToLoopPassAdaptor(std::move(LPM))));
-  }
-
-  // With strip mining enabled, Early handles only non-loop blocks. Loop polls
-  // remain available to strip mining, then AfterStripMining performs the full
-  // loop-tree deletion. Without strip mining, Early also performs that loop
-  // deletion directly.
-  PM.addPass(createModuleToFunctionPassAdaptor(SafepointPollElimination(
-      SafepointPollEliminationMode::Early, DeferEmptyLoopDeletion)));
-  addCoverageVerifier(PM);
-
-  if (StripMiningEnabled)
-    addStripMiningPasses(PM, DeferEmptyLoopDeletion);
-
-  // TODO: InsertGCBarriers currently inserts high-level barrier calls before
-  // O3 because it cannot handle O3 generated memory intrinsics and vector
-  // instructions. But the uninlined barrier calls can still block useful
-  // optimizations.
   PM.addPass(createModuleToFunctionPassAdaptor(InsertGCBarriers()));
-
-  if (DeferEmptyLoopDeletion) {
-    // Re-form LCSSA independently of strip mining, then atomically delete
-    // finite empty loops and the polls that prevent their deletion.
-    PM.addPass(createModuleToFunctionPassAdaptor(LCSSAPass()));
-    PM.addPass(createModuleToFunctionPassAdaptor(SafepointPollElimination(
-        SafepointPollEliminationMode::LoopDeletionPrep)));
-  }
-
-  PM.addPass(JavaOperationLower(1));
+  PM.addPass(JavaOperationLower(2));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(Level)));
   PM.addPass(ExpandNarrowOopCast());
   PM.addPass(RewriteStatepointsForGC());

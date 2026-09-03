@@ -11,13 +11,13 @@
 ; Offsets (instance, 64 bytes): i8@8, i16@10, i32@12, i64@16, float@24,
 ; double@32, ptr@40.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define ptr addrspace(1) @test_store_alignment(ptr addrspace(1) %ref) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 9001 to ptr), i32 64)
+            ptr inttoptr (i64 9001 to ptr), i32 64, i1 false)
        to label %n unwind label %u
 n:
   %p8 = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -41,7 +41,7 @@ u:
 }
 
 ; CHECK-LABEL: define ptr addrspace(1) @test_store_alignment
-; CHECK: %[[MAT:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 9001 to ptr), i32 64)
+; CHECK: %[[MAT:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 9001 to ptr), i32 64, i1 false)
 ; CHECK-DAG: store atomic i8 1, ptr addrspace(1) %{{.*}} unordered, align 1
 ; CHECK-DAG: store atomic i16 2, ptr addrspace(1) %{{.*}} unordered, align 2
 ; CHECK-DAG: store atomic i32 3, ptr addrspace(1) %{{.*}} unordered, align 4

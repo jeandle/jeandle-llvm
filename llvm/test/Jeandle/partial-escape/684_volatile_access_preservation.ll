@@ -8,7 +8,7 @@
 ; volatile access exactly once, and never replace it with an ordinary replay
 ; or a folded scalar value.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -21,7 +21,7 @@ define void @test_volatile_load_materializes(i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 68401 to ptr), i32 16)
+            ptr inttoptr (i64 68401 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %seed.slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -62,7 +62,7 @@ define void @test_atomic_volatile_store_materializes(i1 %take, i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 68402 to ptr), i32 16)
+            ptr inttoptr (i64 68402 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %seed.slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

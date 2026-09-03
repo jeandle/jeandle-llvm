@@ -9,7 +9,7 @@
 ; rewritten to eliminated=true with a VORef owner by vo-id — same treatment
 ; as an innermost-scope monitor (see 645_virtual_vo_lock_in_deopt.ll).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(i32)
@@ -19,7 +19,7 @@ define void @multiscope_monitor(i32 %x) gc "hotspotgc" personality ptr @__gxx_pe
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 100 to ptr), i32 16)
+            ptr inttoptr (i64 100 to ptr), i32 16, i1 false)
        to label %n1 unwind label %u
 n1:
   %of = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

@@ -6,7 +6,7 @@
 ; the carried PHI's back-edge incoming stays %sf. The tracked field store is
 ; replayed onto %X at the accumulated offset 4 at the latch.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -20,7 +20,7 @@ hdr:
   br i1 %c, label %body, label %exit
 body:
   %X = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5555 to ptr), i32 32)
+            ptr inttoptr (i64 5555 to ptr), i32 32, i1 false)
           to label %bcont unwind label %u
 bcont:
   %t = getelementptr inbounds i8, ptr addrspace(1) %X, i64 4

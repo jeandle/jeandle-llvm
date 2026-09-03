@@ -9,14 +9,14 @@
 ; guard: the derived arm must not force a bail of the object
 ; (markIneligible), which would leave the tracked store in place.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_select_mixed_arms(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 32)
+           ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
        to label %n unwind label %u
 n:
   %f = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

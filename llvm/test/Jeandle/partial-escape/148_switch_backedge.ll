@@ -5,13 +5,13 @@
 ; claim to exercise the unsafe-cyclic-blocks safety net; it pins the current
 ; conservative output for this CFG shape.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_switch_backedge(i32 %sel) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 1111 to ptr), i32 16)
+              ptr inttoptr (i64 1111 to ptr), i32 16, i1 false)
            to label %head unwind label %u
 
 head:

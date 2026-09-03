@@ -6,7 +6,7 @@
 ; would otherwise materialize the virtual receiver. The analyzer must exclude
 ; that arm before merging object state; no pre-PEA simplifycfg run is present.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @escape(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -14,7 +14,7 @@ define i32 @folded_branch_dead_edge()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 71701 to ptr), i32 24)
+      ptr inttoptr (i64 71701 to ptr), i32 24, i1 false)
       to label %dispatch unwind label %alloc.unwind
 
 dispatch:

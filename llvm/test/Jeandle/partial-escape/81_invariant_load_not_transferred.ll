@@ -7,7 +7,7 @@
 ; would let downstream GVN/LICM assume the global never changes — unsound.
 ; The replacement load must therefore NOT carry !invariant.load.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 @g = external global i32
@@ -15,7 +15,7 @@ declare i32 @__gxx_personality_v0(...)
 define i32 @test_invariant_load_not_transferred() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   ; The stored field value is a load from a mutable global — a different

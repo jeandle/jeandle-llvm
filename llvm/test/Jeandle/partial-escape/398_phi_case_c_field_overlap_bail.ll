@@ -13,7 +13,7 @@
 ; predecessor terminators by retaining their OrigAllocs and replaying the
 ; tracked fields there. The PHI carries the two source pointers.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -23,7 +23,7 @@ entry:
   br i1 %c, label %left, label %right
 left:
   %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 24)
+            ptr inttoptr (i64 12345 to ptr), i32 24, i1 false)
         to label %lstore unwind label %u
 lstore:
   %l8 = getelementptr inbounds i8, ptr addrspace(1) %o1, i64 8
@@ -31,7 +31,7 @@ lstore:
   br label %merge
 right:
   %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 24)
+            ptr inttoptr (i64 12345 to ptr), i32 24, i1 false)
         to label %rstore unwind label %u
 rstore:
   %r12 = getelementptr inbounds i8, ptr addrspace(1) %o2, i64 12

@@ -17,7 +17,7 @@
 ; The left arm holds an external padding monitor and the merged owner is
 ; released after the sink, keeping both CFG paths balanced at scalar depth one.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -30,11 +30,11 @@ entry:
   %lock = alloca i64, align 8
   %pad.lock = alloca i64, align 8
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 11111 to ptr), i32 16)
+              ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
            to label %oi unwind label %u
 oi:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 22222 to ptr), i32 16)
+              ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
            to label %fld unwind label %u
 fld:
   %ofs = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 8
@@ -64,8 +64,8 @@ u:
 
 ; CHECK-LABEL: define void @test_nested_per_pred_field_replay
 ; Both original allocation invokes are retained (outer, then inner).
-; CHECK: invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16)
-; CHECK: invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16)
+; CHECK: invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
+; CHECK: invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
 ; No additional allocation invokes and no critical-edge splits anywhere.
 ; CHECK-NOT: pea.mat = invoke
 ; CHECK-NOT: pea.crit.split

@@ -9,18 +9,18 @@
 ; order: %a=0, %b=1) — the cyclic structure is fully expressible in the
 ; deopt-point-level pool.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @multiscope_cycle(i32 %x) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 100 to ptr), i32 16)
+            ptr inttoptr (i64 100 to ptr), i32 16, i1 false)
        to label %n1 unwind label %u
 n1:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 100 to ptr), i32 16)
+            ptr inttoptr (i64 100 to ptr), i32 16, i1 false)
        to label %n2 unwind label %u
 n2:
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8

@@ -42,6 +42,13 @@ struct VectorizerParams {
   /// True if force-vector-interleave was specified by the user.
   LLVM_ABI static bool isInterleaveForced();
 
+  /// Allow the vectorizers to treat unordered, non-volatile primitive atomic
+  /// accesses as vectorizable.  The Java front end represents plain heap
+  /// element stores as unordered atomics until their safepoint/GC lowering is
+  /// complete.  Keep this switch shared by LoopAccessAnalysis, LoopVectorize,
+  /// and SLPVectorizer so that the command-line option has one meaning.
+  LLVM_ABI static bool IgnoreAtomicity;
+
   /// \When performing memory disambiguation checks at runtime do not
   /// make more than this number of comparisons.
   LLVM_ABI static unsigned RuntimeMemoryCheckThreshold;

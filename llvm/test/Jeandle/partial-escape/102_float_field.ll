@@ -4,13 +4,13 @@
 ; escapes via return; materialization must replay the float store correctly
 ; (float is a primitive, not a reference, and uses 4-byte alignment).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define ptr addrspace(1) @test_float_field() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %s = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -23,7 +23,7 @@ u:
 
 ; Retained OrigAlloc + replayed float store at offset 8.
 ; CHECK-LABEL: define ptr addrspace(1) @test_float_field
-; CHECK: %[[ORIG:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 12345 to ptr), i32 16)
+; CHECK: %[[ORIG:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
 ; CHECK-NOT: @jeandle.new_instance
 ; CHECK: %[[SLOT:[A-Za-z0-9._]+]] = getelementptr inbounds i8, ptr addrspace(1) %[[ORIG]], i64 8
 ; The replayed atomic store must carry natural 4-byte alignment for a float

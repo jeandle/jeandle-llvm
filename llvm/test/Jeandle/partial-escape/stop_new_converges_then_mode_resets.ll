@@ -14,7 +14,7 @@
 ; local alloc (klass 0x5555). If the mode reset leaked, Loop 2's alloc would
 ; also be refused; the fact that it is eliminated proves the reset.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -33,7 +33,7 @@ o2:
   br i1 %c2, label %b2, label %l1
 b2:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 4444 to ptr), i32 16)
+              ptr inttoptr (i64 4444 to ptr), i32 16, i1 false)
           to label %b2c unwind label %u
 b2c:
   %s = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
@@ -56,7 +56,7 @@ o3:
   br i1 %c3, label %b3, label %exit
 b3:
   %a2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 5555 to ptr), i32 16)
+              ptr inttoptr (i64 5555 to ptr), i32 16, i1 false)
           to label %b3c unwind label %u
 b3c:
   %s2 = getelementptr inbounds i8, ptr addrspace(1) %a2, i64 8

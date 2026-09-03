@@ -17,13 +17,13 @@
 ; nonconstant condition, publishes both structural ends, and converges while
 ; keeping the object and all of its field accesses virtual.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 
 define i8 @loop_end_liveness_monotonicity(i1 %done)
     gc "hotspotgc" personality ptr null {
 entry:
   %object = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74701 to ptr), i32 16)
+      ptr inttoptr (i64 74701 to ptr), i32 16, i1 false)
   %entry.field = getelementptr i8, ptr addrspace(1) %object, i64 8
   store atomic i8 0, ptr addrspace(1) %entry.field unordered, align 1
   br label %loop.preheader

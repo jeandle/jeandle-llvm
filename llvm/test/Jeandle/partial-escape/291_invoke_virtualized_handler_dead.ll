@@ -19,7 +19,7 @@
 ; With the killed-edge handling the handler is unreachable for analysis
 ; and VO_A's allocation is cleanly eliminated.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
 declare hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) readonly)
 declare void @sink(ptr addrspace(1))
@@ -32,7 +32,7 @@ entry:
          to label %n unwind label %u_arr
 n:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 54321 to ptr), i32 16)
+            ptr inttoptr (i64 54321 to ptr), i32 16, i1 false)
        to label %n2 unwind label %u_a
 n2:
   ; This invoke is folded by processJavaOp (foldArrayLength) into the

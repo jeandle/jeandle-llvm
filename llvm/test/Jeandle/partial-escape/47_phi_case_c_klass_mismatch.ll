@@ -6,7 +6,7 @@
 ; materialize at their predecessor terminators by retaining their source
 ; allocations. The PHI carries the two OrigAlloc values.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -16,14 +16,14 @@ entry:
   br i1 %c, label %left, label %right
 left:
   %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %lcont unwind label %u
 lcont:
   br label %merge
 right:
   ; A different Klass pointer (constant 67890 vs 12345).
   %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 67890 to ptr), i32 16)
+            ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
         to label %rcont unwind label %u
 rcont:
   br label %merge

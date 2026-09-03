@@ -8,7 +8,7 @@
 ; the final obligation must stop at OopHandleId instead of walking the original
 ; call argument and retaining the allocation.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc ptr addrspace(1)
     @jeandle.get_class(ptr addrspace(1))
 declare void @safepoint()
@@ -18,7 +18,7 @@ define void @getclass_deopt_terminal()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7 to ptr), i32 16)
+      ptr inttoptr (i64 7 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 
 body:

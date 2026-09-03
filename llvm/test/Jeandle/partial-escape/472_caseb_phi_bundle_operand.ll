@@ -6,14 +6,14 @@
 ; exact root occurrence in the complete pool plan; the PHI itself
 ; is erased as redundant (its only remaining use was the bundle slot).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @caseb_phi_in_bundle(i32 %x, i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 100 to ptr), i32 16)
+            ptr inttoptr (i64 100 to ptr), i32 16, i1 false)
        to label %n1 unwind label %u
 n1:
   %of = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

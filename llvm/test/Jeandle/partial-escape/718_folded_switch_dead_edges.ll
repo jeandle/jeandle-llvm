@@ -7,7 +7,7 @@
 ; is Live even though the first structural edge to that destination is dead.
 ; The default arm is impossible and must not materialize %o.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
 declare hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) readonly)
 declare void @escape(ptr addrspace(1))
@@ -17,7 +17,7 @@ define i32 @folded_switch_duplicate_destination()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 71801 to ptr), i32 24)
+      ptr inttoptr (i64 71801 to ptr), i32 24, i1 false)
       to label %array.alloc unwind label %alloc.unwind
 
 array.alloc:

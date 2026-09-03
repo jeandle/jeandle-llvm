@@ -8,7 +8,7 @@
 ; The escape arm keeps OrigAlloc (PEA replays any tracked field stores onto it
 ; before the escape); the return consumes OrigAlloc directly.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -16,7 +16,7 @@ define ptr addrspace(1) @test_mixed_merge(i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   br i1 %c, label %left, label %right

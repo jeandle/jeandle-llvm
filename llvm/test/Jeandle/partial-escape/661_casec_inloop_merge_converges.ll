@@ -7,7 +7,7 @@
 ; iteration's exit states differ and the fixpoint escalates to
 ; MATERIALIZE_ALL, losing every virtualization in the loop.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink_i32(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -19,11 +19,11 @@ loop:
   br i1 %c, label %t, label %e
 t:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5551 to ptr), i32 32)
+            ptr inttoptr (i64 5551 to ptr), i32 32, i1 false)
        to label %m unwind label %u
 e:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5551 to ptr), i32 32)
+            ptr inttoptr (i64 5551 to ptr), i32 32, i1 false)
        to label %m unwind label %u
 m:
   %p = phi ptr addrspace(1) [ %a, %t ], [ %b, %e ]

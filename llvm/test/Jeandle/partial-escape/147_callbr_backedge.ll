@@ -5,14 +5,14 @@
 ; unsafe-cyclic-blocks safety net ran. The oracle records the current
 ; conservative output while exercising the callbr terminator shape.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @asm_callbr()
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_callbr(i32 %n) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 1010 to ptr), i32 16)
+              ptr inttoptr (i64 1010 to ptr), i32 16, i1 false)
            to label %head unwind label %u
 
 head:

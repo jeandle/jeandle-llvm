@@ -14,7 +14,7 @@
 ; pre-cascade in 307_pre_cascade_monitorenter_virt.ll, which fires when the
 ; receiver IS virtual.)
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -25,7 +25,7 @@ entry:
   %lo = alloca i64, align 8
   %lpo = alloca i64, align 8
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %n1 unwind label %u
 n1:
   ; Elided virtual lock on %obj at depth 0.
@@ -49,7 +49,7 @@ u:
 ; CHECK-LABEL: define void @cascade_real_monitorenter
 ; %obj materialises, and its re-emitted monitorenter must appear BEFORE the
 ; real monitorenter(%otherObj).
-; CHECK: %[[MAT:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16)
+; CHECK: %[[MAT:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
 ; CHECK: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %[[MAT]],
 ; CHECK: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %otherObj,
 ; CHECK: call void @sink(ptr addrspace(1) %[[MAT]])

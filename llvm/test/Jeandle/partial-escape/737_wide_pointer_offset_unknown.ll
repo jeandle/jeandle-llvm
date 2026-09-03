@@ -10,14 +10,14 @@
 
 target datalayout = "e-p:64:64-p1:128:128-p3:128:128"
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define void @wide_pointer_offset_unknown() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 73701 to ptr), i32 16)
+      ptr inttoptr (i64 73701 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 body:
   %wide = getelementptr i8, ptr addrspace(1) %obj,

@@ -1,8 +1,9 @@
 ; RUN: opt -passes='safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
 
-; A compare against the old IV and non-canonical subtraction steps have
-; different batch-boundary semantics from the supported latch-carried add
-; recurrence. Keep the original poll for both shapes.
+; A latch compare against the current IV is a supported affine recurrence. Its
+; batch clamp is one step nearer than the equivalent next-IV compare, while
+; the relocated poll resumes from iv.next. A non-canonical subtraction step
+; remains unsupported and must keep its original poll.
 
 declare hotspotcc void @jeandle.safepoint_poll()
 
@@ -32,9 +33,11 @@ return:
 }
 
 ; CHECK-LABEL: @latch_old_iv(
-; CHECK-NOT:   .outer
-; CHECK:       call hotspotcc void @jeandle.safepoint_poll()
-; CHECK-NOT:   jeandle.strip-mined-poll
+; CHECK:       header.outer:
+; CHECK:       %outer.batch.chunk.wide = call i128 @llvm.smin.i128(i128 %outer.batch.rem, i128 999)
+; CHECK:       %outer.inner.limit = add nsw i64 %outer.iv, %outer.batch.chunk
+; CHECK:       header.outer.latch:
+; CHECK:       call hotspotcc void @jeandle.safepoint_poll() #[[POLL:[0-9]+]] [ "deopt"(i64 %outer.iv.next) ]
 
 define void @latch_next_sub_form(i64 %n) "java-method" {
 entry:
@@ -63,7 +66,7 @@ return:
 
 ; CHECK-LABEL: @latch_next_sub_form(
 ; CHECK-NOT:   .outer
-; CHECK:       call hotspotcc void @jeandle.safepoint_poll()
-; CHECK-NOT:   jeandle.strip-mined-poll
+; CHECK:       call hotspotcc void @jeandle.safepoint_poll() [ "deopt"(i64 %iv.next) ]
+; CHECK:       attributes #[[POLL]] = { "jeandle.strip-mined-poll" }
 
 !java-method-compilation = !{}

@@ -13,7 +13,7 @@
 ; the other arm start at depth three.  The real lock after the merge is not a
 ; PEA lock and must remain intact across both PEA rounds and canonicalization.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1)) nounwind
@@ -29,9 +29,9 @@ entry:
   %right.a2 = alloca i64, align 8
   %real.lock = alloca i64, align 8
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68001 to ptr), i32 16)
+      ptr inttoptr (i64 68001 to ptr), i32 16, i1 false)
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68002 to ptr), i32 16)
+      ptr inttoptr (i64 68002 to ptr), i32 16, i1 false)
   br i1 %choose, label %left, label %right
 
 left:

@@ -10,14 +10,14 @@
 ; The exact count is unimportant for the FileCheck contract — what matters is
 ; that the named counters appear in the -stats output with a positive value.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @t_stats_virt() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
          to label %n unwind label %u
 n:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
@@ -31,7 +31,7 @@ u:
 define void @t_stats_mat(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
          to label %n unwind label %u
 n:
   br i1 %c, label %esc, label %loc

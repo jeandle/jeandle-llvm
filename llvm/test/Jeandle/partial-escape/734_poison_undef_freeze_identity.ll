@@ -7,7 +7,7 @@
 ; value. Unknown identity must keep the allocation real instead of enabling
 ; identity-based folding.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i1)
 declare void @use_pointer(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -16,7 +16,7 @@ define void @freeze_poison_not_distinct()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %unknown = freeze ptr addrspace(1) poison
@@ -38,7 +38,7 @@ define void @freeze_undef_not_distinct()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %unknown = freeze ptr addrspace(1) undef
@@ -60,7 +60,7 @@ define void @external_identity_is_distinct(ptr addrspace(1) nonnull %external)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %same = icmp eq ptr addrspace(1) %o, %external
@@ -80,7 +80,7 @@ define void @select_may_contain_same_virtual(
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %maybe.same =
@@ -104,7 +104,7 @@ define void @freeze_external_is_not_proven_distinct(
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %frozen = freeze ptr addrspace(1) %external
@@ -127,7 +127,7 @@ define void @zero_gep_external_is_distinct(
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %zero = getelementptr i8, ptr addrspace(1) %external, i64 0
@@ -148,7 +148,7 @@ define void @nonzero_gep_external_not_proven_distinct(
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %derived = getelementptr i8, ptr addrspace(1) %external, i64 8
@@ -170,7 +170,7 @@ define void @select_undef_is_unknown(i1 %cond)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %unknown = select i1 %cond, ptr addrspace(1) %o, ptr addrspace(1) undef
@@ -192,7 +192,7 @@ define void @phi_undef_is_unknown(i1 %cond)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   br i1 %cond, label %defined, label %unknown.path
@@ -220,7 +220,7 @@ define i32 @phi_poison_refines_then_freeze(i1 %cond)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %field = getelementptr i8, ptr addrspace(1) %o, i64 8
@@ -251,7 +251,7 @@ define void @all_poison_merge_is_unknown(i1 %cond)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %all.poison = select i1 %cond, ptr addrspace(1) poison,
@@ -274,11 +274,11 @@ define void @freeze_poison_stored_in_virtual_outer()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %outer.alloc unwind label %unwind
 outer.alloc:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %unknown = freeze ptr addrspace(1) poison
@@ -305,11 +305,11 @@ define void @unknown_select_stored_in_virtual_outer(i1 %cond)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %outer.alloc unwind label %unwind
 outer.alloc:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %unknown = select i1 %cond, ptr addrspace(1) %inner, ptr addrspace(1) undef
@@ -336,7 +336,7 @@ define i32 @zero_offset_poison_refines(i1 %cond)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %field = getelementptr i8, ptr addrspace(1) %o, i64 8
@@ -362,7 +362,7 @@ define void @nonzero_offset_poison_is_unknown(i1 %cond)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 32)
+            ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
        to label %normal unwind label %unwind
 normal:
   %derived = getelementptr i8, ptr addrspace(1) %o, i64 8
@@ -386,7 +386,7 @@ define void @symbolic_offset_poison_is_unknown(i1 %cond, i64 %offset)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 32)
+            ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
        to label %normal unwind label %unwind
 normal:
   %derived = getelementptr i8, ptr addrspace(1) %o, i64 %offset
@@ -410,7 +410,7 @@ define void @poison_condition_equal_arms(i1 %ignored)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %identity = select i1 poison, ptr addrspace(1) %o, ptr addrspace(1) %o
@@ -431,11 +431,11 @@ define void @poison_condition_different_arms()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %second unwind label %unwind
 second:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %unknown = select i1 poison, ptr addrspace(1) %a, ptr addrspace(1) %b
@@ -458,11 +458,11 @@ define void @different_virtual_bases_are_distinct()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %second unwind label %unwind
 second:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %same = icmp eq ptr addrspace(1) %a, %b
@@ -481,11 +481,11 @@ define void @different_virtual_derived_not_proven_distinct()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %second unwind label %unwind
 second:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %one.past = getelementptr i8, ptr addrspace(1) %a, i64 16
@@ -507,11 +507,11 @@ define void @different_virtual_symbolic_not_proven_distinct(i64 %offset)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %second unwind label %unwind
 second:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %normal unwind label %unwind
 normal:
   %derived = getelementptr i8, ptr addrspace(1) %a, i64 %offset

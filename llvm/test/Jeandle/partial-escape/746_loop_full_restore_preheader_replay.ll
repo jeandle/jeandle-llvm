@@ -30,7 +30,7 @@
 ; recovery must discard that failed-attempt replay before its block-end drain
 ; emits the sole surviving replay.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void
 @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void
@@ -40,7 +40,7 @@ define void @full_restore_field_replay(i1 %done)
     gc "hotspotgc" personality ptr null {
 entry:
   %object = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74601 to ptr), i32 16)
+      ptr inttoptr (i64 74601 to ptr), i32 16, i1 false)
   %field = getelementptr i8, ptr addrspace(1) %object, i64 8
   store atomic i32 42, ptr addrspace(1) %field unordered, align 4
   br label %loop.preheader
@@ -65,7 +65,7 @@ define void @full_restore_lock_replay(i1 %done)
 entry:
   %lock = alloca i64, align 8
   %object = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74602 to ptr), i32 16)
+      ptr inttoptr (i64 74602 to ptr), i32 16, i1 false)
   call hotspotcc void @jeandle.monitorenter_with_thin_lock(
       ptr addrspace(1) %object, ptr %lock)
   %field = getelementptr i8, ptr addrspace(1) %object, i64 8

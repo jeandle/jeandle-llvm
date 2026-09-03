@@ -10,7 +10,7 @@
 
 @arrayOopDesc.element_size.object = private constant i32 8
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -22,11 +22,11 @@ define i32 @nested_escape_before_virtual_sibling(i1 %stay.virtual)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69001 to ptr), i32 24)
+      ptr inttoptr (i64 69001 to ptr), i32 24, i1 false)
       to label %alloc.holder unwind label %unwind
 alloc.holder:
   %holder = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69002 to ptr), i32 24)
+      ptr inttoptr (i64 69002 to ptr), i32 24, i1 false)
       to label %init unwind label %unwind
 init:
   %child.value = getelementptr inbounds i8, ptr addrspace(1) %child, i64 16
@@ -65,15 +65,15 @@ define i32 @shared_array_escape_before_virtual_sibling(i1 %stay.virtual)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69011 to ptr), i32 24)
+      ptr inttoptr (i64 69011 to ptr), i32 24, i1 false)
       to label %alloc.first unwind label %unwind
 alloc.first:
   %first = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69012 to ptr), i32 24)
+      ptr inttoptr (i64 69012 to ptr), i32 24, i1 false)
       to label %alloc.second unwind label %unwind
 alloc.second:
   %second = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69013 to ptr), i32 24)
+      ptr inttoptr (i64 69013 to ptr), i32 24, i1 false)
       to label %alloc.array unwind label %unwind
 alloc.array:
   %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(

@@ -5064,7 +5064,7 @@ void Analyzer::processInstruction(Instruction *I) {
     // yet:
     //   - TODO: processArrayCopy / processMemSet — llvm.memcpy/memmove
     //     (System.arraycopy) and llvm.memset (Arrays.fill). The only
-    //     llvm.memset producer today is jeandle.new_instance's lower-phase=1
+    //     llvm.memset producer today is jeandle.new_instance's lower-phase=2
     //     template, inlined AFTER PEA, so neither shape reaches PEA yet.
     //   - TODO: llvm.reachability_fence — upstream LLVM this fork tracks
     //     does not define Intrinsic::reachability_fence, and the frontend
@@ -5320,10 +5320,13 @@ void Analyzer::processAllocation(CallBase *CB) {
          "allocation must be either instance or array");
   (void)IsArray;
 
-  // TODO(pea-new-instance-protocol): migrate all legacy lit IR and callers to
-  // the production three-argument protocol, then require arg_size() == 3 and
-  // remove this two-argument compatibility path.
-  if (IsInstance && CB->arg_size() != 2) {
+  // The third operand of jeandle.new_instance is not an allocation hint. It
+  // selects the runtime slow path, which performs initialization and
+  // instantiation checks with observable exception/side-effect semantics.
+  // PEA does not model that path, so only the exact fast-path form is
+  // virtualizable. In particular, a runtime-unknown value must not be
+  // treated as false merely because the fast path is the common case.
+  if (IsInstance) {
     if (CB->arg_size() != 3)
       return;
     auto *InitialSlowTest = dyn_cast<ConstantInt>(CB->getArgOperand(2));
@@ -6242,7 +6245,7 @@ bool Analyzer::foldGetClass(CallBase *CB) {
 bool Analyzer::foldCheckCast(CallBase *CB) {
   // jeandle.checkcast itself is lower-phase="0" by design: its expansion
   // exposes a null check (foldICmpEquality) and a jeandle.check_instanceof
-  // call (lower-phase="1"), which is the subtype-check op this fold sees in
+  // call (lower-phase="2"), which is the subtype-check op this fold sees in
   // production. The direct jeandle.checkcast form is only reachable from lit
   // tests.
   if (CB->arg_size() < 2)
@@ -6271,7 +6274,7 @@ bool Analyzer::foldCheckCast(CallBase *CB) {
 bool Analyzer::foldInstanceOf(CallBase *CB) {
   // jeandle.instanceof itself is lower-phase="0" by design: its expansion
   // exposes a null check (foldICmpEquality) and a jeandle.check_instanceof
-  // call (lower-phase="1", handled by foldCheckCast). The direct
+  // call (lower-phase="2", handled by foldCheckCast). The direct
   // jeandle.instanceof form is only reachable from lit tests.
   if (CB->arg_size() < 2)
     return false;

@@ -8,14 +8,14 @@
 ; to poison, and the call receives a poison argument (miscompile). After the fix
 ; the VO is materialized (OrigAlloc kept) and the call receives a live pointer.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_resolve_cap_deep_freeze_chain_call_arg() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-          ptr inttoptr (i64 12345 to ptr), i32 16)
+          ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %cont unwind label %u
 cont:
   %s = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
