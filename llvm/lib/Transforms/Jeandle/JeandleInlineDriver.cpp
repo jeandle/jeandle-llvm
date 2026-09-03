@@ -59,16 +59,17 @@ using llvm::jeandle::getRootJavaMethodFunction;
 using llvm::jeandle::isJeandleJavaMethod;
 using llvm::jeandle::isRootJavaMethodFunction;
 
-static void eraseInlineScopeIDs(Function &RootFunction) {
+static void eraseInlineSchedulingMetadata(Function &RootFunction) {
   // inline-scope-id is private scheduling metadata produced and consumed only
   // by this driver. Removing it before returning does not change the program IR
   // seen by later passes, so it is intentionally not reported through
   // PreservedAnalyses.
   for (Instruction &I : instructions(RootFunction)) {
     auto *CB = dyn_cast<CallBase>(&I);
-    if (!CB || !CB->getMetadata(jeandle::Metadata::InlineScopeID))
+    if (!CB)
       continue;
     CB->setMetadata(jeandle::Metadata::InlineScopeID, nullptr);
+    CB->setMetadata(jeandle::Metadata::LateInline, nullptr);
   }
 }
 
@@ -166,6 +167,14 @@ static PreservedAnalyses runRootInstSimplify(Module &M,
   return RootPA;
 }
 
+static PreservedAnalyses runPreLateInlinePasses(Module &,
+                                                ModuleAnalysisManager &) {
+  // Java-specific elimination passes that need to see calls before late
+  // inlining should be added here. Keep this hook separate from the normal
+  // refinement loop so those passes run only immediately before a late round.
+  return PreservedAnalyses::all();
+}
+
 PreservedAnalyses JeandleInlineDriver::run(Module &M,
                                            ModuleAnalysisManager &MAM) {
   jeandle::registerInlineCalleeIRReplayMaterializer(
@@ -198,23 +207,34 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   // Loop shape:
   //   1. Run one inline round. The round tags every newly exposed call site
   //      with inline-scope-id metadata.
-  //   2. Per-round cleanup (runRootInstSimplify): lower the phase-0 JavaOp
-  //      calls exposed by this round and simplify the root. Runs even when the
-  //      round exposed no new *monomorphic* call sites, so a callee body that
-  //      only brought in phase-0 JavaOp calls still gets them lowered.
-  //   3. If the inline round did not expose any new call sites, stop.
-  //   4. Run devirtualization refinement. It must propagate inline-scope-id
+  //   2. A late round first runs Java-specific pre-late passes. Every changed
+  //      inline round then lowers newly exposed phase-0 JavaOps and simplifies
+  //      the root before refinement.
+  //   3. Eager rounds run until ordinary inlining reaches a fixed point. If
+  //      delayed candidates remain, the driver then enters the late phase.
+  //   4. The phase transition is one-way. Each late round processes markers
+  //   that
+  //      existed before its pre-late passes, and also handles ordinary calls
+  //      exposed by late inlining/refinement. A new InlineLater decision only
+  //      sets metadata, so that call cannot run until the next pre-late
+  //      boundary.
+  //   5. Run devirtualization refinement. It must propagate inline-scope-id
   //      and deopt/BCI information when it clones or replaces calls.
-  //   5. If devirtualization preserved everything, it did not produce a new
-  //      MonomorphicTarget call site and the loop stops; otherwise rescan IR
-  //      in the next inline round.
+  //   6. Late rounds repeat until neither refinement nor marked calls provide
+  //      more work.
   bool HitIterationLimit = true;
+  bool InLateInlinePhase = false;
   for (unsigned Iteration = 0; Iteration < MaxInlineDriverIterations;
        ++Iteration) {
 
-    // Inline one round.
+    if (InLateInlinePhase) {
+      PreservedAnalyses PreLatePA = runPreLateInlinePasses(M, MAM);
+      Changed |= !PreLatePA.areAllPreserved();
+      updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(PreLatePA));
+    }
+
     InlineRoundResult InlineResult =
-        Inliner.runInlineRound(M, MAM, InlineScopes);
+        Inliner.runInlineRound(M, MAM, InlineScopes, InLateInlinePhase);
     bool RoundChanged = !InlineResult.PA.areAllPreserved();
     Changed |= RoundChanged;
 
@@ -222,8 +242,7 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
       updateDriverPreservedAnalyses(M, MAM, DriverPA,
                                     std::move(InlineResult.PA));
 
-      // Lower phase-0 JavaOp call sites exposed by the previous inline round's
-      // inlining.
+      // Lower phase-0 JavaOp call sites exposed by this inline round.
       PreservedAnalyses JavaOpLowerPA = JavaOperationLower(0).run(M, MAM);
       Changed |= !JavaOpLowerPA.areAllPreserved();
       updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(JavaOpLowerPA));
@@ -235,8 +254,17 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
     }
 
     if (!InlineResult.ExposedNewCallSites) {
-      HitIterationLimit = false;
-      break;
+      if (InlineResult.HasLateInlineCandidates) {
+        // This assignment is intentionally monotonic. Once eager inlining has
+        // stopped making progress, the driver stays in the late scheduling
+        // phase. Each call's marker still decides whether its VM query uses
+        // the late policy.
+        InLateInlinePhase = true;
+        continue;
+      } else {
+        HitIterationLimit = false;
+        break;
+      }
     }
 
     FunctionAnalysisManager &FAM =
@@ -255,14 +283,27 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
     DevirtModulePA.preserve<FunctionAnalysisManagerModuleProxy>();
     updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(DevirtModulePA));
 
-    // Devirtualization may rewrite the root IR and replace CallBase objects
-    // exposed by the inline round. Do not carry a cross-step worklist through
-    // this point; the next inline round rescans the root function and should
-    // read the preserved inline-scope-id metadata from surviving/generated call
-    // sites.
+    if (InlineResult.HitNodeCountCutoff) {
+      if (InLateInlinePhase || !InlineResult.HasLateInlineCandidates) {
+        HitIterationLimit = false;
+        break;
+      }
+
+      InLateInlinePhase = true;
+      continue;
+    }
+
     if (!AddedMonomorphicTargets) {
-      HitIterationLimit = false;
-      break;
+      if (!InlineResult.HasLateInlineCandidates) {
+        HitIterationLimit = false;
+        break;
+      }
+
+      // Refinement produced no ordinary eager work, so the delayed candidates
+      // are now the only remaining source of progress. This assignment either
+      // performs the one-way eager-to-late transition or keeps an existing late
+      // phase active; it never returns the driver to eager inlining.
+      InLateInlinePhase = true;
     }
   }
 
@@ -274,19 +315,19 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
                          "inline/devirtualization convergence.\n");
   }
 
-  if (!Changed)
-    return PreservedAnalyses::all();
-
-  FunctionAnalysisManager &FAM =
-      MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
-
   // inline-scope-id is driver-local scheduling state. It is only needed while
   // the driver loop is active so devirtualization rewrites can preserve scope
   // IDs for the next inline round. Drop it before leaving the driver to avoid
   // leaking stale scope IDs into later optimizations or a future driver
   // invocation.
   if (RootFunction)
-    eraseInlineScopeIDs(*RootFunction);
+    eraseInlineSchedulingMetadata(*RootFunction);
+
+  if (!Changed)
+    return PreservedAnalyses::all();
+
+  FunctionAnalysisManager &FAM =
+      MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
 
   // Notify the VM before available_externally callee bodies are removed. The
   // JVM uses this point to snapshot a replay side module containing the IR

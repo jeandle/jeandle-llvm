@@ -1,5 +1,5 @@
-IsOkToInline -1 5 108 = true
-IsOkToInline -1 9 109 = true
+GetInlineDecision -1 5 108 false = 1
+GetInlineDecision -1 9 109 false = 1
 GetInlineCalleeIR 108 = true
 GetInlineCalleeIR 109 = true
 RecordInlineResult -1 5 108 0 = true
