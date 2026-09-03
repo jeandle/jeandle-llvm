@@ -346,8 +346,15 @@ Value *stripPointerCastsAndOffsets(Value *Ptr, const DataLayout &DL,
           *OutOffset = Offset;
         return V;
       }
-      if (DstPT->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace ||
-          SrcPT->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace) {
+      unsigned DstAS = DstPT->getAddressSpace();
+      unsigned SrcAS = SrcPT->getAddressSpace();
+      bool SameWideAS = DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                        SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace;
+      bool WideNarrowPair = (DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                             SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
+                            (DstAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
+                             SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace);
+      if (!SameWideAS && !WideNarrowPair) {
         if (OutOffset)
           *OutOffset = Offset;
         return V;
@@ -500,14 +507,24 @@ resolveVirtualIdentityImpl(Value *V, const PEABlockState &State,
                                       DL, Mode, Visited, Depth + 1);
   }
 
-  // (4) AddrSpaceCast — only chase within JavaHeapAddrSpace.
+  // (4) AddrSpaceCast — chase wide Java references and the AS1<->AS3
+  // compressed-oop representation conversion. Other address spaces are not
+  // Java object identities and must remain opaque.
   if (auto *ASC = dyn_cast<AddrSpaceCastOperator>(V)) {
-    if (auto *DstPT = dyn_cast<PointerType>(ASC->getType()))
-      if (DstPT->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace)
-        return VirtualIdentityResult::unknown();
-    if (auto *SrcPT = dyn_cast<PointerType>(ASC->getOperand(0)->getType()))
-      if (SrcPT->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace)
-        return VirtualIdentityResult::unknown();
+    auto *DstPT = dyn_cast<PointerType>(ASC->getType());
+    auto *SrcPT = dyn_cast<PointerType>(ASC->getOperand(0)->getType());
+    if (!DstPT || !SrcPT)
+      return VirtualIdentityResult::unknown();
+    unsigned DstAS = DstPT->getAddressSpace();
+    unsigned SrcAS = SrcPT->getAddressSpace();
+    bool SameWideAS = DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                      SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace;
+    bool WideNarrowPair = (DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                           SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
+                          (DstAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
+                           SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace);
+    if (!SameWideAS && !WideNarrowPair)
+      return VirtualIdentityResult::unknown();
     return resolveVirtualIdentityImpl(ASC->getOperand(0), State, Aliases, DL,
                                       Mode, Visited, Depth + 1);
   }
@@ -712,9 +729,17 @@ static bool isProvablyDistinctFromVirtualImpl(
   if (auto *ASC = dyn_cast<AddrSpaceCastOperator>(V)) {
     auto *SrcPT = dyn_cast<PointerType>(ASC->getOperand(0)->getType());
     auto *DstPT = dyn_cast<PointerType>(ASC->getType());
-    if (!SrcPT || !DstPT ||
-        SrcPT->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace ||
-        DstPT->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace)
+    if (!SrcPT || !DstPT)
+      return false;
+    unsigned SrcAS = SrcPT->getAddressSpace();
+    unsigned DstAS = DstPT->getAddressSpace();
+    bool SameWideAS = SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                      DstAS == jeandle::AddrSpace::JavaHeapAddrSpace;
+    bool WideNarrowPair = (SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                           DstAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
+                          (SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
+                           DstAS == jeandle::AddrSpace::JavaHeapAddrSpace);
+    if (!SameWideAS && !WideNarrowPair)
       return false;
     return isProvablyDistinctFromVirtualImpl(ASC->getOperand(0), TargetID,
                                              State, Aliases, DL, Visited,

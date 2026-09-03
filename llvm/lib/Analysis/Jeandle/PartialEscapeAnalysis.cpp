@@ -1259,6 +1259,30 @@ private:
   std::unordered_map<LoopPhiKey, WeakTrackingVH, LoopPhiKeyHash>
       LoopFieldPhiCache;
 
+  // Cache analysis-owned AS3 -> AS1 semantic casts by their exact store and
+  // narrow SSA source. One Analyzer may revisit the same store while solving
+  // an in-analysis loop fixpoint; reusing the unparented cast keeps those
+  // visits from accumulating duplicate PlaceInstructionEffects. The cache is
+  // intentionally scoped to this Analyzer. PartialEscapeIterative constructs
+  // a fresh Analyzer for each outer round, so getOrCreateSemanticOopCast also
+  // searches NarrowOop's already-parented users to reuse a cast emitted by an
+  // earlier round.
+  struct SemanticOopCastKey {
+    StoreInst *Store;
+    Value *NarrowOop;
+    bool operator==(const SemanticOopCastKey &O) const {
+      return Store == O.Store && NarrowOop == O.NarrowOop;
+    }
+  };
+  struct SemanticOopCastKeyHash {
+    size_t operator()(const SemanticOopCastKey &K) const {
+      return static_cast<size_t>(
+          hash_combine(hash_value(K.Store), hash_value(K.NarrowOop)));
+    }
+  };
+  std::unordered_map<SemanticOopCastKey, WeakTrackingVH, SemanticOopCastKeyHash>
+      SemanticOopCastCache;
+
   // Per-VO record of LLVM pointer-PHIs that processBlockPhis
   // aliased via Case-B (every incoming agrees on the same ObjectID).
   // commit() consults this to schedule explicit PHI erasures for VOs
@@ -1503,17 +1527,25 @@ private:
   PHINode *createUnparentedPhi(Type *Ty, unsigned N, const Twine &Name);
 
   // Produce a Value* of type LoadTy semantically equal to V, possibly
-  // synthesizing an unparented coercion instruction (registered with
-  // Result.OwnedInsts) that the transform's ReplaceLoad handler will splice
-  // in immediately before the load. Returns V unchanged if no coercion is
-  // needed, or nullptr if no safe coercion exists; callers should bail to
-  // ineligible in the latter case. InsertContext is the load whose DebugLoc
-  // (if any) is propagated onto the synthesized cast.
+  // synthesizing an analysis-owned coercion instruction. The instruction is
+  // registered with Result.OwnedInsts and an ownerless PlaceInstruction
+  // effect schedules it immediately before InsertContext, independently of
+  // the ReplaceLoad effect that consumes it. Returns V unchanged if no
+  // coercion is needed, or nullptr if no safe coercion exists; callers should
+  // bail to ineligible in the latter case. InsertContext is the load whose
+  // DebugLoc (if any) is propagated onto the synthesized cast.
   //
   // Precondition: the load reads a WHOLE stored slot. The caller (processLoad)
   // bails to materialization for any sub-slot / partial-field read before
   // calling, so this routine only handles same-slot type reinterprets.
   Value *coerceToType(Value *V, Type *LoadTy, Instruction *InsertContext);
+
+  // Return an AS1 semantic view of a naked AS3 oop stored by SI. Reuse first
+  // an already-parented, dominating cast from an earlier outer round, then an
+  // analysis-owned cast cached for the current Analyzer; otherwise create an
+  // unparented cast and schedule its placement before SI.
+  Instruction *getOrCreateSemanticOopCast(StoreInst *SI, Value *NarrowOop,
+                                          PointerType *WideTy);
 
   // Widen a sub-int scalar (i1/i8/i16) bound for a deopt descriptor field to
   // i32. The field's wire encoding is T_INT (see LLVM2JavaComputational: Java
@@ -2751,6 +2783,70 @@ PHINode *Analyzer::getOrCreateLoopFieldPhi(BasicBlock *BB, jeandle::ObjectID ID,
   return Phi;
 }
 
+// Construct an analysis-only AS3 -> AS1 cast for processStore when the
+// physical narrow value has no explicit frontend cast. The cast preserves
+// Java-reference semantics for PEA; ExpandNarrowOopCast lowers surviving
+// storage-boundary casts after the PEA fixpoint.
+Instruction *Analyzer::getOrCreateSemanticOopCast(StoreInst *SI,
+                                                  Value *NarrowOop,
+                                                  PointerType *WideTy) {
+  assert(SI && SI->getParent() && NarrowOop && WideTy &&
+         "semantic oop cast requires a valid store context");
+  assert(NarrowOop->getType()->isPointerTy() &&
+         NarrowOop->getType()->getPointerAddressSpace() ==
+             jeandle::AddrSpace::NarrowOopAddrSpace &&
+         WideTy->getAddressSpace() == jeandle::AddrSpace::JavaHeapAddrSpace &&
+         "semantic oop cast requires an AS3 -> AS1 pair");
+
+  // Cross-round tier: reuse a semantic cast materialized into IR by an earlier
+  // PEA round. The Analyzer is recreated for each transform/fixpoint round, so
+  // the per-Analyzer cache below cannot by itself prevent a fresh AS3 -> AS1
+  // cast from being scheduled on every round. Such churn keeps the transform
+  // marked changed indefinitely (notably for loop-carried narrow loads).
+  // An existing cast is safe to reuse only when it dominates this store;
+  // otherwise the store could observe it before its definition.
+  for (User *U : NarrowOop->users()) {
+    auto *Existing = dyn_cast<AddrSpaceCastOperator>(U);
+    if (!Existing || Existing->getType() != WideTy)
+      continue;
+    auto *ExistingI = dyn_cast<Instruction>(Existing);
+    if (!ExistingI || !ExistingI->getParent())
+      continue;
+    if (DT.dominates(ExistingI, SI))
+      return ExistingI;
+  }
+
+  // In-analysis tier: loop processing may revisit SI before the transform has
+  // parented the cast. Such an unparented instruction is already a NarrowOop
+  // user, but the tier above intentionally rejects it; recover it by the exact
+  // (store, source) key instead.
+  SemanticOopCastKey Key{SI, NarrowOop};
+  auto It = SemanticOopCastCache.find(Key);
+  Instruction *Cast = nullptr;
+  if (It != SemanticOopCastCache.end()) {
+    Cast = dyn_cast_or_null<Instruction>(static_cast<Value *>(It->second));
+    if (Cast && Cast->getType() == WideTy)
+      return Cast;
+    SemanticOopCastCache.erase(It);
+  }
+
+  // Neither lifetime has a reusable cast. Create one analysis-owned value and
+  // let PlaceInstructionEffect insert it immediately before the observing SI.
+  Cast = CastInst::Create(Instruction::AddrSpaceCast, NarrowOop, WideTy,
+                          "pea.semantic.oop", /*InsertBefore=*/nullptr);
+  Cast->setDebugLoc(SI->getDebugLoc());
+  Result.OwnedInsts.emplace_back(Cast);
+  SemanticOopCastCache.emplace(Key, Cast);
+
+  auto Place = std::make_unique<jeandle::PlaceInstructionEffect>();
+  Place->Block = SI->getParent();
+  Place->Target = SI;
+  Place->InstructionToPlace = Cast;
+  Place->SeqNo = Result.nextSeqNo();
+  Result.addBlockEffect(std::move(Place));
+  return Cast;
+}
+
 // Type-coercion for processLoad.
 //
 // Handles loads that read a WHOLE stored slot, possibly reinterpreting its
@@ -2764,8 +2860,8 @@ PHINode *Analyzer::getOrCreateLoopFieldPhi(BasicBlock *BB, jeandle::ObjectID ID,
 // pointer↔primitive mismatches (stable-slot-kind invariant) bail here.
 // TODO(unsafe-inliner): see the access dispatch (processStore/processLoad).
 //
-// The same-bit-width bitcast is registered (unparented) in Result.OwnedInsts;
-// the transform's ReplaceLoad handler splices it before the target load.
+// Every synthesized cast is registered in Result.OwnedInsts and gets an
+// ownerless PlaceInstruction effect at the target load.
 Value *Analyzer::coerceToType(Value *V, Type *LoadTy,
                               Instruction *InsertContext) {
   Type *VTy = V->getType();
@@ -2776,21 +2872,49 @@ Value *Analyzer::coerceToType(Value *V, Type *LoadTy,
   uint64_t VBits = DL.getTypeSizeInBits(VTy);
   uint64_t LBits = DL.getTypeSizeInBits(LoadTy);
 
+  auto ownAndSchedulePlacement = [&](Instruction *Cast) -> Value * {
+    assert(Cast && !Cast->getParent() &&
+           "coercion cast must be analysis-owned and unparented");
+    assert(InsertContext && InsertContext->getParent() &&
+           "coercion placement requires an in-IR load context");
+    Cast->setDebugLoc(InsertContext->getDebugLoc());
+    Result.OwnedInsts.emplace_back(Cast);
+
+    auto Place = std::make_unique<jeandle::PlaceInstructionEffect>();
+    Place->Block = InsertContext->getParent();
+    Place->Target = InsertContext;
+    Place->InstructionToPlace = Cast;
+    Place->SeqNo = Result.nextSeqNo();
+    Result.addBlockEffect(std::move(Place));
+    return Cast;
+  };
+
   // Stable-slot-kind invariant: ref↔primitive at the same slot must
   // materialize.
   if (VTy->isPointerTy() != LoadTy->isPointerTy())
     return nullptr;
 
-  // Pointer↔pointer: pointers don't truncate. Require matching bit width and
-  // address spaces. Same-AS same-bitwidth pointers are already type-identical
-  // under opaque pointers, so a true pointer coercion is rare; defend against
-  // the cross-AS case.
+  // Pointer↔pointer: permit the Java heap (AS1) <-> narrow oop (AS3)
+  // representation change. PlaceInstruction parents the cast before the load,
+  // and ExpandNarrowOopCast lowers it after PEA; null is represented directly
+  // in the target address space so it needs no runtime encode/decode.
   if (VTy->isPointerTy() && LoadTy->isPointerTy()) {
-    if (VBits != LBits)
+    unsigned VAS = VTy->getPointerAddressSpace();
+    unsigned LAS = LoadTy->getPointerAddressSpace();
+    const bool VIsOop = VAS == jeandle::AddrSpace::JavaHeapAddrSpace ||
+                        VAS == jeandle::AddrSpace::NarrowOopAddrSpace;
+    const bool LIsOop = LAS == jeandle::AddrSpace::JavaHeapAddrSpace ||
+                        LAS == jeandle::AddrSpace::NarrowOopAddrSpace;
+    if (!VIsOop || !LIsOop)
       return nullptr;
-    if (VTy->getPointerAddressSpace() != LoadTy->getPointerAddressSpace())
-      return nullptr;
-    return V;
+    if (VAS == LAS)
+      return V;
+    if (isa<ConstantPointerNull>(V))
+      return ConstantPointerNull::get(cast<PointerType>(LoadTy));
+    Instruction *Cast = CastInst::Create(Instruction::AddrSpaceCast, V, LoadTy,
+                                         "pea.coerce.oop",
+                                         /*InsertBefore=*/nullptr);
+    return ownAndSchedulePlacement(Cast);
   }
 
   // Both primitives from here. Sub-byte loads (e.g. i1) are bailed: Java
@@ -2808,10 +2932,7 @@ Value *Analyzer::coerceToType(Value *V, Type *LoadTy,
     Instruction *Cast =
         CastInst::Create(Instruction::BitCast, V, LoadTy, "pea.coerce",
                          /*InsertBefore=*/nullptr);
-    if (InsertContext)
-      Cast->setDebugLoc(InsertContext->getDebugLoc());
-    Result.OwnedInsts.emplace_back(Cast);
-    return Cast;
+    return ownAndSchedulePlacement(Cast);
   }
 
   // Anything else bails: a narrower whole-slot load (EntryWidth > LoadWidth),
@@ -3896,8 +4017,9 @@ void Analyzer::processBlockPhis(BasicBlock *BB, jeandle::EffectList &Out) {
     // previous pass left on this PHI — the resolution above already consumed
     // it (a self-referencing back-edge incoming resolves through it), and
     // the cases below re-assign it as needed. Leaving a stale alias in place
-    // would both trip addVirtualAlias's uniqueness assert on a repeated
-    // Case-B decision and mis-resolve the PHI when the decision flips.
+    // would mis-resolve the PHI when the decision flips. Same-ID
+    // re-registration is idempotent, but an ID-changing decision must rebind
+    // the PHI before addVirtualAlias can accept it.
     Aliases.resetAlias(&Phi);
     if (!AnyVirtual)
       continue;
@@ -5310,10 +5432,10 @@ void Analyzer::processAllocation(CallBase *CB) {
     jeandle::ObjectID ID = It->second;
     if (!Eligible.lookup(ID))
       return; // poisoned in a prior iteration — leave the original alloc.
-    // Re-register the alias and the virtual ObjectState in CurrentState.
-    // Aliases.addVirtualAlias asserts !already-aliased, so call only when
-    // the cache restore has wiped the entry (the common case under
-    // restoreLoopSnapshot, which restores Aliases to its pre-loop state).
+    // Re-register the alias only when the cache restore has wiped the entry
+    // (the common case under restoreLoopSnapshot, which restores Aliases to its
+    // pre-loop state). addVirtualAlias accepts same-ID repeats but still
+    // rejects an alias already bound to a different ObjectID.
     if (!Aliases.getVirtualAlias(CB))
       Aliases.addVirtualAlias(CB, ID, /*IsWholeObject=*/true);
     if (!CurrentState.hasObjectState(ID))
@@ -5434,6 +5556,11 @@ void Analyzer::processAllocation(CallBase *CB) {
           static_cast<uint32_t>(VMConsts.arrayBaseOffsetFor(Kind));
       if (Type *ElemTy =
               jeandle::pea::llvmElementTypeFor(Kind, F.getContext())) {
+        if (Kind == jeandle::JBasicType::Object && VMConsts.UseCompressedOops &&
+            DL.getPointerSize(jeandle::AddrSpace::NarrowOopAddrSpace) !=
+                DL.getPointerSize(jeandle::AddrSpace::JavaHeapAddrSpace))
+          ElemTy = PointerType::get(F.getContext(),
+                                    jeandle::AddrSpace::NarrowOopAddrSpace);
         VO->ArrayElementType = ElemTy;
         VO->ArrayIndexScale =
             static_cast<uint32_t>(VMConsts.elementSizeFor(Kind));
@@ -5637,6 +5764,7 @@ void Analyzer::checkRawHeaderAccess(const Instruction *I, Value *Ptr,
 bool Analyzer::processStore(StoreInst *SI) {
   Value *Ptr = SI->getPointerOperand();
   Value *Val = SI->getValueOperand();
+  Value *PhysicalVal = Val;
 
   // Normalize the stored value through the scalar-alias chain before any
   // resolution / recording. A value folded by processLoad / foldICmpEquality /
@@ -5653,13 +5781,49 @@ bool Analyzer::processStore(StoreInst *SI) {
   while (Value *A = Aliases.getScalarAlias(Val))
     Val = A;
 
+  // Compressed-oop stores carry a physical AS3 pointer while PEA tracks Java
+  // references semantically as AS1. Preserve the physical value for field
+  // layout, but normalize the value used by identity/field-state tracking.
+  // Frontend AS1<->AS3 addrspacecasts and null are normalized to the semantic
+  // Java-heap pointer for identity tracking. A naked AS3 value gets an
+  // analysis-owned AS3->AS1 semantic cast while its AS3 storage type remains
+  // recorded in the field layout.
+  Value *SemanticVal = Val;
+  if (Val->getType()->isPointerTy() &&
+      Val->getType()->getPointerAddressSpace() ==
+          jeandle::AddrSpace::NarrowOopAddrSpace) {
+    if (isa<ConstantPointerNull>(Val)) {
+      SemanticVal = ConstantPointerNull::get(PointerType::get(
+          SI->getContext(), jeandle::AddrSpace::JavaHeapAddrSpace));
+    } else if (auto *ASC = dyn_cast<AddrSpaceCastOperator>(Val)) {
+      Value *Wide = ASC->getOperand(0);
+      if (Wide->getType()->isPointerTy() &&
+          Wide->getType()->getPointerAddressSpace() ==
+              jeandle::AddrSpace::JavaHeapAddrSpace)
+        SemanticVal = Wide;
+    } else {
+      PointerType *WideTy = PointerType::get(
+          SI->getContext(), jeandle::AddrSpace::JavaHeapAddrSpace);
+      Instruction *Cast = getOrCreateSemanticOopCast(SI, Val, WideTy);
+      if (Cast) {
+        SemanticVal = Cast;
+        auto Identity = jeandle::pea::resolveVirtualIdentity(
+            Val, CurrentState, Aliases, DL,
+            jeandle::pea::VirtualIdentityMode::WholeObject);
+        if (Identity.isDefined())
+          Aliases.addVirtualAlias(SemanticVal, Identity.getObjectID(),
+                                  /*WholeObject=*/true);
+      }
+    }
+  }
+  auto BaseID = jeandle::pea::resolveVirtualRef(Ptr, CurrentState, Aliases, DL);
+  if (!BaseID)
+    return false;
+
   // Java volatile fields reach this layer as atomic accesses with the
   // appropriate ordering, not as LLVM `volatile`. LLVM volatile has separate
   // observable/MMIO semantics and its operation count must be preserved; it
   // is handled conservatively below.
-  auto BaseID = jeandle::pea::resolveVirtualRef(Ptr, CurrentState, Aliases, DL);
-  if (!BaseID)
-    return false;
 
   jeandle::VirtualObject &VObj = *Result.VirtualObjects[*BaseID];
 
@@ -5692,11 +5856,11 @@ bool Analyzer::processStore(StoreInst *SI) {
   // resolve_cap_02_opaque_inttoptr_escape.ll under
   // llvm/test/Jeandle/partial-escape/.
   auto materializeStoredValue = [&] {
-    if (auto RefID =
-            jeandle::pea::resolveVirtualRef(Val, CurrentState, Aliases, DL)) {
+    if (auto RefID = jeandle::pea::resolveVirtualRef(SemanticVal, CurrentState,
+                                                     Aliases, DL)) {
       materializeAt(*RefID, SI, MatReason::Unhandled);
     } else {
-      assert(!debugReferencesLiveVirtualObject(Val) &&
+      assert(!debugReferencesLiveVirtualObject(SemanticVal) &&
              "unresolved store value references a still-virtual VO: eager "
              "materialization regressed (resolve-cap-blind-spot)");
     }
@@ -5737,14 +5901,14 @@ bool Analyzer::processStore(StoreInst *SI) {
   // actually use the returned index (FieldStates is keyed by raw offset), but
   // -1 means an overlap/size conflict, or an unknown-size value type such as a
   // vector/struct — bail either way.
-  if (VObj.getOrCreateFieldIndex(*Offset, Val->getType(), DL) < 0) {
+  if (VObj.getOrCreateFieldIndex(*Offset, PhysicalVal->getType(), DL) < 0) {
     materializeOperandsAtStore();
     return true;
   }
 
   // Compute the FieldValue for the stored Value.
   auto StoredIdentity = jeandle::pea::resolveVirtualIdentity(
-      Val, CurrentState, Aliases, DL,
+      SemanticVal, CurrentState, Aliases, DL,
       jeandle::pea::VirtualIdentityMode::WholeObject);
   if (StoredIdentity.isDefined()) {
     jeandle::ObjectID RefID = StoredIdentity.getObjectID();
@@ -5767,7 +5931,7 @@ bool Analyzer::processStore(StoreInst *SI) {
     // its materialized pointer into the outer's field. We record the nested
     // reference here and let materializeAt rewrite it later.
     FieldStates[*BaseID][*Offset] =
-        jeandle::FieldValue::virtualRef(RefID, Val->getType());
+        jeandle::FieldValue::virtualRef(RefID, SemanticVal->getType());
     FieldDefinitionSet &Defs = FieldDefinitions[*BaseID][*Offset];
     Defs.clear();
     Defs.insert(SI);
@@ -5784,11 +5948,11 @@ bool Analyzer::processStore(StoreInst *SI) {
   // A virtual-derived value that is not a whole-object identity cannot be
   // represented as VirtualRef without losing its offset. Keep the real store
   // and materialize both the stored object's base and the destination.
-  if (jeandle::pea::resolveVirtualRef(Val, CurrentState, Aliases, DL)) {
+  if (jeandle::pea::resolveVirtualRef(SemanticVal, CurrentState, Aliases, DL)) {
     materializeOperandsAtStore();
     return true;
   }
-  FieldStates[*BaseID][*Offset] = jeandle::FieldValue::scalar(Val);
+  FieldStates[*BaseID][*Offset] = jeandle::FieldValue::scalar(SemanticVal);
   FieldDefinitionSet &Defs = FieldDefinitions[*BaseID][*Offset];
   Defs.clear();
   Defs.insert(SI);
@@ -5824,8 +5988,10 @@ bool Analyzer::processStore(StoreInst *SI) {
 //     slot still folds to the default.
 //   - A Scalar entry folds through coerceToType (same-type passthrough or
 //     same-bit-width bitcast; anything else materializes the base).
-//   - A VirtualRef entry forwards the load to the inner virtual's allocation
-//     and installs a virtual alias, or — if the inner already materialized
+//   - A VirtualRef entry forwards the load to the inner virtual's real
+//     identity (AllocationCall for an ordinary VO, SyntheticPhi for a
+//     synthetic VO) and installs a virtual alias, or — if the inner already
+//     materialized
 //     — forwards to the materialized pointer with a scalar alias.
 //   - A MaterializedRef entry forwards the load to the materialized value.
 void Analyzer::processLoad(LoadInst *LI) {
@@ -6041,7 +6207,7 @@ void Analyzer::processLoad(LoadInst *LI) {
   if (Existing->isVirtualRef()) {
     // Nested-virtual load: loading a field whose tracked value is another
     // virtual yields that other virtual (still virtual!) and forwards the
-    // load to it. Forward the load to the inner virtual's allocation
+    // load to it. Forward the load to the inner virtual's real identity
     // Value and install a virtual alias from the load to
     // InnerID so downstream access handlers (foldArrayLength, foldLoadKlass,
     // etc.) and the generic escape detection see %loaded as a reference to the
@@ -6049,12 +6215,12 @@ void Analyzer::processLoad(LoadInst *LI) {
     // analyzer's existing nested-virtual machinery (a) rewrites every
     // other tracking site (FieldStates, alias map) to the materialized
     // pointer, and (b) at transform time, applyMaterialize records
-    // OrigAlloc (reused) as the materialized value; the field-replay value
-    // is OrigAlloc (applyMaterialize records it in MaterializedReceiverOf for a
-    // sibling lock replay — see the materialization model in
+    // the corresponding real identity as the materialized value; the
+    // field-replay value is recorded in MaterializedReceiverOf for a sibling
+    // lock replay — see the materialization model in
     // PartialEscapeTransform.cpp).
     // (Belt-and-suspenders: the ReplaceLoad handler also resolves
-    // E.Replacement through OrigAlloc directly.)
+    // E.Replacement through the corresponding real identity.)
     jeandle::ObjectID InnerID = Existing->getVirtualRef();
 
     if (!Eligible.lookup(InnerID)) {
@@ -6086,24 +6252,25 @@ void Analyzer::processLoad(LoadInst *LI) {
       // pointer — same shape as the MaterializedRef branch below.
       Repl = InnerOS->getMaterializedValue();
     } else {
-      jeandle::VirtualObject &InnerVO = *Result.VirtualObjects[InnerID];
-      Repl = InnerVO.AllocationCall;
+      Repl = realIdentityOf(InnerID);
     }
     // The fallback must yield a value that exists in IR. Keep the outer object
     // real if the ObjectState invariant is violated.
     if (!Repl ||
-        (isa<Instruction>(Repl) && !cast<Instruction>(Repl)->getParent())) {
+        (isa<Instruction>(Repl) && !cast<Instruction>(Repl)->getParent()) ||
+        (Result.VirtualObjects[InnerID]->IsSynthetic &&
+         !isValueAvailableAt(Repl, LI))) {
       markIneligible(*BaseID);
       return;
     }
 
-    // Type-compatibility. For ordinary reference loads, both LoadTy and the
-    // inner allocation are `ptr addrspace(1)` and coerceToType returns Repl
-    // unchanged. Cross-address-space or ptr↔primitive mismatch materializes
-    // the outer at the load (stable-slot-kind invariant). (Sub-slot pointer
-    // loads were already rejected by the WithinSlotByteOff bail above.) We
-    // don't poison InnerID because other paths may still be able to
-    // virtualize it.
+    // Type-compatibility. For ordinary reference loads, LoadTy and the
+    // inner identity are normally `ptr addrspace(1)` and coerceToType returns
+    // Repl unchanged. Cross-address-space or ptr↔primitive mismatch
+    // materializes the outer at the load (stable-slot-kind invariant).
+    // (Sub-slot pointer loads were already rejected by the WithinSlotByteOff
+    // bail above.) We don't poison InnerID because other paths may still be
+    // able to virtualize it.
     Value *Coerced = coerceToType(Repl, LoadTy, LI);
     if (!Coerced) {
       materializeAt(*BaseID, LI, MatReason::Unhandled);
@@ -7224,19 +7391,22 @@ void Analyzer::recordDeoptBundleMappings(CallBase *CB) {
           for (const auto &Entry : *Touched) {
             std::optional<int64_t> Delta = checkedOffsetSub(Entry.first, Base);
             Type *TouchedType = Entry.second.getDeclaredType();
+            const jeandle::VirtualObject::FieldDesc *FD =
+                VObj.findField(Entry.first);
+            Type *StorageType = FD ? FD->LLVMType : TouchedType;
             bool Canonical =
                 Delta && *Delta >= 0 && Scale > 0 && *Delta % Scale == 0 &&
                 static_cast<uint64_t>(*Delta / Scale) < VObj.ArrayLength &&
                 IsEncodableOffset(Entry.first);
             bool ExactElementType =
-                TouchedType &&
-                (TouchedType == VObj.ArrayElementType ||
+                StorageType &&
+                (StorageType == VObj.ArrayElementType ||
                  (VObj.ArrayElementType->isIntegerTy(1) &&
-                  TouchedType->isIntegerTy(8) && VObj.ArrayIndexScale == 1));
+                  StorageType->isIntegerTy(8) && VObj.ArrayIndexScale == 1));
             bool ExactStoreSize = false;
             bool FullByteRange = false;
-            if (TouchedType) {
-              TypeSize StoreSize = DL.getTypeStoreSize(TouchedType);
+            if (StorageType) {
+              TypeSize StoreSize = DL.getTypeStoreSize(StorageType);
               if (!StoreSize.isScalable()) {
                 uint64_t FixedStoreSize = StoreSize.getFixedValue();
                 ExactStoreSize = FixedStoreSize == static_cast<uint64_t>(Scale);
@@ -7261,6 +7431,11 @@ void Analyzer::recordDeoptBundleMappings(CallBase *CB) {
         }
 
         Constant *Default = Constant::getNullValue(VObj.ArrayElementType);
+        if (VObj.ArrayElementType->isPointerTy() &&
+            VObj.ArrayElementType->getPointerAddressSpace() ==
+                jeandle::AddrSpace::NarrowOopAddrSpace)
+          Default = ConstantPointerNull::get(PointerType::get(
+              F.getContext(), jeandle::AddrSpace::JavaHeapAddrSpace));
         for (uint32_t Index = 0; Index < VObj.ArrayLength; ++Index) {
           std::optional<int64_t> Offset = checkedArrayElementOffset(
               VObj.ArrayBaseOffset, Index, VObj.ArrayIndexScale);
@@ -7277,8 +7452,9 @@ void Analyzer::recordDeoptBundleMappings(CallBase *CB) {
           }
           jeandle::HotspotBasicType BasicType =
               jeandle::LLVM2JavaComputational(VObj.ArrayElementType);
-          if (BasicType == jeandle::T_ILLEGAL ||
-              BasicType == jeandle::T_NARROWOOP) {
+          if (BasicType == jeandle::T_NARROWOOP)
+            BasicType = jeandle::T_OBJECT;
+          if (BasicType == jeandle::T_ILLEGAL) {
             Node.Describable = false;
             break;
           }
@@ -8104,7 +8280,9 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
       const jeandle::FieldValue &FV = FSIt->second.lookup(Off);
       if (FV.isUnknown())
         continue;
-      E->FieldEntries.push_back({Off, FV});
+      const jeandle::VirtualObject::FieldDesc *FD = VObj.findField(Off);
+      assert(FD && "tracked field state must have a field descriptor");
+      E->FieldEntries.emplace_back(*FD, FV);
     }
   }
   // Capture the surviving unbalanced enters (sorted ascending by depth) into
@@ -10494,20 +10672,6 @@ PartialEscapeAnalysis::run(Function &F, FunctionAnalysisManager &FAM) {
   // (template module / runtime stubs are skipped).
   Module *M = F.getParent();
   if (!M || !M->getNamedMetadata(jeandle::Metadata::JavaMethodCompilation))
-    return jeandle::PEAResult();
-
-  // TODO(compressed-oop): PEA does not model narrow-oop (addrspace 3)
-  // reference fields yet — skip the whole analysis when the module's
-  // DataLayout describes a narrow-oop address space (the frontend appends
-  // p3:32:32:32 only when CompressedOops are configured; without a p3 spec
-  // getPointerSize(3) falls back to the default pointer size, equal to
-  // addrspace(1), and PEA runs normally). This is the load-bearing gate that
-  // keeps the DEFAULT VM configuration (compressed oops on) usable;
-  // getOrCreateFieldIndex separately bails per-access on non-addrspace(1)
-  // fields as defense in depth for hand-written / mixed IR.
-  const DataLayout &DL = M->getDataLayout();
-  if (DL.getPointerSize(jeandle::AddrSpace::NarrowOopAddrSpace) !=
-      DL.getPointerSize(jeandle::AddrSpace::JavaHeapAddrSpace))
     return jeandle::PEAResult();
 
   // Request DominatorTree and LoopInfo eagerly so they're cached for later

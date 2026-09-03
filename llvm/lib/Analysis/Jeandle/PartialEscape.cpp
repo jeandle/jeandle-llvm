@@ -81,17 +81,14 @@ int VirtualObject::getOrCreateFieldIndex(int64_t Offset, Type *Ty,
     // current 64-bit target, but derived from the DataLayout so a 32-bit or
     // compressed-oop heap model stays correct rather than hardcoding 8.
     //
-    // TODO(compressed-oop): narrow-oop (addrspace 3) reference fields are NOT
-    // supported — bail conservatively (-1) instead of asserting (debug) or
-    // modelling the slot at the wrong width (release: getPointerSize(1)=8
-    // where the real slot is 4 bytes -> corrupt field model). Callers treat
-    // -1 as keep-everything-real. PEA as a whole is also gated against
-    // narrow-oop modules in PartialEscapeAnalysis::run; this is the
-    // per-access defense for hand-written / mixed IR.
-    if (Ty->getPointerAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace)
+    // Reference fields may use the semantic Java heap pointer (AS1) or the
+    // physical narrow-oop pointer (AS3). Keep the descriptor's type so
+    // materialization can replay the value at its actual in-memory width.
+    unsigned PointerAS = Ty->getPointerAddressSpace();
+    if (PointerAS != jeandle::AddrSpace::JavaHeapAddrSpace &&
+        PointerAS != jeandle::AddrSpace::NarrowOopAddrSpace)
       return -1;
-    uint64_t PointerByteSize =
-        DL.getPointerSize(jeandle::AddrSpace::JavaHeapAddrSpace);
+    uint64_t PointerByteSize = DL.getPointerSize(PointerAS);
     if (PointerByteSize == 0 ||
         PointerByteSize > std::numeric_limits<uint8_t>::max())
       return -1;
@@ -149,6 +146,14 @@ int VirtualObject::getOrCreateFieldIndex(int64_t Offset, Type *Ty,
   FieldDesc New{Offset, Ty, ByteSize, IsReference};
   auto NewIt = Fields.insert(It, New);
   return static_cast<int>(NewIt - Fields.begin());
+}
+const VirtualObject::FieldDesc *VirtualObject::findField(int64_t Offset) const {
+  auto It = std::lower_bound(
+      Fields.begin(), Fields.end(), Offset,
+      [](const FieldDesc &F, int64_t Off) { return F.Offset < Off; });
+  if (It == Fields.end() || It->Offset != Offset)
+    return nullptr;
+  return &*It;
 }
 
 // Strip identity-preserving wrappers (freeze, bitcast, zext, sext) from an
@@ -386,9 +391,11 @@ FieldValue FieldValue::materializedRef(Value *Ptr) {
 Constant *FieldValue::defaultFor(Type *FieldType) {
   assert(FieldType);
   if (FieldType->isPointerTy()) {
-    assert(FieldType->getPointerAddressSpace() ==
-               jeandle::AddrSpace::JavaHeapAddrSpace &&
-           "reference default must be in JavaHeapAddrSpace");
+    assert((FieldType->getPointerAddressSpace() ==
+                jeandle::AddrSpace::JavaHeapAddrSpace ||
+            FieldType->getPointerAddressSpace() ==
+                jeandle::AddrSpace::NarrowOopAddrSpace) &&
+           "reference default must be a Java oop pointer");
     return ConstantPointerNull::get(cast<PointerType>(FieldType));
   }
   return Constant::getNullValue(FieldType);
@@ -408,10 +415,6 @@ bool FieldValue::shallowEquals(const FieldValue &O) const {
   }
   return false;
 }
-
-// ===========================================================================
-// ObjectState
-// ===========================================================================
 
 // ===========================================================================
 // PEABlockState
@@ -494,8 +497,12 @@ ObjectState &PEABlockState::getObjectStateForModification(ObjectID ID) {
 
 void AliasMap::addVirtualAlias(Value *V, ObjectID ID, bool IsWholeObject) {
   assert(V && ID != InvalidObjectID);
-  assert(!VirtualAliases.count(V) && "value already aliased");
-  VirtualAliases[V] = ID;
+  auto It = VirtualAliases.find(V);
+  if (It != VirtualAliases.end()) {
+    assert(It->second == ID && "value already aliased to a different object");
+  } else {
+    VirtualAliases[V] = ID;
+  }
   if (IsWholeObject)
     WholeObjectVirtualAliases.insert(V);
   for (User *U : V->users()) {
@@ -770,7 +777,7 @@ ObjectID PEAResult::createVirtualObject(std::unique_ptr<VirtualObject> VO) {
 
 void PEAResult::addBlockEffect(std::unique_ptr<Effect> E) {
   assert(E && E->hasValidMutationOwner() &&
-         "only an atomic deopt-pool effect may be ownerless");
+         "only deopt-pool or placement effects may be ownerless");
   assert(E->Block);
   BasicBlock *BB = E->Block;
   BlockEffects[BB].add(std::move(E));
@@ -824,6 +831,9 @@ void Effect::dump(raw_ostream &OS) const {
     break;
   case Kind::EliminateStore:
     OS << "EliminateStore";
+    break;
+  case Kind::PlaceInstruction:
+    OS << "PlaceInstruction";
     break;
   case Kind::EliminateAllocation:
     OS << "EliminateAllocation";

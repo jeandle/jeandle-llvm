@@ -11,12 +11,11 @@
 ; LocationValue(Location::oop).
 ;
 ; planFields records a Scalar cell for a wide-oop (addrspace 1) field value
-; that is not a non-null constant; narrow-oop (addrspace 3) and non-null
-; constant oop fields still bail (CompressedOops deferred;
-; fill_one_scope_value ShouldNotReachHere on constant oops). Regression
-; guard: bailing a reference-typed field whose value does not resolve to a
-; virtual VO (ref-to-non-VO -> Cell::Bad) would make %obj wholly
-; undescribable and force it to materialize at the safepoint.
+; that is not a non-null constant. Compressed narrow-oop fields are normalized
+; to the same semantic oop cell and are covered by the narrow-reference
+; fixtures. Regression guard: bailing a reference-typed field whose value does
+; not resolve to a virtual VO (ref-to-non-VO -> Cell::Bad) would make %obj
+; wholly undescribable and force it to materialize at the safepoint.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32)
