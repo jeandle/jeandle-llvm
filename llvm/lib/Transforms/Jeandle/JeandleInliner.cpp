@@ -25,7 +25,9 @@
 //      site has the llvm::jeandle::Attribute::MonomorphicTarget attribute.
 //      In accessor-only mode, the callee must also have the
 //      llvm::jeandle::Attribute::JavaAccessorMethod function attribute.
-//   2. For each call site, ask VMCallbacks::IsOkToInline whether to inline.
+//   2. For each call site, ask VMCallbacks::GetInlineDecision whether to
+//      inline now, mark it for a later round, reject it, or report that the
+//      node-count cutoff was reached.
 //   3. If the callee is a declaration, call VMCallbacks::GetInlineCalleeIR to
 //      obtain its IR definition.
 //   4. Inline the call site using InlineFunction.
@@ -60,7 +62,6 @@
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/InlineCost.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
-#include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/GlobalObject.h"
@@ -126,12 +127,32 @@ static PreservedAnalyses getInlineRoundPreservedAnalyses(bool Changed) {
   return PA;
 }
 
-static InlineRoundResult makeInlineRoundResult(bool Changed,
-                                               bool ExposedNewCallSites) {
+static InlineRoundResult
+makeInlineRoundResult(bool Changed, bool ExposedNewCallSites,
+                      bool HasLateInlineCandidates = false,
+                      bool HitNodeCountCutoff = false) {
   InlineRoundResult Result;
   Result.PA = getInlineRoundPreservedAnalyses(Changed);
   Result.ExposedNewCallSites = ExposedNewCallSites;
+  Result.HasLateInlineCandidates = HasLateInlineCandidates;
+  Result.HitNodeCountCutoff = HitNodeCountCutoff;
   return Result;
+}
+
+static bool hasLateInlineMarker(const CallBase &CB) {
+  return CB.getMetadata(jeandle::Metadata::LateInline) != nullptr;
+}
+
+static void setLateInlineMarker(CallBase &CB, bool Marked) {
+  CB.setMetadata(jeandle::Metadata::LateInline,
+                 Marked ? MDNode::get(CB.getContext(), {}) : nullptr);
+}
+
+static void clearLateInlineMarkers(Function &F) {
+  for (Instruction &I : instructions(F)) {
+    if (auto *CB = dyn_cast<CallBase>(&I))
+      setLateInlineMarker(*CB, false);
+  }
 }
 
 static void setInlineScopeID(CallBase &CB, int InlineScopeID) {
@@ -332,7 +353,7 @@ static void recordInlineResult(const jeandle::VMCallbacks &VC,
 
 InlineRoundResult JeandleInliner::runInlineRound(
     Module &M, ModuleAnalysisManager &MAM,
-    SmallVectorImpl<JeandleInlineScope> &InlineScopes) {
+    SmallVectorImpl<JeandleInlineScope> &InlineScopes, bool InLateInlinePhase) {
   if (!M.getNamedMetadata(jeandle::Metadata::JavaMethodCompilation)) {
     return makeInlineRoundResult(/*Changed=*/false,
                                  /*ExposedNewCallSites=*/false);
@@ -344,9 +365,9 @@ InlineRoundResult JeandleInliner::runInlineRound(
     return makeInlineRoundResult(/*Changed=*/false,
                                  /*ExposedNewCallSites=*/false);
   }
-  if (!VC->IsOkToInline) {
+  if (!VC->GetInlineDecision) {
     LLVM_DEBUG(
-        dbgs() << "JeandleInliner: no IsOkToInline callback, skipping\n");
+        dbgs() << "JeandleInliner: no GetInlineDecision callback, skipping\n");
     return makeInlineRoundResult(/*Changed=*/false,
                                  /*ExposedNewCallSites=*/false);
   }
@@ -371,7 +392,6 @@ InlineRoundResult JeandleInliner::runInlineRound(
 
   FunctionAnalysisManager &FAM =
       MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
-  auto &PSI = MAM.getResult<ProfileSummaryAnalysis>(M);
 
   auto GetAAR = [&](Function &F) -> AAResults & {
     return FAM.getResult<AAManager>(F);
@@ -380,18 +400,31 @@ InlineRoundResult JeandleInliner::runInlineRound(
     return FAM.getResult<AssumptionAnalysis>(F);
   };
 
+  SmallVector<std::pair<CallBase *, int>, 16> RootCallSites;
   SmallVector<std::pair<CallBase *, int>, 16> Worklist;
+  // Snapshot every CallBase currently in the root function. After each
+  // successful inline, pointer-set differencing identifies calls cloned from
+  // the callee.
   SmallPtrSet<const CallBase *, 32> KnownCallSites;
   Function *RootFunction = getRootJavaMethodFunction(M);
   if (!RootFunction)
     return makeInlineRoundResult(/*Changed=*/false,
                                  /*ExposedNewCallSites=*/false);
 
+  bool HasLateInlineCandidates = false;
+
   for (Instruction &I : instructions(RootFunction)) {
     auto *CB = dyn_cast<CallBase>(&I);
     if (!CB)
       continue;
     KnownCallSites.insert(CB);
+
+    bool IsLateInline = hasLateInlineMarker(*CB);
+    if (IsLateInline && !InLateInlinePhase) {
+      HasLateInlineCandidates = true;
+      continue;
+    }
+
     Function *Callee = CB->getCalledFunction();
     if (!Callee || !isEligibleInlineCallee(*Callee, InlineAccessorsOnly))
       continue;
@@ -399,22 +432,46 @@ InlineRoundResult JeandleInliner::runInlineRound(
       continue;
     if (CB->isNoInline())
       continue;
-    Worklist.push_back({CB, getInlineScopeID(*CB)});
+    RootCallSites.push_back({CB, getInlineScopeID(*CB)});
   }
+
+  // Worklist is consumed from the back. RootCallSites records the desired
+  // processing order in root IR order. Reverse it when initializing the LIFO
+  // worklist so pop_back_val() observes that order while newly exposed children
+  // can still be pushed above unprocessed siblings.
+  for (auto It = RootCallSites.rbegin(), E = RootCallSites.rend(); It != E;
+       ++It)
+    Worklist.push_back(*It);
 
   uint64_t ThreadID = llvm::get_threadid();
   logPassBoundary("begin", *RootFunction, ThreadID);
 
   bool Changed = false;
   bool ExposedNewCallSites = false;
+  bool HitNodeCountCutoff = false;
 
-  for (unsigned I = 0; I < Worklist.size(); ++I) {
-    CallBase *CB = Worklist[I].first;
-    int InlineScopeID = Worklist[I].second;
+  auto MarkNoInline = [&](CallBase &CB) {
+    if (CB.isNoInline())
+      return;
+    CB.setIsNoInline();
+    Changed = true;
+  };
+
+  // A late marker is sticky. If LLVM cannot complete an InlineNow decision,
+  // make the surviving call terminal so a later round cannot retry forever.
+  auto PreventLateInlineRetry = [&](CallBase &CB, bool IsLateInline) {
+    if (!IsLateInline)
+      return;
+    MarkNoInline(CB);
+  };
+
+  while (!Worklist.empty()) {
+    auto [CB, InlineScopeID] = Worklist.pop_back_val();
 
     if (!CB || !CB->getCaller())
       continue;
 
+    bool IsLateInline = hasLateInlineMarker(*CB);
     Function *Caller = CB->getCaller();
     Function *Callee = CB->getCalledFunction();
 
@@ -437,19 +494,44 @@ InlineRoundResult JeandleInliner::runInlineRound(
     // caller's landingpad. Mark root callees noinline so later LLVM inline
     // passes cannot inline them either.
     if (CalleeMethod == getJavaMethodPointer(*RootFunction)) {
-      CB->setIsNoInline();
+      MarkNoInline(*CB);
       recordInlineResult(*VC, InlineScopeID, BCI, CalleeMethod,
                          jeandle::JeandleInlineReason::RootCalleeUnsupported);
       continue;
     }
 
-    bool IsOkToInline = VC->IsOkToInline(InlineScopeID, BCI, CalleeMethod);
-
-    if (!IsOkToInline) {
+    int RawDecision =
+        VC->GetInlineDecision(InlineScopeID, BCI, CalleeMethod, IsLateInline);
+    auto Decision = static_cast<jeandle::JeandleInlineDecision>(RawDecision);
+    if (Decision == jeandle::JeandleInlineDecision::HitNodeCountCutoff) {
+      logInlineEvent("node-count-cutoff", ScopeCaller, BCI, Callee,
+                     InlineScopeID, ThreadID, InlineScopes);
+      HitNodeCountCutoff = true;
+      if (InLateInlinePhase) {
+        HasLateInlineCandidates = false;
+      }
+      break;
+    }
+    if (Decision == jeandle::JeandleInlineDecision::Deny) {
+      if (IsLateInline)
+        MarkNoInline(*CB);
       logInlineEvent("no-inline", ScopeCaller, BCI, Callee, InlineScopeID,
                      ThreadID, InlineScopes);
       continue;
     }
+    if (Decision == jeandle::JeandleInlineDecision::InlineLater) {
+      assert(!IsLateInline && "VM delayed a late-inline candidate again");
+      // Do not reinsert this call into the current worklist. Its marker is
+      // discovered only by the next round, after runPreLateInlinePasses has
+      // run.
+      setLateInlineMarker(*CB, true);
+      HasLateInlineCandidates = true;
+      logInlineEvent("late-inline", ScopeCaller, BCI, Callee, InlineScopeID,
+                     ThreadID, InlineScopes);
+      continue;
+    }
+    assert(Decision == jeandle::JeandleInlineDecision::InlineNow &&
+           "invalid inline decision");
 
     if (Callee->isDeclaration()) {
       logInlineEvent("request-ir", ScopeCaller, BCI, Callee, InlineScopeID,
@@ -458,6 +540,7 @@ InlineRoundResult JeandleInliner::runInlineRound(
       if (!GotCalleeIR) {
         logInlineEvent("missing-ir", ScopeCaller, BCI, Callee, InlineScopeID,
                        ThreadID, InlineScopes);
+        PreventLateInlineRetry(*CB, IsLateInline);
         recordInlineResult(
             *VC, InlineScopeID, BCI, CalleeMethod,
             jeandle::JeandleInlineReason::GetInlineCalleeIRFailed);
@@ -467,6 +550,7 @@ InlineRoundResult JeandleInliner::runInlineRound(
       if (Callee->isDeclaration()) {
         logInlineEvent("missing-def", ScopeCaller, BCI, Callee, InlineScopeID,
                        ThreadID, InlineScopes);
+        PreventLateInlineRetry(*CB, IsLateInline);
         recordInlineResult(
             *VC, InlineScopeID, BCI, CalleeMethod,
             jeandle::JeandleInlineReason::MissingInlineCalleeDefinition);
@@ -482,14 +566,20 @@ InlineRoundResult JeandleInliner::runInlineRound(
                         << ScopeCaller->getName() << " @" << BCI << " -> "
                         << Callee->getName() << ": "
                         << inlineResult.getFailureReason() << "\n");
+      PreventLateInlineRetry(*CB, IsLateInline);
       recordInlineResult(*VC, InlineScopeID, BCI, CalleeMethod,
                          jeandle::JeandleInlineReason::NotInlineViable);
       continue;
     }
 
-    InlineFunctionInfo IFI(GetAssumptionCache, &PSI,
-                           &FAM.getResult<BlockFrequencyAnalysis>(*Caller),
-                           &FAM.getResult<BlockFrequencyAnalysis>(*Callee));
+    // Jeandle's inline policy consumes JVM profile through VM callbacks, while
+    // imported inlinees have no LLVM function entry counts. Branch/switch
+    // profile metadata is cloned with the IR, and caller analyses are
+    // invalidated after each inline, so profile redistribution and BFI
+    // maintenance are unnecessary here.
+    InlineFunctionInfo IFI(GetAssumptionCache, /*PSI=*/nullptr,
+                           /*CallerBFI=*/nullptr, /*CalleeBFI=*/nullptr,
+                           /*UpdateProfile=*/false);
 
     InlineResult IR = InlineFunction(*CB, IFI, /*MergeAttributes=*/true,
                                      &GetAAR(*Caller), /*InsertLifetime=*/true);
@@ -500,6 +590,7 @@ InlineRoundResult JeandleInliner::runInlineRound(
                         << ScopeCaller->getName() << " @" << BCI << " -> "
                         << Callee->getName() << ": " << IR.getFailureReason()
                         << "\n");
+      PreventLateInlineRetry(*CB, IsLateInline);
       recordInlineResult(*VC, InlineScopeID, BCI, CalleeMethod,
                          jeandle::JeandleInlineReason::LLVMInlineFailed);
       continue;
@@ -556,8 +647,12 @@ InlineRoundResult JeandleInliner::runInlineRound(
         continue;
       NewCallSites.push_back(NewCB);
     }
+    // Replace the snapshot after every inline. Calls exposed by this inline are
+    // new now, but must be considered known when a later inline in this round
+    // performs the same comparison.
     KnownCallSites = std::move(CurrentCallSites);
 
+    SmallVector<std::pair<CallBase *, int>, 8> NewWorkItems;
     for (CallBase *NewCB : NewCallSites) {
       // Statepoint ids in callee IR belong to the original template call sites.
       // Every inlined copy must get a fresh JVM-side id so updating its
@@ -565,6 +660,10 @@ InlineRoundResult JeandleInliner::runInlineRound(
       ensureUniqueStatepointID(*NewCB, *VC);
       setInlineScopeID(*NewCB, NewScopeID);
       ExposedNewCallSites = true;
+
+      // InlineFunction copies the marker from a delayed call in the inlinee.
+      // Keep it: pre-late passes have already run before this late round, so
+      // the cloned call retains the same late-inline policy.
 
       Function *NewCallee = NewCB->getCalledFunction();
       // TODO: Support inlining the root method as a callee once root/caller IR
@@ -582,17 +681,63 @@ InlineRoundResult JeandleInliner::runInlineRound(
           !isEligibleInlineCallee(*NewCallee, InlineAccessorsOnly) ||
           !isMonomorphicTargetCall(*NewCB) || NewCB->isNoInline())
         continue;
-      Worklist.push_back({NewCB, NewScopeID});
+      NewWorkItems.push_back({NewCB, NewScopeID});
     }
+
+    // Push children in reverse IR order. They sit above every unprocessed
+    // sibling already in the LIFO worklist, so the next pop descends into the
+    // just-inlined scope while preserving IR order among its children. The same
+    // rule applies in eager and late rounds.
+    for (auto It = NewWorkItems.rbegin(), E = NewWorkItems.rend(); It != E;
+         ++It)
+      Worklist.push_back(*It);
   }
 
   logPassBoundary("end", *RootFunction, ThreadID);
-  return makeInlineRoundResult(Changed, ExposedNewCallSites);
+  return makeInlineRoundResult(Changed, ExposedNewCallSites,
+                               HasLateInlineCandidates, HitNodeCountCutoff);
 }
 
 PreservedAnalyses JeandleInliner::run(Module &M, ModuleAnalysisManager &MAM) {
   SmallVector<JeandleInlineScope, 16> InlineScopes;
-  return runInlineRound(M, MAM, InlineScopes).PA;
+  PreservedAnalyses PA = PreservedAnalyses::all();
+  bool InLateInlinePhase = false;
+  bool UsedLateInlineScheduling = false;
+
+  // Keep the standalone pass consistent with JeandleInlineDriver: eager
+  // inlining reaches a fixed point first, then a single one-way transition
+  // enters the late phase. Once there, every later round keeps the global late
+  // scheduling phase. Individual calls still enter the VM's late policy only
+  // after their marker survives one pre-late boundary.
+  for (;;) {
+    InlineRoundResult Result =
+        runInlineRound(M, MAM, InlineScopes, InLateInlinePhase);
+    PA.intersect(std::move(Result.PA));
+
+    if (Result.HitNodeCountCutoff) {
+      if (InLateInlinePhase || !Result.HasLateInlineCandidates)
+        break;
+      InLateInlinePhase = true;
+      UsedLateInlineScheduling = true;
+      continue;
+    }
+
+    if (Result.ExposedNewCallSites)
+      continue;
+    if (!Result.HasLateInlineCandidates)
+      break;
+
+    // This is the standalone entry point's only phase transition. Subsequent
+    // iterations leave InLateInlinePhase set even when a round exposes normal
+    // monomorphic calls rather than another explicitly delayed candidate.
+    InLateInlinePhase = true;
+    UsedLateInlineScheduling = true;
+  }
+  if (UsedLateInlineScheduling) {
+    if (Function *RootFunction = getRootJavaMethodFunction(M))
+      clearLateInlineMarkers(*RootFunction);
+  }
+  return PA;
 }
 
 /* ------------- Inline callee replay support begin ------------- */
