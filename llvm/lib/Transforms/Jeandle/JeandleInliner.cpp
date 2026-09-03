@@ -572,6 +572,11 @@ InlineRoundResult JeandleInliner::runInlineRound(
       continue;
     }
 
+    // Jeandle's inline policy consumes JVM profile through VM callbacks, while
+    // imported inlinees have no LLVM function entry counts. Branch/switch
+    // profile metadata is cloned with the IR, and caller analyses are
+    // invalidated after each inline, so profile redistribution and BFI
+    // maintenance are unnecessary here.
     InlineFunctionInfo IFI(GetAssumptionCache, /*PSI=*/nullptr,
                            /*CallerBFI=*/nullptr, /*CalleeBFI=*/nullptr,
                            /*UpdateProfile=*/false);
