@@ -5988,8 +5988,10 @@ bool Analyzer::processStore(StoreInst *SI) {
 //     slot still folds to the default.
 //   - A Scalar entry folds through coerceToType (same-type passthrough or
 //     same-bit-width bitcast; anything else materializes the base).
-//   - A VirtualRef entry forwards the load to the inner virtual's allocation
-//     and installs a virtual alias, or — if the inner already materialized
+//   - A VirtualRef entry forwards the load to the inner virtual's real
+//     identity (AllocationCall for an ordinary VO, SyntheticPhi for a
+//     synthetic VO) and installs a virtual alias, or — if the inner already
+//     materialized
 //     — forwards to the materialized pointer with a scalar alias.
 //   - A MaterializedRef entry forwards the load to the materialized value.
 void Analyzer::processLoad(LoadInst *LI) {
@@ -6205,7 +6207,7 @@ void Analyzer::processLoad(LoadInst *LI) {
   if (Existing->isVirtualRef()) {
     // Nested-virtual load: loading a field whose tracked value is another
     // virtual yields that other virtual (still virtual!) and forwards the
-    // load to it. Forward the load to the inner virtual's allocation
+    // load to it. Forward the load to the inner virtual's real identity
     // Value and install a virtual alias from the load to
     // InnerID so downstream access handlers (foldArrayLength, foldLoadKlass,
     // etc.) and the generic escape detection see %loaded as a reference to the
@@ -6213,12 +6215,12 @@ void Analyzer::processLoad(LoadInst *LI) {
     // analyzer's existing nested-virtual machinery (a) rewrites every
     // other tracking site (FieldStates, alias map) to the materialized
     // pointer, and (b) at transform time, applyMaterialize records
-    // OrigAlloc (reused) as the materialized value; the field-replay value
-    // is OrigAlloc (applyMaterialize records it in MaterializedReceiverOf for a
-    // sibling lock replay — see the materialization model in
+    // the corresponding real identity as the materialized value; the
+    // field-replay value is recorded in MaterializedReceiverOf for a sibling
+    // lock replay — see the materialization model in
     // PartialEscapeTransform.cpp).
     // (Belt-and-suspenders: the ReplaceLoad handler also resolves
-    // E.Replacement through OrigAlloc directly.)
+    // E.Replacement through the corresponding real identity.)
     jeandle::ObjectID InnerID = Existing->getVirtualRef();
 
     if (!Eligible.lookup(InnerID)) {
@@ -6250,24 +6252,25 @@ void Analyzer::processLoad(LoadInst *LI) {
       // pointer — same shape as the MaterializedRef branch below.
       Repl = InnerOS->getMaterializedValue();
     } else {
-      jeandle::VirtualObject &InnerVO = *Result.VirtualObjects[InnerID];
-      Repl = InnerVO.AllocationCall;
+      Repl = realIdentityOf(InnerID);
     }
     // The fallback must yield a value that exists in IR. Keep the outer object
     // real if the ObjectState invariant is violated.
     if (!Repl ||
-        (isa<Instruction>(Repl) && !cast<Instruction>(Repl)->getParent())) {
+        (isa<Instruction>(Repl) && !cast<Instruction>(Repl)->getParent()) ||
+        (Result.VirtualObjects[InnerID]->IsSynthetic &&
+         !isValueAvailableAt(Repl, LI))) {
       markIneligible(*BaseID);
       return;
     }
 
-    // Type-compatibility. For ordinary reference loads, both LoadTy and the
-    // inner allocation are `ptr addrspace(1)` and coerceToType returns Repl
-    // unchanged. Cross-address-space or ptr↔primitive mismatch materializes
-    // the outer at the load (stable-slot-kind invariant). (Sub-slot pointer
-    // loads were already rejected by the WithinSlotByteOff bail above.) We
-    // don't poison InnerID because other paths may still be able to
-    // virtualize it.
+    // Type-compatibility. For ordinary reference loads, LoadTy and the
+    // inner identity are normally `ptr addrspace(1)` and coerceToType returns
+    // Repl unchanged. Cross-address-space or ptr↔primitive mismatch
+    // materializes the outer at the load (stable-slot-kind invariant).
+    // (Sub-slot pointer loads were already rejected by the WithinSlotByteOff
+    // bail above.) We don't poison InnerID because other paths may still be
+    // able to virtualize it.
     Value *Coerced = coerceToType(Repl, LoadTy, LI);
     if (!Coerced) {
       materializeAt(*BaseID, LI, MatReason::Unhandled);
