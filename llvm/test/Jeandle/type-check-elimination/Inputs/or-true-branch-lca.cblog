@@ -1,0 +1,16 @@
+# 5 = Animal; 22 = Dog (subtype of 5); 9 = Cat (subtype of 5). LCA(22, 9) = 5.
+# The guard checks at their own sites see only the unknown base; the query at
+# the merge folds to true.
+IsObjectKlass 22 = false
+IsObjectKlass 9 = false
+IsObjectKlass 5 = false
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+IsInterface 9 = false
+GetSecondarySupers 9 = []
+IsEffectivelyFinal 22 = false
+IsEffectivelyFinal 9 = false
+GetCommonSuperKlass 22 9 = 5
+GetCommonSuperKlass 9 22 = 5
+IsSubtype 5 5 = true
+IsSubtype 9 22 = false

@@ -6588,7 +6588,9 @@ bool Analyzer::foldArrayStoreCheck(CallBase *CB) {
     ValueKlass = Result.VirtualObjects[*ValueID]->Klass;
   } else {
     // Fall back to attribute / metadata sharpening for non-virtual values.
-    jeandle::JavaType JT = jeandle::getJavaType(Val);
+    // Context-insensitive query: no dominator tree and no context, so the
+    // edge-semantics engine does not run and the oracle is unused.
+    jeandle::JavaType JT = jeandle::getJavaType(Val, nullptr, nullptr, nullptr);
     ValueKlass = JT.Klass;
   }
 

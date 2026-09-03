@@ -9,6 +9,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/ArrayCopySpecialization.h"
+#include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
@@ -20,6 +21,7 @@
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMConstants.h"
 #include "llvm/IR/MDBuilder.h"
+#include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 
 #include <cassert>
 
@@ -188,7 +190,8 @@ Value *arrayElementAddress(IRBuilder<> &B, Value *Ary, Value *Idx,
 // Jeandle counterpart of C2 ArrayCopyNode::prepare_array_copy.
 bool prepareArrayCopy(CallBase &CI, DominatorTree &DT, IRBuilder<> &B,
                       Value *&AdrSrc, Value *&AdrDest,
-                      jeandle::JBasicType &CopyType, bool &DisjointBases) {
+                      jeandle::JBasicType &CopyType, bool &DisjointBases,
+                      jeandle::IsNullEdgeOracle IsNullEdge) {
   AdrSrc = nullptr;
   AdrDest = nullptr;
   CopyType = jeandle::JBasicType::Count;
@@ -196,13 +199,15 @@ bool prepareArrayCopy(CallBase &CI, DominatorTree &DT, IRBuilder<> &B,
 
   Value *BaseSrc = CI.getArgOperand(0);
   Value *SrcOffset = CI.getArgOperand(1);
-  const jeandle::JavaType SrcType = jeandle::getJavaType(BaseSrc, &DT, &CI);
+  const jeandle::JavaType SrcType =
+      jeandle::getJavaType(BaseSrc, &DT, &CI, IsNullEdge);
   jeandle::JBasicType SrcElem = getArrayElementBasicType(SrcType.Klass);
   Value *BaseDest = CI.getArgOperand(2);
   Value *DestOffset = CI.getArgOperand(3);
 
   if (isArrayCopy(CI)) {
-    const jeandle::JavaType DestType = jeandle::getJavaType(BaseDest, &DT, &CI);
+    const jeandle::JavaType DestType =
+        jeandle::getJavaType(BaseDest, &DT, &CI, IsNullEdge);
     jeandle::JBasicType DestElem = getArrayElementBasicType(DestType.Klass);
 
     // TODO: Match C2 is_alloc_tightly_coupled(). Jeandle does not carry that
@@ -352,8 +357,14 @@ BasicBlock *genSubtypeCheck(IRBuilder<> &B, Module &M, BasicBlock *&ControlBB,
 }
 
 // Jeandle equivalent of C2 ArrayCopyNode::Ideal().
-bool arrayCopyIdeal(CallBase &CI, DominatorTree &DT) {
+bool arrayCopyIdeal(CallBase &CI, DominatorTree &DT,
+                    jeandle::IsNullEdgeOracle IsNullEdge) {
   assert(isArrayCopyPseudoCall(CI) && "should be an arraycopy");
+  // The ideal path rewrites the invoke's exceptional edges; a call-form
+  // pseudo site has none, so fall back to the generic expansion instead of
+  // casting.
+  if (!isa<InvokeInst>(CI))
+    return false;
 
   // See if it's a small array copy and we can inline it as
   // loads/stores
@@ -379,7 +390,8 @@ bool arrayCopyIdeal(CallBase &CI, DominatorTree &DT) {
   Value *AdrDest = nullptr;
   jeandle::JBasicType CopyType = jeandle::JBasicType::Count;
   bool DisjointBases = false;
-  if (!prepareArrayCopy(CI, DT, B, AdrSrc, AdrDest, CopyType, DisjointBases)) {
+  if (!prepareArrayCopy(CI, DT, B, AdrSrc, AdrDest, CopyType, DisjointBases,
+                        IsNullEdge)) {
     assert(AdrSrc == nullptr && "no address can be left behind");
     assert(AdrDest == nullptr && "no address can be left behind");
     return false;
@@ -1139,7 +1151,8 @@ bool generateArrayCopy(CallBase &CI, BasicBlock *&ControlBB,
 // Expand one jeandle.arraycopy pseudo call. This is the Jeandle equivalent of
 // C2 PhaseMacroExpand::expand_arraycopy_node(ArrayCopyNode *ac)
 bool expandArrayCopyNode(CallBase &CI, DominatorTree &DT,
-                         TargetTransformInfo &TTI) {
+                         TargetTransformInfo &TTI,
+                         jeandle::IsNullEdgeOracle IsNullEdge) {
   assert(isArrayCopyPseudoCall(CI) && "should be an arraycopy");
 
   Value *Src = CI.getArgOperand(0);
@@ -1167,8 +1180,10 @@ bool expandArrayCopyNode(CallBase &CI, DominatorTree &DT,
   // remain as it is.  The checks we choose to mandate at compile time are:
   //
   // (1) src and dest are arrays.
-  const jeandle::JavaType SrcType = jeandle::getJavaType(Src, &DT, &CI);
-  const jeandle::JavaType DestType = jeandle::getJavaType(Dest, &DT, &CI);
+  const jeandle::JavaType SrcType =
+      jeandle::getJavaType(Src, &DT, &CI, IsNullEdge);
+  const jeandle::JavaType DestType =
+      jeandle::getJavaType(Dest, &DT, &CI, IsNullEdge);
 
   jeandle::JBasicType SrcElem = getArrayElementBasicType(SrcType.Klass);
   jeandle::JBasicType DestElem = getArrayElementBasicType(DestType.Klass);
@@ -1276,20 +1291,29 @@ PreservedAnalyses ArrayCopySpecialization::run(Function &F,
 
   DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
   TargetTransformInfo &TTI = FAM.getResult<TargetIRAnalysis>(F);
+  // The null-edge oracle needs LazyValueInfo, whose cached per-block lattice
+  // goes stale when a site rewrite rewrites the CFG. Queries for a site run
+  // before its rewrite, and every successful rewrite clears the cache (and
+  // recalculates the dominator tree), so each query sees state consistent
+  // with the current CFG.
+  LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
+  LVINullEdgeOracle IsNullEdge{LVI};
   bool Changed = false;
   for (CallBase *CB : PseudoCalls) {
     if (CB->getParent() == nullptr)
       continue;
 
     bool CallChanged = false;
-    if (arrayCopyIdeal(*CB, DT))
+    if (arrayCopyIdeal(*CB, DT, IsNullEdge))
       CallChanged = true;
     else
-      CallChanged |= expandArrayCopyNode(*CB, DT, TTI);
+      CallChanged |= expandArrayCopyNode(*CB, DT, TTI, IsNullEdge);
 
     Changed |= CallChanged;
-    if (CallChanged)
+    if (CallChanged) {
       DT.recalculate(F);
+      LVI.clear();
+    }
   }
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

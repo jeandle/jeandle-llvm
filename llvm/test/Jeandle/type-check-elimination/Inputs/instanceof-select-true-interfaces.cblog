@@ -1,0 +1,19 @@
+# Klass 1 is the declared type of %obj (Object-like). Klass 22 is a class
+# implementing interface 33; it is not itself a subtype of 33 as a klass, and
+# neither klass is final. Extra keys keep the pre-fix (RED) run failing on
+# CHECK lines instead of a missing callback key.
+IsObjectKlass 22 = false
+IsObjectKlass 33 = false
+IsInterface 1 = false
+GetSecondarySupers 1 = []
+IsInterface 22 = false
+GetSecondarySupers 22 = [33]
+GetSecondarySupers 33 = []
+IsEffectivelyFinal 22 = false
+IsSubtype 22 1 = true
+IsSubtype 1 22 = false
+IsSubtype 22 22 = true
+IsSubtype 22 33 = false
+IsSubtype 33 22 = false
+IsInterface 33 = true
+GetCommonSuperKlass 22 22 = 22

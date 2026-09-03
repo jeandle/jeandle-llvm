@@ -1,0 +1,11 @@
+# Klass 1 is the declared type of %obj; 22 is a subtype of 1. f1's header query
+# folds from the entering edge; f2's queries stay (latch-only proof).
+IsObjectKlass 22 = false
+IsInterface 1 = false
+GetSecondarySupers 1 = []
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+IsEffectivelyFinal 22 = false
+IsSubtype 22 1 = true
+IsSubtype 1 22 = false
+IsSubtype 22 22 = true

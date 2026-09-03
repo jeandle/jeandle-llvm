@@ -1,0 +1,11 @@
+# Same klass scheme as merge-direct-use; arm checks above the inner merge are
+# preserved, everything at or below M1 folds.
+IsObjectKlass 22 = false
+IsInterface 1 = false
+GetSecondarySupers 1 = []
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+IsEffectivelyFinal 22 = false
+IsSubtype 22 1 = true
+IsSubtype 1 22 = false
+IsSubtype 22 22 = true

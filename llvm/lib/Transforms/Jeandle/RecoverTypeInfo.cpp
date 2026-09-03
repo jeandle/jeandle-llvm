@@ -28,9 +28,10 @@
 //     already-recovered loads — this resolves arbitrary load chains and
 //     loop-carried self-referential PHIs; and
 //   * a context-sensitive getJavaType query on the base at the load's
-//     position, which additionally exploits sharpening from dominating
-//     jeandle.check_instanceof checks. The pass mutates no IR until the emit
-//     phase, so this query is constant and is computed once per load.
+//     position, which additionally exploits sharpening from jeandle
+//     .check_instanceof edge guards (see JavaType.cpp's edge-semantics
+//     engine). The pass mutates no IR until the emit phase, so this query is
+//     constant and is computed once per load.
 //
 // See the header for the high-level guarantees; the invariants that make the
 // fixpoint converge are documented inline below.
@@ -43,6 +44,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
@@ -60,6 +62,7 @@
 #include "llvm/IR/Operator.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 
 #include <climits>
 #include <optional>
@@ -193,6 +196,10 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
 
   // Used by the context-sensitive base-type queries below.
   DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+  // One LVI snapshot is valid for the whole pass: RecoverTypeInfo mutates no
+  // IR until the metadata-only emit phase, and metadata is invisible to LVI.
+  LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
+  LVINullEdgeOracle IsNullEdge{LVI};
 
   // ---------------------------------------------------------------------------
   // Memoized VM queries. Each distinct (klass, offset) / klass / klass-pair is
@@ -490,15 +497,15 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
     if (It != CtxCache.end())
       return It->second;
     jeandle::JavaType T =
-        jeandle::getJavaType(LoadInfos[LI].QueryBase, &DT, LI);
+        jeandle::getJavaType(LoadInfos[LI].QueryBase, &DT, LI, IsNullEdge);
     return CtxCache.insert({LI, T}).first->second;
   };
 
-  // Per-incoming edge sharpening for PHIs: the constraints that dominating
-  // jeandle.check_instanceof checks imply for the incoming value flowing
-  // along the edge (incoming block -> PHI's block). This is the part a
+  // Per-incoming edge sharpening for PHIs: the constraints that CFG edge
+  // guards imply for the incoming value flowing along the edge (incoming
+  // block -> PHI's block). This is the part a
   // whole-PHI context query cannot provide when any incoming's base type is
-  // not yet visible (getPhiJavaType bails on an unknown incoming): edge facts
+  // not yet visible (phiValueType bails on an unknown incoming): edge facts
   // depend only on the CFG and branch conditions, never on metadata, so they
   // are constant during the pass and can be intersected with the lattice's
   // evolving per-incoming states. Keyed by (PHINode*, incoming index) because
@@ -509,9 +516,9 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
     auto It = EdgeSharpenCache.find(Key);
     if (It != EdgeSharpenCache.end())
       return It->second;
-    jeandle::JavaType S = jeandle::sharpenFromDominators(
+    jeandle::JavaType S = jeandle::sharpen(
         PN->getIncomingValue(Idx), PN->getIncomingBlock(Idx)->getTerminator(),
-        DT, PN->getParent());
+        DT, PN->getParent(), IsNullEdge);
     return EdgeSharpenCache.insert({Key, S}).first->second;
   };
 

@@ -9,7 +9,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/IR/Jeandle/JavaType.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -18,6 +22,7 @@
 #include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include <cstdint>
 
@@ -25,6 +30,9 @@
 
 using namespace llvm;
 using namespace llvm::jeandle;
+
+STATISTIC(NumJavaTypeBudgetExhausted,
+          "Number of edge-facts queries that hit the per-query join budget");
 
 // =============================================================================
 // Helpers
@@ -380,9 +388,35 @@ JavaType jeandle::typeIntersect(JavaType A, JavaType B) {
 // Context-insensitive type query
 // =============================================================================
 
+/// Memo of complete base-type computations, keyed by value alone: a base
+/// type is a pure function of the value (attributes, metadata, constant oop
+/// identity, PHI/select structure), never of the query point. Entries are
+/// written only for computations that never hit a PHI cycle — a cycle-hit
+/// result depends on where the recursion was cut and must not be reused.
+/// Cycle-aware memoization keeps shared PHI sub-DAGs linear: without it, a
+/// chain of PHIs whose arms share children costs 2^depth.
+using BaseMemo = DenseMap<Value *, JavaType>;
+
+/// Join one more arm into an accumulator where the first arm seeds it:
+/// typeUnion treats unknown as absorbing (typeUnion({}, X) == {}), so the
+/// first arm must seed the accumulator rather than union into an empty one.
+static void joinArm(JavaType &Acc, bool &First, JavaType Arm) {
+  if (First) {
+    Acc = std::move(Arm);
+    First = false;
+  } else {
+    Acc = typeUnion(Acc, Arm);
+  }
+}
+
 // No exclusions during context-insensitive type query.
-static JavaType getBaseJavaType(Value *V,
-                                SmallPtrSetImpl<const PHINode *> &Visited) {
+static JavaType getBaseJavaTypeRaw(Value *V,
+                                   SmallPtrSetImpl<const PHINode *> &Visited,
+                                   BaseMemo &Memo, bool &CycleHit, bool IsRoot);
+
+static JavaType getBaseJavaTypeCase(Value *V,
+                                    SmallPtrSetImpl<const PHINode *> &Visited,
+                                    BaseMemo &Memo, bool &CycleHit) {
   // Argument: check param attributes.
   if (auto *Arg = dyn_cast<Argument>(V)) {
     const Function *F = Arg->getParent();
@@ -450,59 +484,117 @@ static JavaType getBaseJavaType(Value *V,
     return {};
   }
 
-  // PHI: compute LCA of all incoming values.
-  // For cycles (loop back-edges): when an incoming is a PHI already in the
-  // visited set, skip it. The type is determined by the non-cyclic incomings.
+  // PHI: compute LCA of all incoming values. The visited set is a recursion
+  // stack, not a whole-query cache: an incoming PHI is skipped only while it
+  // is on the stack (a true cycle — the type is then determined by the values
+  // entering the cycle, which are exactly the non-cyclic incomings). Skipping
+  // a merely-visited PHI would silently drop it from the LCA and produce a
+  // too-narrow type when the same PHI feeds two different arms.
   if (auto *PN = dyn_cast<PHINode>(V)) {
-    if (!Visited.insert(PN).second)
+    if (!Visited.insert(PN).second) {
+      CycleHit = true;
       return {}; // Cycle detected — caller will skip this incoming.
+    }
+    auto StackGuard = make_scope_exit([&]() { Visited.erase(PN); });
     JavaType Result;
     bool First = true;
     for (unsigned I = 0, E = PN->getNumIncomingValues(); I != E; ++I) {
       Value *Inc = PN->getIncomingValue(I);
       if (auto *IncPN = dyn_cast<PHINode>(Inc)) {
-        if (Visited.count(IncPN))
+        if (Visited.count(IncPN)) {
+          CycleHit = true;
           continue; // Skip cyclic incoming.
+        }
       }
       // JavaType does not model nullability. Any positive facts derived from
       // jeandle.check_instanceof remain sound here only because current
       // consumers query it under check_instanceof's non-null oop contract.
-      JavaType IncType = getBaseJavaType(Inc, Visited);
+      // CycleHit is frame-local: a sibling's earlier cycle must not disable
+      // this frame's memoization, so each child gets its own flag and only
+      // the disjunction propagates upward.
+      bool ChildHit = false;
+      JavaType IncType =
+          getBaseJavaTypeRaw(Inc, Visited, Memo, ChildHit, /*IsRoot=*/false);
+      CycleHit |= ChildHit;
       if (IncType.isUnknown())
         return {};
-      if (First) {
-        Result = IncType;
-        First = false;
-      } else {
-        Result = typeUnion(Result, IncType);
-        if (Result.isUnknown())
-          return {};
-      }
+      joinArm(Result, First, IncType);
+      if (Result.isUnknown())
+        return {};
     }
     return Result;
   }
 
   // Select: LCA of both operands.
   if (auto *SI = dyn_cast<SelectInst>(V)) {
-    JavaType TrueType = getBaseJavaType(SI->getTrueValue(), Visited);
-    if (TrueType.isUnknown())
+    bool TrueHit = false;
+    JavaType TrueType = getBaseJavaTypeRaw(SI->getTrueValue(), Visited, Memo,
+                                           TrueHit, /*IsRoot=*/false);
+    if (TrueType.isUnknown()) {
+      CycleHit |= TrueHit;
       return {};
-    JavaType FalseType = getBaseJavaType(SI->getFalseValue(), Visited);
+    }
+    bool FalseHit = false;
+    JavaType FalseType = getBaseJavaTypeRaw(SI->getFalseValue(), Visited, Memo,
+                                            FalseHit, /*IsRoot=*/false);
+    CycleHit |= TrueHit || FalseHit;
     return typeUnion(TrueType, FalseType);
   }
 
   // BitCast / AddrSpaceCast / Freeze: pass through.
-  if (auto *BC = dyn_cast<BitCastInst>(V))
-    return getBaseJavaType(BC->getOperand(0), Visited);
-  if (auto *ASC = dyn_cast<AddrSpaceCastInst>(V))
-    return getBaseJavaType(ASC->getOperand(0), Visited);
-  if (auto *FI = dyn_cast<FreezeInst>(V))
-    return getBaseJavaType(FI->getOperand(0), Visited);
+  if (auto *BC = dyn_cast<BitCastInst>(V)) {
+    bool ChildHit = false;
+    JavaType R = getBaseJavaTypeRaw(BC->getOperand(0), Visited, Memo, ChildHit,
+                                    /*IsRoot=*/false);
+    CycleHit |= ChildHit;
+    return R;
+  }
+  if (auto *ASC = dyn_cast<AddrSpaceCastInst>(V)) {
+    bool ChildHit = false;
+    JavaType R = getBaseJavaTypeRaw(ASC->getOperand(0), Visited, Memo, ChildHit,
+                                    /*IsRoot=*/false);
+    CycleHit |= ChildHit;
+    return R;
+  }
+  if (auto *FI = dyn_cast<FreezeInst>(V)) {
+    bool ChildHit = false;
+    JavaType R = getBaseJavaTypeRaw(FI->getOperand(0), Visited, Memo, ChildHit,
+                                    /*IsRoot=*/false);
+    CycleHit |= ChildHit;
+    return R;
+  }
 
   return {};
 }
 
 // =============================================================================
+/// Frame-level memoizing driver around getBaseJavaTypeCase: one frame per
+/// value; cache on completion when the frame's own sub-computation never hit
+/// a PHI cycle, or unconditionally for the query's root (see BaseMemo).
+static JavaType getBaseJavaTypeRaw(Value *V,
+                                   SmallPtrSetImpl<const PHINode *> &Visited,
+                                   BaseMemo &Memo, bool &CycleHit,
+                                   bool IsRoot) {
+  if (auto It = Memo.find(V); It != Memo.end())
+    return It->second;
+  JavaType R = getBaseJavaTypeCase(V, Visited, Memo, CycleHit);
+  if (IsRoot || !CycleHit)
+    Memo[V] = R;
+  return R;
+}
+
+/// Base-type query root. Pass a Memo to share the completion cache across a
+/// whole query (the engine's value dimension does); without one, a fresh
+/// per-call cache is used (the base-only query path).
+static JavaType getBaseJavaType(Value *V,
+                                SmallPtrSetImpl<const PHINode *> &Visited,
+                                BaseMemo *Memo = nullptr) {
+  BaseMemo LocalMemo;
+  BaseMemo &Cache = Memo ? *Memo : LocalMemo;
+  bool CycleHit = false;
+  return getBaseJavaTypeRaw(V, Visited, Cache, CycleHit, /*IsRoot=*/true);
+}
+
 // Condition tracing: trace from a branch condition to a check_instanceof call
 // =============================================================================
 
@@ -607,9 +699,12 @@ static uintptr_t computeLCA(uintptr_t A, uintptr_t B) {
   return CB->GetCommonSuperKlass(A, B);
 }
 
+/// Interfaces provable under a OneOf merge (at least one of the merged
+/// outcomes held): only interfaces carried by every outcome survive. This is
+/// a set INTERSECTION.
 static SmallDenseSet<uintptr_t, 2>
-unionFullInterfaces(const SmallDenseSet<uintptr_t, 2> &InterfacesA,
-                    const SmallDenseSet<uintptr_t, 2> &InterfacesB) {
+commonInterfaces(const SmallDenseSet<uintptr_t, 2> &InterfacesA,
+                 const SmallDenseSet<uintptr_t, 2> &InterfacesB) {
   SmallDenseSet<uintptr_t, 2> R;
   for (uintptr_t I : InterfacesA) {
     if (InterfacesB.contains(I)) {
@@ -619,9 +714,11 @@ unionFullInterfaces(const SmallDenseSet<uintptr_t, 2> &InterfacesA,
   return R;
 }
 
+/// Interfaces provable under an AllOf merge (every merged outcome held): the
+/// union of all carried interfaces. This is a set UNION.
 static SmallDenseSet<uintptr_t, 2>
-intersectFullInterfaces(const SmallDenseSet<uintptr_t, 2> &A,
-                        const SmallDenseSet<uintptr_t, 2> &B) {
+combinedInterfaces(const SmallDenseSet<uintptr_t, 2> &A,
+                   const SmallDenseSet<uintptr_t, 2> &B) {
   SmallDenseSet<uintptr_t, 2> Result = A;
   for (uintptr_t I : B) {
     Result.insert(I);
@@ -629,74 +726,61 @@ intersectFullInterfaces(const SmallDenseSet<uintptr_t, 2> &A,
   return Result;
 }
 
+/// Strip pointer casts, aliases and freeze wrappers down to the canonical
+/// underlying value. freeze is transparent for value identity: freeze(x)
+/// equals x unless x is poison, and a branch on poison has undefined
+/// behavior, so facts proved about x transfer to freeze(x) and vice versa.
+static Value *stripCastsAndFreeze(Value *V) {
+  while (true) {
+    V = V->stripPointerCastsAndAliases();
+    if (auto *FI = dyn_cast<FreezeInst>(V)) {
+      V = FI->getOperand(0);
+      continue;
+    }
+    return V;
+  }
+}
+
 /// Check if IncomingBB is reached only when Obj is null.
 /// Walks up the dominator tree from IncomingBB looking for a conditional branch
 /// on `icmp eq/ne Obj, null` where IncomingBB is dominated by the "Obj is null"
 /// successor. Using the dominator tree handles all CFG shapes (diamonds, etc.),
-/// not just single-predecessor chains.
+/// not just single-predecessor chains. Only branches are recognized: switch
+/// case values must be constant integers, so a switch can never test a
+/// pointer against null.
 static bool isNullCheckPath(BasicBlock *IncomingBB, Value *Obj,
                             DominatorTree &DT) {
   Obj = Obj->stripPointerCastsAndAliases();
   for (auto *Node = DT.getNode(IncomingBB); Node; Node = Node->getIDom()) {
     BasicBlock *BB = Node->getBlock();
 
-    // --- BranchInst: check `icmp eq/ne Obj, null` ---
     if (auto *BI = dyn_cast<BranchInst>(BB->getTerminator())) {
       if (!BI->isConditional())
         continue;
-
       auto *Cmp = dyn_cast<ICmpInst>(BI->getCondition());
       if (!Cmp)
         continue;
-
-      // Check if condition is `icmp eq/ne Obj, null`.
-      Value *LHS = Cmp->getOperand(0);
-      Value *RHS = Cmp->getOperand(1);
-      bool LHSNull = isa<ConstantPointerNull>(LHS);
-      bool RHSNull = isa<ConstantPointerNull>(RHS);
-      Value *Tested = LHSNull ? RHS : (RHSNull ? LHS : nullptr);
+      ICmpInst::Predicate Pred = Cmp->getPredicate();
+      if (Pred != ICmpInst::ICMP_EQ && Pred != ICmpInst::ICMP_NE)
+        continue;
+      Value *Op0 = Cmp->getOperand(0);
+      Value *Op1 = Cmp->getOperand(1);
+      Value *Tested = isa<ConstantPointerNull>(Op0)   ? Op1
+                      : isa<ConstantPointerNull>(Op1) ? Op0
+                                                      : nullptr;
       if (!Tested || Tested->stripPointerCastsAndAliases() != Obj)
         continue;
-
-      // Determine which successor means "Obj is null".
-      // icmp eq Obj, null → true successor = null path
-      // icmp ne Obj, null → false successor = null path
-      BasicBlock *NullBB = nullptr;
-      if (Cmp->getPredicate() == ICmpInst::ICMP_EQ)
-        NullBB = BI->getSuccessor(0);
-      else if (Cmp->getPredicate() == ICmpInst::ICMP_NE)
-        NullBB = BI->getSuccessor(1);
-      else
+      // icmp eq Obj, null -> true successor is the null path;
+      // icmp ne Obj, null -> false successor is the null path.
+      BasicBlock *NullBB =
+          Pred == ICmpInst::ICMP_EQ ? BI->getSuccessor(0) : BI->getSuccessor(1);
+      BasicBlock *OtherBB =
+          Pred == ICmpInst::ICMP_EQ ? BI->getSuccessor(1) : BI->getSuccessor(0);
+      if (NullBB == OtherBB)
         continue;
-
       // IncomingBB must be dominated by the null-path edge.
-      BasicBlockEdge NullEdge(BB, NullBB);
-      if (DT.dominates(NullEdge, IncomingBB))
+      if (DT.dominates(BasicBlockEdge(BB, NullBB), IncomingBB))
         return true;
-      continue;
-    }
-
-    // --- SwitchInst: check `switch Obj [... case null: ...]` ---
-    if (auto *SI = dyn_cast<SwitchInst>(BB->getTerminator())) {
-      Value *Cond = SI->getCondition();
-      if (Cond->stripPointerCastsAndAliases() != Obj)
-        continue;
-
-      // Find the null case.
-      BasicBlock *NullBB = nullptr;
-      for (auto &Case : SI->cases()) {
-        if (isa<ConstantPointerNull>(Case.getCaseValue())) {
-          NullBB = Case.getCaseSuccessor();
-          break;
-        }
-      }
-      if (!NullBB)
-        continue;
-
-      BasicBlockEdge NullEdge(BB, NullBB);
-      if (DT.dominates(NullEdge, IncomingBB))
-        return true;
-      continue;
     }
   }
   return false;
@@ -833,13 +917,13 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
         // True-branch: both L and R are true → AllOf.
         M.TrueKlass = pickMostSpecific(L.TrueKlass, R.TrueKlass);
         M.TrueInterfaces =
-            intersectFullInterfaces(L.TrueInterfaces, R.TrueInterfaces);
+            combinedInterfaces(L.TrueInterfaces, R.TrueInterfaces);
         M.TrueExclusions = L.TrueExclusions;
         unionExcludedKlasses(M.TrueExclusions, R.TrueExclusions);
         // False-branch: at least one of L, R is false → OneOf.
         M.FalseKlass = computeLCA(L.FalseKlass, R.FalseKlass);
         M.FalseInterfaces =
-            unionFullInterfaces(L.FalseInterfaces, R.FalseInterfaces);
+            commonInterfaces(L.FalseInterfaces, R.FalseInterfaces);
         M.FalseExclusions =
             intersectExcludedKlasses(L.FalseExclusions, R.FalseExclusions);
         return M;
@@ -876,14 +960,13 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
         TraceResult M;
         // True-branch: at least one of L, R is true → OneOf.
         M.TrueKlass = computeLCA(L.TrueKlass, R.TrueKlass);
-        M.TrueInterfaces =
-            unionFullInterfaces(L.TrueInterfaces, R.TrueInterfaces);
+        M.TrueInterfaces = commonInterfaces(L.TrueInterfaces, R.TrueInterfaces);
         M.TrueExclusions =
             intersectExcludedKlasses(L.TrueExclusions, R.TrueExclusions);
         // False-branch: both L and R are false → AllOf.
         M.FalseKlass = pickMostSpecific(L.FalseKlass, R.FalseKlass);
         M.FalseInterfaces =
-            intersectFullInterfaces(L.FalseInterfaces, R.FalseInterfaces);
+            combinedInterfaces(L.FalseInterfaces, R.FalseInterfaces);
         M.FalseExclusions = L.FalseExclusions;
         unionExcludedKlasses(M.FalseExclusions, R.FalseExclusions);
         return M;
@@ -1000,12 +1083,11 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
       return {}; // False arm doesn't trace — no match.
     TraceResult M;
     M.TrueKlass = computeLCA(T.TrueKlass, F.TrueKlass);
-    M.TrueInterfaces = unionFullInterfaces(T.TrueInterfaces, F.TrueInterfaces);
+    M.TrueInterfaces = commonInterfaces(T.TrueInterfaces, F.TrueInterfaces);
     M.TrueExclusions =
         intersectExcludedKlasses(T.TrueExclusions, F.TrueExclusions);
     M.FalseKlass = computeLCA(T.FalseKlass, F.FalseKlass);
-    M.TrueInterfaces =
-        unionFullInterfaces(T.FalseInterfaces, F.FalseInterfaces);
+    M.FalseInterfaces = commonInterfaces(T.FalseInterfaces, F.FalseInterfaces);
     M.FalseExclusions =
         intersectExcludedKlasses(T.FalseExclusions, F.FalseExclusions);
     if (!M.matched())
@@ -1025,13 +1107,14 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
     for (unsigned I = 0, E = PN->getNumIncomingValues(); I != E; ++I) {
       Value *Inc = PN->getIncomingValue(I);
 
-      if (auto *CI = dyn_cast<ConstantInt>(Inc)) {
-        // If the incoming is from a null-check path (obj IS null), type info
-        // is meaningless regardless of the constant value — safe to skip on
-        // both branches.
-        if (isNullCheckPath(PN->getIncomingBlock(I), QueryObj, DT))
-          continue;
+      // If the incoming block is dominated by a null-check edge (obj IS null
+      // there), the arm is only live for the null execution, where type
+      // facts conditioned on non-null are meaningless — skip it regardless
+      // of whether the incoming is a constant.
+      if (isNullCheckPath(PN->getIncomingBlock(I), QueryObj, DT))
+        continue;
 
+      if (auto *CI = dyn_cast<ConstantInt>(Inc)) {
         if (CI->isZero()) {
           // Constant false from non-null-check origin: on the true-branch
           // this path can't be taken (safe to skip), but on the false-branch
@@ -1056,13 +1139,12 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
       } else {
         // OneOf merge: LCA for klass, intersect for exclusions.
         M.TrueKlass = computeLCA(M.TrueKlass, R.TrueKlass);
-        M.TrueInterfaces =
-            unionFullInterfaces(M.TrueInterfaces, R.TrueInterfaces);
+        M.TrueInterfaces = commonInterfaces(M.TrueInterfaces, R.TrueInterfaces);
         M.TrueExclusions =
             intersectExcludedKlasses(M.TrueExclusions, R.TrueExclusions);
         M.FalseKlass = computeLCA(M.FalseKlass, R.FalseKlass);
         M.FalseInterfaces =
-            unionFullInterfaces(M.FalseInterfaces, R.FalseInterfaces);
+            commonInterfaces(M.FalseInterfaces, R.FalseInterfaces);
         M.FalseExclusions =
             intersectExcludedKlasses(M.FalseExclusions, R.FalseExclusions);
       }
@@ -1091,249 +1173,370 @@ static TraceResult traceToCheckInstanceof(Value *Cond, Value *QueryObj,
 }
 
 // =============================================================================
-// Context-sensitive sharpening
+// Edge-semantics dataflow engine
 // =============================================================================
+//
+// Context-sensitive JavaType facts are computed by a demand-driven backward
+// evaluation over CFG edges instead of a dominator-chain walk. Guards attach
+// to the edges whose outcome they prove, path composition narrows (meets)
+// facts along predecessor chains, and merges join (typeUnion) the per-edge
+// contributions:
+//
+//   factsAt(V, B) = JOIN over non-skipped predecessors P of B:
+//                     factsAt(V, P) [mergePathFacts] edgeGuard(P -> B, V)
+//   sharpen(V, Ctx, DestBB)
+//                 = factsAt(V, CtxBB) [mergePathFacts] edgeGuard(CtxBB ->
+//                 DestBB, V)
+//   getJavaType(V, DT, Ctx)
+//                 = baseType(V) [typeIntersect] factsAt(V, CtxBB)
+//   phiValueType(PN) = JOIN over incoming edges i:
+//                     (base+path facts of incoming_i) [mergePathFacts]
+//                     edgeGuard(P_i -> parent(PN), incoming_i)
+//
+// The two edge filters lose no information (they are exact, not approximate):
+//
+// - Back-edge skip: facts about an SSA oop are path-persistent — the value is
+//   never redefined and the referent's klass is immutable, so a guard that
+//   held on first arrival at B keeps holding for later arrivals. First arrival
+//   at B never traverses an edge from a block that B dominates, so back edges
+//   add nothing beyond what the non-back edges already contribute. (Cycles the
+//   back-edge rule cannot cut — irreducible CFGs — are cut conservatively by
+//   the in-progress fuse: an empty contribution to that join arm.)
+//
+// - Null-edge exclusion: JavaType is conditioned on a non-null oop (see
+//   JavaType.h). An edge on which V is proven null carries no non-null type
+//   constraint, and every dynamic execution in which V is non-null at B
+//   arrives via a non-null edge, so unioning the remaining edges covers all
+//   contract-valid executions. Skipping an *unproven* edge would be unsound
+//   (it would strengthen the join without proof), hence a positive two-layer
+//   proof: a structural fast path recognizing a branch/switch on
+//   `icmp eq/ne V, null` directly feeding the edge, then an optional
+//   null-edge oracle (backed by LazyValueInfo in CFG-stable passes) for
+//   threaded/indirect forms.
+//
+// The seed cut at V's definition block is exact too: a branch condition
+// referencing V is dominated by V's definition, so an edge into the definition
+// block carrying facts about V would come from a dominated predecessor — a
+// back edge, which is skipped anyway.
+//
+// Precision: a guard whose outgoing edge dominates the context block lies on
+// every path from the function entry to the context, hence inside every path
+// term of the join above, and typeUnion preserves consequences common to all
+// paths — such guards are always recovered. Merges where no single edge
+// dominates the context are additionally recovered: each arm's edge guard
+// contributes to its own path term, and the join keeps exactly the common
+// consequences.
+//
+// Determinism (VM callback record/replay contract, VMCallback.h): predecessor
+// iteration follows pred_begin (use-list) order; the memo and in-progress
+// sets are keyed by (Value*, BasicBlock*) and are only looked up, inserted and
+// erased, never iterated; results are memoized per top-level query and only
+// once complete — budget-exhausted frames contribute {} without being cached.
+//
+// Known limitations: a boolean-phi-carried check whose empty blocks were
+// folded but whose edges were not threaded (the information then lives only
+// in the phi's value semantics); all-null-edge merges (JavaType cannot
+// represent "known null"); irreducible CFGs (conservative via the fuse); the
+// per-query join budget (deeper single-predecessor chains conservatively
+// return unknown).
 
-/// Compute the type constraints that dominating jeandle.check_instanceof
-/// checks imply for V at Context. Returns ONLY check-derived constraints,
-/// never attribute/metadata-derived base types.
+/// Maximum number of joined blocks per top-level query, per dimension (the
+/// block dimension and the PHI-value dimension each get their own allowance,
+/// so consuming one does not silently starve the other). Bounds compile time;
+/// exceeding frames contribute an empty (unknown) fact and are not memoized.
+/// Hidden tuning knob: large methods with joins deeper than the default lose
+/// check-derived sharpening (sound, precision-only) and can raise this.
+static cl::opt<unsigned> MaxFactsJoinBlocks(
+    "jeandle-max-facts-join-blocks", cl::init(128), cl::Hidden,
+    cl::desc("Maximum joined blocks per JavaType query dimension"));
+
+namespace {
+
+/// Per-query evaluation state. Facts depend only on the CFG, branch
+/// conditions, the null-edge oracle and VM callbacks, so they are constant
+/// for the lifetime of one query and safely memoized here.
 ///
-/// DestBB: for PHI incoming processing, the PHI's parent block. When provided,
-/// Context must be the terminator of a PHI incoming block; the incoming
-/// block's own branch is then considered for sharpening: a PHI incoming use
-/// is edge-local, so if exactly one of the branch's successors is DestBB,
-/// that outcome's constraints necessarily held along that edge — regardless
-/// of whether the edge dominates DestBB (which fails for acyclic
-/// multi-predecessor merges and multi-predecessor loop headers alike).
-/// For non-PHI contexts, DestBB is nullptr and the context block's own branch
-/// is skipped.
-///
-/// The result depends only on the CFG, branch conditions and VM callbacks; it
-/// is constant while those are unchanged.
-JavaType jeandle::sharpenFromDominators(Value *V, Instruction *Context,
-                                        DominatorTree &DT, BasicBlock *DestBB) {
-  const VMCallbacks *CB = getVMCallbacks();
-  assert(CB && CB->IsSubtype && "VMCallbacks must be set");
+/// The memo's lifetime is deliberately one top-level query, not one pass:
+/// within a query it turns the exponential path join into a linear one, while
+/// consumers amortize across queries with their own result caches
+/// (RecoverTypeInfo's per-load and per-edge caches). A pass-scoped memo would
+/// additionally need invalidation discipline for every consumer that erases
+/// instructions mid-pass (ConstantFieldFolding does), where dangling Value*
+/// keys could alias freshly allocated values and return stale facts.
+struct JavaTypeQueryContext {
+  DominatorTree &DT;
+  IsNullEdgeOracle NullOracle;
+  /// Shared PHI cycle-detection set for the value dimension (base-type PHI
+  /// handling and phiValueType): a re-encountered PHI contributes nothing.
+  SmallPtrSet<const PHINode *, 8> PhiVisited;
+  /// Complete base-type memo shared across the whole query (see BaseMemo).
+  BaseMemo BaseTypes;
+  /// Per-(value, block) evaluation state for the block dimension: absent =
+  /// not yet evaluated, nullopt = currently on the evaluation stack (a cycle
+  /// the back-edge rule cannot cut), engaged = the completed join. One
+  /// container for both memoization and cycle detection keeps the two from
+  /// drifting apart across exit paths.
+  DenseMap<std::pair<Value *, BasicBlock *>, std::optional<JavaType>> Processed;
+  unsigned FactsBudget = MaxFactsJoinBlocks;
+  unsigned PhiBudget = MaxFactsJoinBlocks;
+};
 
-  V = V->stripPointerCastsAndAliases();
-  BasicBlock *ContextBB = Context->getParent();
-  JavaType Best;
+} // namespace
 
-  for (auto *Node = DT.getNode(ContextBB); Node; Node = Node->getIDom()) {
-    BasicBlock *BB = Node->getBlock();
-    auto *BI = dyn_cast<BranchInst>(BB->getTerminator());
-    if (!BI || !BI->isConditional())
-      continue;
-
-    // For ContextBB's own branch: skip unless DestBB is provided (PHI case).
-    // The branch hasn't executed for non-PHI contexts, but for PHI incomings
-    // the branch targets DestBB, so it should be considered for sharpening.
-    if (BB == ContextBB && !DestBB)
-      continue;
-
-    BasicBlock *TrueBB = BI->getSuccessor(0);
-    BasicBlock *FalseBB = BI->getSuccessor(1);
-
-    uintptr_t Exact = traceExactKlassGuard(BI->getCondition(), V);
-    if (Exact != 0) {
-      bool TrueApplies;
-      if (BB == ContextBB) {
-        TrueApplies = TrueBB == DestBB && FalseBB != DestBB;
-      } else {
-        TrueApplies = DT.dominates(BasicBlockEdge(BB, TrueBB), ContextBB);
-      }
-      if (TrueApplies) {
-        LLVM_DEBUG(dbgs() << "JavaType: sharpened " << *V << " to exact klass "
-                          << Exact << " from dominating klass guard in "
-                          << BB->getName() << "\n");
-        JavaType ExactType = {Exact, true};
-        Best = typeIntersect(Best, ExactType);
-      }
-      // A failed exact-class guard does not imply that the receiver is not an
-      // instance of the guarded class: it may still be a subclass.
-      continue;
-    }
-
-    SmallPtrSet<Value *, 16> TraceVisited;
-    TraceResult TR =
-        traceToCheckInstanceof(BI->getCondition(), V, TraceVisited, DT);
-    if (!TR.matched())
-      continue;
-
-    uintptr_t Klass = 0;
-    const SmallDenseSet<uintptr_t, 2> *Interfaces = nullptr;
-    const SmallDenseSet<uintptr_t, 2> *Exclusions = nullptr;
-
-    if (BB == ContextBB) {
-      // PHI incoming case (DestBB provided): the value reaches the PHI along
-      // exactly one edge ContextBB -> DestBB, so whichever branch outcome
-      // targets DestBB necessarily held on that edge. This is a strict
-      // strengthening of edge dominance (used below for dominator blocks),
-      // which additionally fails whenever DestBB has multiple predecessors:
-      // acyclic merges, and loop headers whose conditional latch tests the
-      // carried value.
-      bool TrueIsDest = (TrueBB == DestBB);
-      bool FalseIsDest = (FalseBB == DestBB);
-      if (TrueIsDest && !FalseIsDest) {
-        Klass = TR.TrueKlass;
-        Interfaces = &TR.TrueInterfaces;
-        Exclusions = &TR.TrueExclusions;
-      } else if (FalseIsDest && !TrueIsDest) {
-        Klass = TR.FalseKlass;
-        Interfaces = &TR.FalseInterfaces;
-        Exclusions = &TR.FalseExclusions;
-      }
-      // Both successors are DestBB (duplicate edges): no outcome information.
-    } else {
-      // Dominator block above ContextBB: the constraint must hold for ALL
-      // executions reaching ContextBB (a block-local use), so apply
-      // constraints from whichever branch edge dominates the context. Block
-      // dominance alone (DT.dominates(SuccBB, ContextBB)) is insufficient:
-      // SuccBB might be reachable from both edges of the branch if it has
-      // multiple predecessors. Use edge dominance via BasicBlockEdge, which
-      // correctly handles loop back-edges and multi-predecessor successors.
-      BasicBlockEdge TrueEdge(BB, TrueBB);
-      BasicBlockEdge FalseEdge(BB, FalseBB);
-      if (DT.dominates(TrueEdge, ContextBB)) {
-        Klass = TR.TrueKlass;
-        Interfaces = &TR.TrueInterfaces;
-        Exclusions = &TR.TrueExclusions;
-      } else if (DT.dominates(FalseEdge, ContextBB)) {
-        Klass = TR.FalseKlass;
-        Interfaces = &TR.FalseInterfaces;
-        Exclusions = &TR.FalseExclusions;
-      }
-    }
-
-    if (Klass != 0) {
-      LLVM_DEBUG(dbgs() << "JavaType: sharpened " << *V << " to klass " << Klass
-                        << " from dominating check in " << BB->getName()
-                        << "\n");
-      assert(CB->IsEffectivelyFinal && "IsEffectivelyFinal must be set");
-      // Exact is a pure function of the klass (IsEffectivelyFinal), not carried
-      // in from an independent source. So when Klass == Best.Klass — the
-      // reflexive IsSubtype branch below — IsExact already equals Best.Exact
-      // and the assignment is a no-op. Contrast typeIntersect, whose operands'
-      // Exact come from different provenances and can diverge for the same
-      // klass.
-      bool IsExact = CB->IsEffectivelyFinal(Klass);
-      if (!Best.isKnown()) {
-        Best.Klass = Klass;
-        Best.Exact = IsExact;
-      } else if (CB->IsSubtype(Klass, Best.Klass)) {
-        Best.Klass = Klass;
-        Best.Exact = IsExact;
-      }
-    }
-    if (Interfaces) {
-      for (uintptr_t I : *Interfaces) {
-        LLVM_DEBUG(dbgs() << "JavaType: sharpened " << *V << " to interface "
-                          << I << " from dominating check in " << BB->getName()
-                          << "\n");
-        Best.Interfaces.insert(I);
-      }
-    }
-    if (Exclusions) {
-      for (uintptr_t K : *Exclusions) {
-        LLVM_DEBUG(dbgs() << "JavaType: excluded " << *V << " from klass " << K
-                          << " from dominating check in " << BB->getName()
-                          << "\n");
-        addExcludedKlass(Best.ExcludedKlasses, K);
-      }
+/// Narrow-only path composition: merge guard facts G into the accumulated path
+/// facts Acc. A more specific positive klass replaces the accumulated one; an
+/// unrelated or less specific one is dropped (never widened into an LCA — two
+/// simultaneous guards on one path both hold, and an LCA would weaken them;
+/// dropping preserves the established fact). Interfaces accumulate; exclusions
+/// merge subtype-aware. This deliberately is not typeIntersect: intersecting
+/// two unrelated non-exact guards (e.g. two interface checks) would drop the
+/// positive klass to 0 and lose isKnown(). Semantic changes to the klass
+/// ladder below should be mirrored against typeIntersect's ladder (equal
+/// klass, one-side-exact, subtype narrowing) — the two must stay consistent
+/// in the cases they share.
+static void mergePathFacts(JavaType &Acc, const JavaType &G) {
+  if (G.Klass != 0) {
+    if (!Acc.isKnown()) {
+      Acc.Klass = G.Klass;
+      Acc.Exact = G.Exact;
+    } else if (G.Klass == Acc.Klass) {
+      // Both constraints name the same klass; an exact claim ("exactly this
+      // class") subsumes an instanceof claim, so exactness is disjunctive.
+      // This keeps a base-derived Exact=true (allocation type, exact
+      // metadata, constant oop) when a guard only proves instanceof(K).
+      Acc.Exact = Acc.Exact || G.Exact;
+    } else if (getVMCallbacks()->IsSubtype(G.Klass, Acc.Klass)) {
+      Acc.Klass = G.Klass;
+      Acc.Exact = G.Exact;
     }
   }
-
-  normalizeExcludedKlasses(Best);
-  return Best;
+  Acc.Interfaces.insert(G.Interfaces.begin(), G.Interfaces.end());
+  unionExcludedKlasses(Acc.ExcludedKlasses, G.ExcludedKlasses);
 }
 
-// =============================================================================
-// Main query
-// =============================================================================
+/// Convert one side of a TraceResult to facts-only JavaType form. Exact is a
+/// pure function of the klass (IsEffectivelyFinal).
+static JavaType
+traceSideToFacts(uintptr_t Klass, const SmallDenseSet<uintptr_t, 2> &Interfaces,
+                 const SmallDenseSet<uintptr_t, 2> &Exclusions) {
+  JavaType Facts;
+  if (Klass != 0) {
+    const VMCallbacks *CB = getVMCallbacks();
+    assert(CB && CB->IsEffectivelyFinal && "IsEffectivelyFinal must be set");
+    Facts.Klass = Klass;
+    Facts.Exact = CB->IsEffectivelyFinal(Klass);
+  }
+  Facts.Interfaces.insert(Interfaces.begin(), Interfaces.end());
+  unionExcludedKlasses(Facts.ExcludedKlasses, Exclusions);
+  return Facts;
+}
 
-static JavaType getJavaTypeImpl(Value *V, DominatorTree &DT,
-                                Instruction *Context,
-                                SmallPtrSetImpl<const PHINode *> &Visited,
-                                BasicBlock *DestBB = nullptr);
+/// The guard that edge From -> To implies about V: if exactly one successor of
+/// From's conditional branch is To, that outcome's constraints held along the
+/// edge. A duplicate edge (both successors are To) carries no outcome
+/// information. Non-branch terminators carry no guard.
+static JavaType edgeGuard(BasicBlock *From, BasicBlock *To, Value *V,
+                          DominatorTree &DT) {
+  auto *BI = dyn_cast<BranchInst>(From->getTerminator());
+  if (!BI || !BI->isConditional())
+    return {};
 
-/// Context-sensitive PHI handling: query each incoming with its own context.
-/// For PHI cycles (loop back-edges): when we re-encounter a PHI already in the
-/// visited set, we skip that incoming. The type is determined only by the
-/// non-cyclic incomings. This is sound because a loop PHI's type is the LCA of
-/// all values entering the cycle, which are exactly the non-cyclic incomings.
-static JavaType getPhiJavaType(PHINode *PN, DominatorTree &DT,
-                               SmallPtrSetImpl<const PHINode *> &Visited) {
-  if (!Visited.insert(PN).second)
+  V = V->stripPointerCastsAndAliases();
+  BasicBlock *TrueBB = BI->getSuccessor(0);
+  BasicBlock *FalseBB = BI->getSuccessor(1);
+  bool TrueIsTo = (TrueBB == To);
+  bool FalseIsTo = (FalseBB == To);
+  if (TrueIsTo == FalseIsTo)
+    return {};
+
+  // Exact-klass guard fast path. A failed exact-class guard does not imply
+  // that the object is not an instance of the guarded class: it may still be
+  // a subclass, so the false side contributes nothing.
+  if (uintptr_t Exact = traceExactKlassGuard(BI->getCondition(), V)) {
+    if (TrueIsTo) {
+      LLVM_DEBUG(dbgs() << "JavaType: edge guard " << From->getName() << " -> "
+                        << To->getName() << " proves exact klass " << Exact
+                        << " for " << *V << "\n");
+      return JavaType(Exact, /*Exact=*/true);
+    }
+    return {};
+  }
+
+  SmallPtrSet<Value *, 16> TraceVisited;
+  TraceResult TR =
+      traceToCheckInstanceof(BI->getCondition(), V, TraceVisited, DT);
+  if (!TR.matched())
+    return {};
+
+  LLVM_DEBUG(dbgs() << "JavaType: edge guard " << From->getName() << " -> "
+                    << To->getName() << " constrains " << *V << "\n");
+  if (TrueIsTo)
+    return traceSideToFacts(TR.TrueKlass, TR.TrueInterfaces, TR.TrueExclusions);
+  return traceSideToFacts(TR.FalseKlass, TR.FalseInterfaces,
+                          TR.FalseExclusions);
+}
+
+/// Positive proof that V is null on edge From -> To, answered by the query's
+/// null-edge oracle (the LazyValueInfo-backed implementation recognizes null
+/// tests directly on the edge's branch as well as threaded/indirect forms).
+/// When in doubt the oracle answers false — keeping an edge is always sound.
+static bool isNullEdge(Value *V, BasicBlock *From, BasicBlock *To,
+                       const JavaTypeQueryContext &Q) {
+  if (!Q.DT.isReachableFromEntry(From))
+    return false; // Lattice reasoning is undefined for unreachable blocks;
+                  // keep the edge (the conservative answer).
+  return Q.NullOracle && Q.NullOracle(V, From, To);
+}
+
+/// Facts holding about V at the top of BB: the join over non-skipped incoming
+/// edges of (facts at the predecessor, narrowed by the edge guard).
+/// Facts-only: check-derived constraints, never attribute/metadata base types.
+static JavaType factsAt(Value *V, BasicBlock *BB, JavaTypeQueryContext &Q) {
+  V = stripCastsAndFreeze(V);
+
+  // Seed cuts (exact, see the design comment above).
+  if (BB->isEntryBlock())
+    return {};
+  if (auto *I = dyn_cast<Instruction>(V))
+    if (I->getParent() == BB)
+      return {}; // Definition block: only back edges could reference V here.
+  if (!Q.DT.isReachableFromEntry(BB))
+    return {}; // Dominance is undefined for unreachable blocks.
+
+  auto Key = std::make_pair(V, BB);
+  auto [It, Inserted] = Q.Processed.try_emplace(Key);
+  if (!Inserted) {
+    if (It->second)
+      return *It->second;
+    return {}; // On the evaluation stack: a cycle the back-edge rule cannot
+               // cut (irreducible) — empty contribution to that join arm.
+  }
+  if (Q.FactsBudget == 0) {
+    ++NumJavaTypeBudgetExhausted;
+    LLVM_DEBUG(dbgs() << "JavaType: per-query block budget exhausted at "
+                      << BB->getName() << " for " << *V << "\n");
+    Q.Processed.erase(It);
+    return {}; // Budget exhausted — deliberately not memoized.
+  }
+  --Q.FactsBudget;
+
+  JavaType Joined;
+  bool First = true;
+  for (BasicBlock *P : predecessors(BB)) {
+    if (Q.DT.dominates(BB, P))
+      continue; // Back edge (exact, see the design comment).
+    if (isNullEdge(V, P, BB, Q))
+      continue; // Null edge (exact, see the design comment).
+    JavaType E = factsAt(V, P, Q);
+    mergePathFacts(E, edgeGuard(P, BB, V, Q.DT));
+    joinArm(Joined, First, std::move(E));
+  }
+
+  // The join loop above recursed through factsAt, which may have rehashed
+  // Processed and invalidated It — re-look the slot up by key.
+  JavaType Result = std::move(Joined);
+  Q.Processed[Key] = Result;
+  return Result;
+}
+
+/// Value dimension for PHIs: the join over incoming edges of each incoming
+/// value's full type at that edge (its own base/facts, narrowed by the guard
+/// on the incoming edge). Cycle discipline: an incoming PHI is skipped only
+/// while it is on the current recursion stack (PhiVisited is a stack, erased
+/// on exit) — skipping a merely-visited PHI would drop it from the join and
+/// narrow the result unsoundly when the same PHI feeds two different arms.
+/// Any remaining unknown incoming bails the whole PHI to unknown, and
+/// incomings arriving on proven-null edges are skipped (they carry no
+/// non-null type constraint under the non-null contract).
+static JavaType valueDimension(Value *V, JavaTypeQueryContext &Q);
+
+static JavaType phiValueType(PHINode *PN, JavaTypeQueryContext &Q) {
+  if (!Q.PhiVisited.insert(PN).second)
     return {}; // Cycle detected — caller will skip this incoming.
+  auto StackGuard = make_scope_exit([&]() { Q.PhiVisited.erase(PN); });
+  if (Q.PhiBudget == 0) {
+    ++NumJavaTypeBudgetExhausted;
+    LLVM_DEBUG(dbgs() << "JavaType: per-query PHI budget exhausted entering "
+                      << *PN << "\n");
+    return {}; // PHI frames count against the value dimension's budget.
+  }
+  --Q.PhiBudget;
 
   JavaType Result;
   bool First = true;
   for (unsigned I = 0, E = PN->getNumIncomingValues(); I != E; ++I) {
     Value *Inc = PN->getIncomingValue(I);
     BasicBlock *IncBB = PN->getIncomingBlock(I);
-    Instruction *IncContext = IncBB->getTerminator();
 
-    // Check if the incoming is a PHI we've already visited (cycle).
-    // If so, skip it — the type from this path will be determined by the
+    // Skip a PHI incoming we have already visited (cycle); the PHI's type is
+    // determined by the values entering the cycle, which are exactly the
     // non-cyclic incomings.
-    if (auto *IncPN = dyn_cast<PHINode>(Inc)) {
-      if (Visited.count(IncPN))
+    if (auto *IncPN = dyn_cast<PHINode>(Inc))
+      if (Q.PhiVisited.count(IncPN))
         continue;
-    }
 
-    JavaType IncType =
-        getJavaTypeImpl(Inc, DT, IncContext, Visited, PN->getParent());
-    if (IncType.isUnknown())
+    if (isNullEdge(Inc, IncBB, PN->getParent(), Q))
+      continue;
+
+    JavaType T = valueDimension(Inc, Q);
+    T = typeIntersect(T, factsAt(Inc, IncBB, Q));
+    mergePathFacts(T, edgeGuard(IncBB, PN->getParent(), Inc, Q.DT));
+    if (T.isUnknown())
       return {};
-    if (First) {
-      Result = IncType;
-      First = false;
-    } else {
-      Result = typeUnion(Result, IncType);
-      if (Result.isUnknown())
-        return {};
-    }
+    joinArm(Result, First, std::move(T));
+    if (Result.isUnknown())
+      return {};
   }
   return Result;
 }
 
-static JavaType getJavaTypeImpl(Value *V, DominatorTree &DT,
-                                Instruction *Context,
-                                SmallPtrSetImpl<const PHINode *> &Visited,
-                                BasicBlock *DestBB) {
-  // Context-sensitive PHI handling: compute per-incoming types via
-  // getPhiJavaType, then also sharpen from dominators of the Context.
-  // The PHI's incoming analysis gives the base type; dominator checks at
-  // the use site (Context) can further narrow it.
-  if (auto *PN = dyn_cast<PHINode>(V)) {
-    if (Context) {
-      JavaType PhiType = getPhiJavaType(PN, DT, Visited);
-      JavaType Sharpened = sharpenFromDominators(V, Context, DT, DestBB);
-      return typeIntersect(PhiType, Sharpened);
-    }
-  }
-
-  // Get base type (context-insensitive).
-  JavaType Base = getBaseJavaType(V, Visited);
-
-  // Context-sensitive sharpening: intersect with dominator-derived constraints.
-  if (Context) {
-    JavaType Sharpened = sharpenFromDominators(V, Context, DT, DestBB);
-    Base = typeIntersect(Base, Sharpened);
-  }
-
-  return Base;
+/// The value dimension of a query: the full type of V itself — the PHI value
+/// dimension for PHI nodes, the context-insensitive base type otherwise
+/// (shared BaseMemo across the whole query).
+static JavaType valueDimension(Value *V, JavaTypeQueryContext &Q) {
+  if (auto *PN = dyn_cast<PHINode>(V))
+    return phiValueType(PN, Q);
+  // Fresh recursion stack, deliberately not Q.PhiVisited: the IsRoot memo
+  // exemption (see BaseMemo) is only sound when every truncation the root
+  // computation sees is a back edge of its own recursion. Sharing the value
+  // dimension's stack would let an outer phiValueType frame be mistaken for
+  // a cycle, silently dropping a live incoming and caching the too-narrow
+  // result.
+  SmallPtrSet<const PHINode *, 8> BaseStack;
+  return getBaseJavaType(V, BaseStack, &Q.BaseTypes);
 }
 
-JavaType jeandle::getJavaType(Value *V, DominatorTree *DT,
-                              Instruction *Context) {
-  // Strip pointer casts at the API boundary so that downstream identity
-  // comparisons (traceToCheckInstanceof, isNullCheckPath) work correctly
-  // even when optimization passes introduce bitcast/addrspacecast wrappers.
-  V = V->stripPointerCastsAndAliases();
+JavaType jeandle::sharpen(Value *V, Instruction *Context, DominatorTree &DT,
+                          BasicBlock *DestBB, IsNullEdgeOracle IsNullEdge) {
+  assert(getVMCallbacks() && getVMCallbacks()->IsSubtype &&
+         "VMCallbacks must be set");
 
-  SmallPtrSet<const PHINode *, 8> Visited;
-  if (DT)
-    return getJavaTypeImpl(V, *DT, Context, Visited);
-  return getBaseJavaType(V, Visited);
+  V = stripCastsAndFreeze(V);
+  JavaTypeQueryContext Q{DT, IsNullEdge};
+  JavaType Facts = factsAt(V, Context->getParent(), Q);
+  mergePathFacts(Facts, edgeGuard(Context->getParent(), DestBB, V, DT));
+  normalizeExcludedKlasses(Facts);
+  return Facts;
+}
+
+// =============================================================================
+// Main query
+// =============================================================================
+
+JavaType jeandle::getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
+                              IsNullEdgeOracle IsNullEdge) {
+  // Strip pointer casts (and freeze wrappers) at the API boundary so that
+  // downstream identity comparisons (traceToCheckInstanceof, isNullCheckPath,
+  // isNullEdge) work correctly even when optimization passes introduce
+  // bitcast/addrspacecast/freeze wrappers.
+  V = stripCastsAndFreeze(V);
+
+  if (!DT || !Context) {
+    SmallPtrSet<const PHINode *, 8> Visited;
+    return getBaseJavaType(V, Visited);
+  }
+
+  JavaTypeQueryContext Q{*DT, IsNullEdge};
+  JavaType T = valueDimension(V, Q);
+  return typeIntersect(T, factsAt(V, Context->getParent(), Q));
 }

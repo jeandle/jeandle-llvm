@@ -1,0 +1,3 @@
+# All incoming edges to %pass are null edges; the query sees no facts and is
+# preserved.
+IsObjectKlass 22 = false
