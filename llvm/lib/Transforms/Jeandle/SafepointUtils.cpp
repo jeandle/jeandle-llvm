@@ -16,9 +16,11 @@
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/ConstantRange.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
@@ -177,6 +179,94 @@ bool llvm::jeandle::isMarkedStripMinedInner(Loop &L) {
   return llvm::any_of(*OuterLatch, isStripMinedPoll);
 }
 
+namespace {
+
+// IndVarSimplify's LFTR can leave a mandatory upper-bound exit in this form:
+//
+//   iv = phi i32 [ start, preheader ], [ iv.next, latch ]
+//   bound = llvm.umax.i32(ceiling, start)
+//   if (iv != bound) continue; else exit;
+//   iv.next = iv + 1
+//
+// It may also strengthen only SCEV's cached no-wrap flags.  A later, freshly
+// constructed ScalarEvolution must not be required to remember those flags in
+// order to verify a poll deletion.  Reconstruct the numerical proof directly
+// from the final IR instead: taking the continue edge on the first iteration
+// implies start <u ceiling, and the unit recurrence can then take at most
+// ceiling - start backedges.  If ceiling is below ExclusiveLimit, so is the
+// maximum backedge count.
+static bool finalIRBackedgeCountProvablyLessThan(Loop &L,
+                                                 uint64_t ExclusiveLimit,
+                                                 DominatorTree &DT) {
+  if (ExclusiveLimit == 0)
+    return false;
+
+  BasicBlock *Preheader = L.getLoopPreheader();
+  BasicBlock *Latch = L.getLoopLatch();
+  if (!Preheader || !Latch)
+    return false;
+
+  for (PHINode &Phi : L.getHeader()->phis()) {
+    if (!Phi.getType()->isIntegerTy(32))
+      continue;
+
+    Value *Start = Phi.getIncomingValueForBlock(Preheader);
+    Value *Next = Phi.getIncomingValueForBlock(Latch);
+    std::optional<APInt> Step = jeandle::getConstantAddStep(Next, &Phi);
+    if (!Start || !Step || !Step->isOne() || !L.isLoopInvariant(Start))
+      continue;
+
+    for (BasicBlock *CheckBB : L.blocks()) {
+      auto *Branch = dyn_cast<BranchInst>(CheckBB->getTerminator());
+      if (!Branch || !Branch->isConditional())
+        continue;
+      auto *Cmp = dyn_cast<ICmpInst>(Branch->getCondition());
+      if (!Cmp || (Cmp->getPredicate() != ICmpInst::ICMP_EQ &&
+                   Cmp->getPredicate() != ICmpInst::ICMP_NE))
+        continue;
+
+      Value *Bound = nullptr;
+      if (Cmp->getOperand(0) == &Phi)
+        Bound = Cmp->getOperand(1);
+      else if (Cmp->getOperand(1) == &Phi)
+        Bound = Cmp->getOperand(0);
+      else
+        continue;
+
+      auto *UMax = dyn_cast<IntrinsicInst>(Bound);
+      if (!UMax || UMax->getIntrinsicID() != Intrinsic::umax ||
+          !L.isLoopInvariant(UMax))
+        continue;
+
+      Value *Ceiling = nullptr;
+      if (UMax->getArgOperand(0) == Start)
+        Ceiling = UMax->getArgOperand(1);
+      else if (UMax->getArgOperand(1) == Start)
+        Ceiling = UMax->getArgOperand(0);
+      if (!Ceiling || !L.isLoopInvariant(Ceiling))
+        continue;
+
+      unsigned ContinueIndex = Cmp->getPredicate() == ICmpInst::ICMP_NE ? 0 : 1;
+      BasicBlock *Continue = Branch->getSuccessor(ContinueIndex);
+      BasicBlock *Exit = Branch->getSuccessor(1 - ContinueIndex);
+      if (!L.contains(Continue) || L.contains(Exit) ||
+          !DT.dominates(BasicBlockEdge(CheckBB, Continue), Latch))
+        continue;
+
+      // Java array lengths carry !range [0, INT_MAX), but keep this proof
+      // generic and derive the strict upper bound from the value itself.
+      ConstantRange Range =
+          computeConstantRange(Ceiling, /*ForSigned=*/false);
+      if (ExclusiveLimit > UINT32_MAX ||
+          Range.getUnsignedMax().ult(APInt(32, ExclusiveLimit)))
+        return true;
+    }
+  }
+  return false;
+}
+
+} // namespace
+
 bool llvm::jeandle::backedgeCountProvablyLessThan(Loop &L,
                                                   uint64_t ExclusiveLimit,
                                                   ScalarEvolution &SE) {
@@ -235,6 +325,12 @@ llvm::jeandle::LoopSafepointFacts::get(Loop &L, LoopInfo &LI, DominatorTree &DT,
   BasicBlock *Latch = L.getLoopLatch();
   if (!Latch)
     return Facts;
+
+  uint64_t Budget = getLoopStripMiningIter();
+  Facts.IsWithinBudget |=
+      Budget != 0 && finalIRBackedgeCountProvablyLessThan(L, Budget, DT);
+  Facts.IsIntCountedEquivalent |=
+      finalIRBackedgeCountProvablyLessThan(L, INT_MAX, DT);
 
   for (BasicBlock *BB : L.blocks()) {
     if (!DT.dominates(BB, Latch))

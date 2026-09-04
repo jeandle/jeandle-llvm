@@ -9,8 +9,8 @@
 //===----------------------------------------------------------------------===//
 ///
 /// Verifies that every natural loop either reaches a safepoint on every
-/// backedge path or has a SCEV-provable finite bound accepted by the poll
-/// elimination policy. Strip-mined inner loops are accepted via the
+/// backedge path or has a reproducible finite bound accepted by the poll
+/// elimination policy.  Strip-mined inner loops are accepted via the
 /// "jeandle.strip-mined-poll" attribute on the poll relocated onto the outer
 /// back-edge: this verifier is adjacent to SafepointStripMining in the
 /// pipeline, so the marker is always fresh and trusted.
@@ -26,6 +26,7 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
@@ -89,7 +90,8 @@ static cl::opt<SafepointCoverageCheck> CoverageCheck(
 #endif
     cl::desc("Safepoint coverage verifier mode."));
 
-static bool isLoopCovered(Loop &L, ScalarEvolution &SE) {
+static bool isLoopCovered(Loop &L, LoopInfo &LI, DominatorTree &DT,
+                          ScalarEvolution &SE) {
   SmallVector<BasicBlock *, 4> Latches;
   L.getLoopLatches(Latches);
   if (Latches.empty())
@@ -104,7 +106,8 @@ static bool isLoopCovered(Loop &L, ScalarEvolution &SE) {
   if (AllLatchesCovered)
     return true;
 
-  jeandle::LoopSafepointFacts Facts = jeandle::LoopSafepointFacts::get(L, SE);
+  jeandle::LoopSafepointFacts Facts =
+      jeandle::LoopSafepointFacts::get(L, LI, DT, SE);
   if (!jeandle::isMarkedStripMinedInner(L) &&
       !jeandle::isStripMiningEnabled() && Facts.IsIntCountedEquivalent)
     return true;
@@ -140,11 +143,12 @@ PreservedAnalyses SafepointCoverageVerifier::run(Function &F,
     return PreservedAnalyses::all();
   }
 
+  auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
   auto &SE = AM.getResult<ScalarEvolutionAnalysis>(F);
 
   bool Broken = false;
   for (Loop *L : LI.getLoopsInPreorder()) {
-    if (isLoopCovered(*L, SE)) {
+    if (isLoopCovered(*L, LI, DT, SE)) {
       LLVM_DEBUG(dbgs() << "  covered: loop " << L->getHeader()->getName()
                         << " in " << F.getName() << "\n");
       continue;
