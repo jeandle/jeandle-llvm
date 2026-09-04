@@ -31,6 +31,7 @@
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/GlobalsModRef.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/BasicBlock.h"
@@ -76,6 +77,27 @@ static cl::opt<bool>
                    cl::desc("Only reorder expressions within a basic block "
                             "when exposing CSE opportunities"),
                    cl::init(true), cl::Hidden);
+
+// When off, run() skips the LoopInfo fetch and OpClassifier sees a null loop,
+// so ordering falls back to rank-only (legacy behavior).
+static cl::opt<bool> ReassociateLoopCarriedRecurrence(
+    DEBUG_TYPE "-loop-carried-recurrence",
+    cl::desc("Sort loop-carried recurrence phis to the outermost operand of a "
+             "reassociated expression, shortening the loop-carried dependency"),
+    cl::init(true), cl::Hidden);
+
+// The classifier is rebuilt per optimized expression and each build walks
+// forward slices of the loop body plus a scan of the header phis, so any
+// unbudgeted part is quadratic over a huge chain or phi-heavy header. One
+// budget, counted in def-use edges examined (not values inserted: one value
+// can have arbitrarily many uses), is shared across the whole build; past it
+// the classification is abandoned and the expression keeps legacy rank order
+// -- a sort-key fallback, never a correctness issue.
+static cl::opt<unsigned> ReassociateRecurrenceSliceLimit(
+    DEBUG_TYPE "-loop-carried-recurrence-slice-limit",
+    cl::desc("Fall back to rank-only ordering when computing a loop's forward "
+             "slice would examine more than this many def-use edges"),
+    cl::init(512), cl::Hidden);
 
 #ifndef NDEBUG
 /// Print out the expression identified in the Ops list.
@@ -231,6 +253,117 @@ unsigned ReassociatePass::getRank(Value *V) {
 
   return ValueRankMap[I] = Rank;
 }
+
+namespace llvm::reassociate {
+
+// Forward, intra-iteration, in-loop def-use slice. Starting from `Seeds`,
+// follow def->use edges (operand -> user) that stay inside `L`, but never enter
+// a loop-header phi through one of its in-loop incomings: that incoming is the
+// value carried from the *previous* iteration, not produced in this one. This
+// applies to ANY loop header reached, including headers of loops nested in `L`
+// (an inner loop's back-edge also crosses an iteration boundary). Merge phis
+// (non-header, e.g. an if/then/else join inside the body) are crossed normally.
+// The reachable values are added to `Out`. Charges every def-use edge examined
+// against `Budget` (shared across one classifier build) and returns false,
+// leaving `Out` partial, when examining another edge would exceed it.
+static bool forwardLoopSlice(ArrayRef<const Value *> Seeds, const Loop *L,
+                             const LoopInfo *LI,
+                             SmallPtrSetImpl<const Value *> &Out,
+                             unsigned &Budget) {
+  SmallVector<const Value *, 16> Worklist(Seeds.begin(), Seeds.end());
+  while (!Worklist.empty()) {
+    const Value *Cur = Worklist.pop_back_val();
+    if (!Out.insert(Cur).second)
+      continue;
+    for (const User *U : Cur->users()) {
+      if (Budget == 0)
+        return false;
+      --Budget;
+      const auto *UI = dyn_cast<Instruction>(U);
+      if (!UI || !L->contains(UI->getParent()))
+        continue;
+      if (const auto *Phi = dyn_cast<PHINode>(UI)) {
+        const Loop *PL = LI->getLoopFor(Phi->getParent());
+        if (PL && PL->getHeader() == Phi->getParent()) {
+          // Cur is a carry if it enters this loop header from inside that loop;
+          // skip that edge and cross the pre-header init only.
+          bool IsCarry = false;
+          for (unsigned i = 0, e = Phi->getNumIncomingValues(); i != e; ++i)
+            if (Phi->getIncomingValue(i) == Cur &&
+                PL->contains(Phi->getIncomingBlock(i)))
+              IsCarry = true;
+          if (IsCarry)
+            continue;
+        }
+      }
+      Worklist.push_back(UI);
+    }
+  }
+  return true;
+}
+
+OpClassifier::OpClassifier(const LoopInfo *LI, const Instruction *I)
+    : EnclosingLoop(LI && I ? LI->getLoopFor(I->getParent()) : nullptr) {
+  if (!EnclosingLoop)
+    return;
+  const Loop *L = EnclosingLoop;
+
+  // One budget bounds the whole build -- root slice, header-phi scan, and
+  // recurrence slice -- so a single build is O(limit) regardless of loop
+  // size, header phi count, or fanout. Exhausting it anywhere leaves
+  // RecurrenceSet empty, i.e. legacy rank order.
+  unsigned Budget = ReassociateRecurrenceSliceLimit;
+
+  // SeenFromRoot: what this iteration's value of the root feeds into. The root
+  // "closes" a reduction phi P if P's next value (its in-loop incoming) is in
+  // here -- i.e. the root is on the compute path that produces P's next value.
+  SmallPtrSet<const Value *, 16> SeenFromRoot;
+  if (!forwardLoopSlice(I, L, LI, SeenFromRoot, Budget))
+    return;
+
+  SmallVector<const Value *, 4> ClosedPhis;
+  for (const PHINode &Phi : L->getHeader()->phis())
+    for (unsigned i = 0, e = Phi.getNumIncomingValues(); i != e; ++i) {
+      if (Budget == 0)
+        return;
+      --Budget;
+      if (L->contains(Phi.getIncomingBlock(i)) &&
+          SeenFromRoot.contains(Phi.getIncomingValue(i))) {
+        ClosedPhis.push_back(&Phi);
+        break;
+      }
+    }
+
+  // The recurrence is the forward slice from the closed reduction phis: the phi
+  // itself plus everything that depends on this iteration's value of it (a
+  // mask, shift, the add-chain leaves, ...). Those leaves belong at the
+  // outermost operand so the carry stays one ALU op. If the root closes
+  // nothing, no leaf is a recurrence and ordering falls back to rank.
+  if (!ClosedPhis.empty() &&
+      !forwardLoopSlice(ClosedPhis, L, LI, RecurrenceSet, Budget))
+    RecurrenceSet.clear(); // Partial set could mislabel; keep legacy order.
+}
+
+OpCategory OpClassifier::classify(const Value *V) const {
+  // Scope the reordering to expressions that actually carry a recurrence. With
+  // no enclosing loop (or the flag off, which leaves EnclosingLoop null), or
+  // when this expression closes no reduction phi (RecurrenceSet empty), every
+  // leaf is uniform so the comparator degenerates to rank-only -- exactly
+  // pre-existing behaviour. This keeps the feature to its name: a loop
+  // expression with no recurrence (e.g. a plain `a + b + invariant`) is left at
+  // legacy rank order rather than having its invariants regrouped.
+  if (!EnclosingLoop || RecurrenceSet.empty())
+    return OpCategory::LoopVariant;
+  if (RecurrenceSet.contains(V))
+    return OpCategory::LoopCarriedRecurrence;
+  if (isa<Constant>(V))
+    return OpCategory::LoopInvariantOrConst;
+  if (EnclosingLoop->isLoopInvariant(V))
+    return OpCategory::LoopInvariantOrConst;
+  return OpCategory::LoopVariant;
+}
+
+} // namespace llvm::reassociate
 
 // Canonicalize constants to RHS.  Otherwise, sort the operands by rank.
 void ReassociatePass::canonicalizeOperands(Instruction *I) {
@@ -1105,8 +1238,10 @@ Value *ReassociatePass::RemoveFactorFromExpression(Value *V, Value *Factor,
   MadeChange |= LinearizeExprTree(BO, Tree, RedoInsts, Flags);
   SmallVector<ValueEntry, 8> Factors;
   Factors.reserve(Tree.size());
+  reassociate::OpClassifier Cls(LI, BO);
   for (const RepeatedValue &E : Tree)
-    Factors.append(E.second, ValueEntry(getRank(E.first), E.first));
+    Factors.append(
+        E.second, ValueEntry(getRank(E.first), E.first, Cls.classify(E.first)));
 
   bool FoundFactor = false;
   bool NeedsNegate = false;
@@ -1461,15 +1596,16 @@ Value *ReassociatePass::OptimizeXor(Instruction *I,
   // Step 4: Reassemble the Ops
   if (Changed) {
     Ops.clear();
+    reassociate::OpClassifier Cls(LI, I);
     for (const XorOpnd &O : Opnds) {
       if (O.isInvalid())
         continue;
-      ValueEntry VE(getRank(O.getValue()), O.getValue());
-      Ops.push_back(VE);
+      Value *V = O.getValue();
+      Ops.push_back(ValueEntry(getRank(V), V, Cls.classify(V)));
     }
     if (!ConstOpnd.isZero()) {
       Value *C = ConstantInt::get(Ty, ConstOpnd);
-      ValueEntry VE(getRank(C), C);
+      ValueEntry VE(getRank(C), C, Cls.classify(C));
       Ops.push_back(VE);
     }
     unsigned Sz = Ops.size();
@@ -1493,6 +1629,8 @@ Value *ReassociatePass::OptimizeAdd(Instruction *I,
   // can simplify expressions like X+-X == 0 and X+~X ==-1.  While we're at it,
   // scan for any
   // duplicates.  We want to canonicalize Y+Y+Y+Z -> 3*Y+Z.
+
+  reassociate::OpClassifier Cls(LI, I);
 
   for (unsigned i = 0, e = Ops.size(); i != e; ++i) {
     Value *TheOp = Ops[i].Op;
@@ -1533,7 +1671,7 @@ Value *ReassociatePass::OptimizeAdd(Instruction *I,
       // Otherwise, we had some input that didn't have the dupe, such as
       // "A + A + B" -> "A*2 + B".  Add the new multiply to the list of
       // things being added by this operation.
-      Ops.insert(Ops.begin(), ValueEntry(getRank(Mul), Mul));
+      Ops.insert(Ops.begin(), ValueEntry(getRank(Mul), Mul, Cls.classify(Mul)));
 
       --i;
       e = Ops.size();
@@ -1572,7 +1710,7 @@ Value *ReassociatePass::OptimizeAdd(Instruction *I,
     // if X and ~X we append -1 to the operand list.
     if (match(TheOp, m_Not(m_Value()))) {
       Value *V = Constant::getAllOnesValue(X->getType());
-      Ops.insert(Ops.end(), ValueEntry(getRank(V), V));
+      Ops.insert(Ops.end(), ValueEntry(getRank(V), V, Cls.classify(V)));
       e += 1;
     }
   }
@@ -1710,7 +1848,7 @@ Value *ReassociatePass::OptimizeAdd(Instruction *I,
     // Otherwise, we had some input that didn't have the factor, such as
     // "A*B + A*C + D" -> "A*(B+C) + D".  Add the new multiply to the list of
     // things being added by this operation.
-    Ops.insert(Ops.begin(), ValueEntry(getRank(V2), V2));
+    Ops.insert(Ops.begin(), ValueEntry(getRank(V2), V2, Cls.classify(V2)));
   }
 
   return nullptr;
@@ -1886,7 +2024,8 @@ Value *ReassociatePass::OptimizeMul(BinaryOperator *I,
   if (Ops.empty())
     return V;
 
-  ValueEntry NewEntry = ValueEntry(getRank(V), V);
+  reassociate::OpClassifier Cls(LI, I);
+  ValueEntry NewEntry = ValueEntry(getRank(V), V, Cls.classify(V));
   Ops.insert(llvm::lower_bound(Ops, NewEntry), NewEntry);
   return nullptr;
 }
@@ -1923,7 +2062,11 @@ Value *ReassociatePass::OptimizeExpression(BinaryOperator *I,
   if (Cst && Cst != ConstantExpr::getBinOpIdentity(Opcode, I->getType())) {
     if (Cst == ConstantExpr::getBinOpAbsorber(Opcode, I->getType()))
       return Cst;
-    Ops.push_back(ValueEntry(0, Cst));
+    // Classify rather than hard-coding LoopInvariantOrConst so that with no
+    // enclosing loop (flag off) the constant shares the uniform category and
+    // ordering stays rank-only.
+    reassociate::OpClassifier Cls(LI, I);
+    Ops.push_back(ValueEntry(0, Cst, Cls.classify(Cst)));
   }
 
   if (Ops.size() == 1) return Ops[0].Op;
@@ -2292,17 +2435,14 @@ void ReassociatePass::ReassociateExpression(BinaryOperator *I) {
   MadeChange |= LinearizeExprTree(I, Tree, RedoInsts, Flags);
   SmallVector<ValueEntry, 8> Ops;
   Ops.reserve(Tree.size());
+  reassociate::OpClassifier Cls(LI, I);
   for (const RepeatedValue &E : Tree)
-    Ops.append(E.second, ValueEntry(getRank(E.first), E.first));
+    Ops.append(E.second,
+               ValueEntry(getRank(E.first), E.first, Cls.classify(E.first)));
 
   LLVM_DEBUG(dbgs() << "RAIn:\t"; PrintOps(I, Ops); dbgs() << '\n');
 
-  // Now that we have linearized the tree to a list and have gathered all of
-  // the operands and their ranks, sort the operands by their rank.  Use a
-  // stable_sort so that values with equal ranks will have their relative
-  // positions maintained (and so the compiler is deterministic).  Note that
-  // this sorts so that the highest ranking values end up at the beginning of
-  // the vector.
+  // Sort by category then rank (see operator<). stable_sort for determinism.
   llvm::stable_sort(Ops);
 
   // Now that we have the expression tree in a convenient
@@ -2432,6 +2572,12 @@ void ReassociatePass::ReassociateExpression(BinaryOperator *I) {
     for (unsigned i = Ops.size() - 1; i > LimitIdx; --i) {
       // We must use int type to go below zero when LimitIdx is 0.
       for (int j = i - 1; j >= (int)LimitIdx; --j) {
+        // Keep the loop-carried recurrence outermost: don't let a pair that
+        // contains it be pulled to the innermost (CSE) position, which would
+        // re-lengthen the loop-carried dependency the category sort shortened.
+        if (Ops[i].Category == reassociate::OpCategory::LoopCarriedRecurrence ||
+            Ops[j].Category == reassociate::OpCategory::LoopCarriedRecurrence)
+          continue;
         unsigned Score = 0;
         Value *Op0 = Ops[i].Op;
         Value *Op1 = Ops[j].Op;
@@ -2546,7 +2692,22 @@ ReassociatePass::BuildPairMap(ReversePostOrderTraversal<Function *> &RPOT) {
   }
 }
 
-PreservedAnalyses ReassociatePass::run(Function &F, FunctionAnalysisManager &) {
+PreservedAnalyses ReassociatePass::run(Function &F,
+                                       FunctionAnalysisManager &FAM) {
+  // Reassociate preserves the CFG, so the LoopInfo (and the DominatorTree it is
+  // built from) stays valid for the LICM run that follows. Fetch it from the
+  // FAM so it is cached and reused rather than rebuilt. Only needed when the
+  // loop-carried ordering is enabled and the function has more than one block
+  // (otherwise there are no loops and ordering reduces to rank only).
+  LoopInfo *LIResult = nullptr;
+  if (ReassociateLoopCarriedRecurrence && !F.empty() &&
+      std::next(F.begin()) != F.end())
+    LIResult = &FAM.getResult<LoopAnalysis>(F);
+  return runImpl(F, LIResult);
+}
+
+PreservedAnalyses ReassociatePass::runImpl(Function &F, LoopInfo *LIResult) {
+  LI = LIResult;
   // Get the functions basic blocks in Reverse Post Order. This order is used by
   // BuildRankMap to pre calculate ranks correctly. It also excludes dead basic
   // blocks (it has been seen that the analysis in this pass could hang when
@@ -2615,6 +2776,9 @@ PreservedAnalyses ReassociatePass::run(Function &F, FunctionAnalysisManager &) {
   for (auto &Entry : PairMap)
     Entry.clear();
 
+  // Don't leave the member pointing at FAM-owned LoopInfo across functions.
+  LI = nullptr;
+
   if (MadeChange) {
     PreservedAnalyses PA;
     PA.preserveSet<CFGAnalyses>();
@@ -2640,13 +2804,20 @@ public:
     if (skipFunction(F))
       return false;
 
-    FunctionAnalysisManager DummyFAM;
-    auto PA = Impl.run(F, DummyFAM);
+    // Provide LoopInfo from the wrapper pass (required below) so the shared
+    // body sees the same loop-carried ordering as the new PM.
+    LoopInfo *LI = nullptr;
+    if (ReassociateLoopCarriedRecurrence && !F.empty() &&
+        std::next(F.begin()) != F.end())
+      LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+    auto PA = Impl.runImpl(F, LI);
     return !PA.areAllPreserved();
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
+    if (ReassociateLoopCarriedRecurrence)
+      AU.addRequired<LoopInfoWrapperPass>();
     AU.addPreserved<AAResultsWrapperPass>();
     AU.addPreserved<BasicAAWrapperPass>();
     AU.addPreserved<GlobalsAAWrapperPass>();
@@ -2657,8 +2828,11 @@ public:
 
 char ReassociateLegacyPass::ID = 0;
 
-INITIALIZE_PASS(ReassociateLegacyPass, "reassociate",
-                "Reassociate expressions", false, false)
+INITIALIZE_PASS_BEGIN(ReassociateLegacyPass, "reassociate",
+                      "Reassociate expressions", false, false)
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
+INITIALIZE_PASS_END(ReassociateLegacyPass, "reassociate",
+                    "Reassociate expressions", false, false)
 
 // Public interface to the Reassociate pass
 FunctionPass *llvm::createReassociatePass() {
