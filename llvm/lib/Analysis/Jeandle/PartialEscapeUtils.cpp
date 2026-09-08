@@ -440,9 +440,10 @@ struct StackGuard {
 // Values such as loads and already-processed PHIs, which have no structural
 // relationship with their allocation site), then constants (poison is a
 // refinement wildcard; null, undef, globals, and numeric constants are never
-// a virtual object), then carrier peeling (GEP, addrspacecast within
-// JavaHeapAddrSpace, bitcast, freeze, same-width inttoptr(ptrtoint(x))
-// round-trips), and finally PHI/select merge resolution, where the merge
+// a virtual object), then carrier peeling (GEP, AS1-preserving and AS1↔AS3
+// representation addrspacecasts, bitcast, freeze, same-width
+// inttoptr(ptrtoint(x)) round-trips), and finally PHI/select merge resolution,
+// where the merge
 // denotes a virtual object only when every defined alternative resolves to
 // the same ObjectID, with poison refining to that identity. WholeObject mode
 // additionally requires offset zero on every path. Recursion is depth-capped

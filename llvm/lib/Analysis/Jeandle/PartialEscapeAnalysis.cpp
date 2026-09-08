@@ -2849,15 +2849,19 @@ Instruction *Analyzer::getOrCreateSemanticOopCast(StoreInst *SI,
 
 // Type-coercion for processLoad.
 //
-// Handles loads that read a WHOLE stored slot, possibly reinterpreting its
-// type: the trivial same-type return, a same-bit-width primitive↔primitive
-// BitCast (Float↔Int, Half↔i16, etc.), and pointer↔pointer passthrough.
+// Produces a replacement whose type exactly matches the original load result.
+// Besides same-type values and same-bit-width primitive↔primitive bitcasts
+// (Float↔Int, Half↔i16, etc.), this handles the AS1↔AS3 representation
+// boundary for Java references. PEA field state normally holds a semantic AS1
+// reference even when a compressed field load physically returns AS3, so the
+// common compressed-oop case coerces AS1 back to AS3 for ReplaceLoad; the
+// frontend's existing AS3→AS1 cast remains the consumer of that replacement.
 //
 // The caller, processLoad, rejects sub-slot ("incomplete field") reads — a load
 // whose within-slot byte offset is nonzero — before reaching this routine,
-// forcing the object to materialize instead. Widening loads (EntryWidth <
-// LoadWidth), narrower whole-slot loads (EntryWidth > LoadWidth), and
-// pointer↔primitive mismatches (stable-slot-kind invariant) bail here.
+// forcing the object to materialize instead. Primitive width mismatches,
+// pointer↔primitive mismatches (the stable-slot-kind invariant), and pointer
+// address spaces other than AS1/AS3 bail here.
 // TODO(unsafe-inliner): see the access dispatch (processStore/processLoad).
 //
 // Every synthesized cast is registered in Result.OwnedInsts and gets an
@@ -2894,10 +2898,13 @@ Value *Analyzer::coerceToType(Value *V, Type *LoadTy,
   if (VTy->isPointerTy() != LoadTy->isPointerTy())
     return nullptr;
 
-  // Pointer↔pointer: permit the Java heap (AS1) <-> narrow oop (AS3)
-  // representation change. PlaceInstruction parents the cast before the load,
-  // and ExpandNarrowOopCast lowers it after PEA; null is represented directly
-  // in the target address space so it needs no runtime encode/decode.
+  // Reference FieldValues use the semantic Java-heap representation (AS1),
+  // whereas an original compressed-oop load returns the physical AS3 type.
+  // ReplaceLoad requires an exact type match, making AS1→AS3 the usual
+  // direction here; the generic branch also accepts the reverse AS3→AS1
+  // direction. PlaceInstruction parents the cast before the load and
+  // ExpandNarrowOopCast lowers it after PEA. Null can be represented directly
+  // in the target address space and needs no runtime encode/decode.
   if (VTy->isPointerTy() && LoadTy->isPointerTy()) {
     unsigned VAS = VTy->getPointerAddressSpace();
     unsigned LAS = LoadTy->getPointerAddressSpace();
@@ -5271,10 +5278,6 @@ void Analyzer::processInstruction(Instruction *I) {
     // processJavaOp — see the isJeandle* predicates in
     // PartialEscapeUtils.{h,cpp} for which the analyzer actually recognizes.)
     //
-    // TODO(compressed-oop): decode_heap_oop, decode_klass, encode_heap_oop,
-    // and encode_klass are frontend JavaOps deferred until CompressedOops
-    // support lands; explicitly excluded from PEA scope today.
-    //
     // When the frontend grows a new JavaOp, wire its fold in processJavaOp
     // and add the isJeandle* predicate in PartialEscapeUtils.{h,cpp}.
     //
@@ -5986,8 +5989,9 @@ bool Analyzer::processStore(StoreInst *SI) {
 //   - A never-written field folds to its Java default value; this fold runs
 //     before the sub-slot bail, so a partial read of a never-written wider
 //     slot still folds to the default.
-//   - A Scalar entry folds through coerceToType (same-type passthrough or
-//     same-bit-width bitcast; anything else materializes the base).
+//   - A Scalar entry folds through coerceToType (same-type passthrough,
+//     same-bit-width primitive bitcast, or AS1↔AS3 oop representation
+//     conversion); unsupported mismatches materialize the base.
 //   - A VirtualRef entry forwards the load to the inner virtual's real
 //     identity (AllocationCall for an ordinary VO, SyntheticPhi for a
 //     synthetic VO) and installs a virtual alias, or — if the inner already
@@ -6183,11 +6187,12 @@ void Analyzer::processLoad(LoadInst *LI) {
 
   if (Existing->isScalar()) {
     Value *V = Existing->getScalar();
-    // Coerce to LoadTy: same-type passthrough or same-bit-width primitive↔
-    // primitive reinterpret (bitcast). Pointer↔primitive, cross-AS pointer
-    // pairs, and any cross-width mismatch (narrowing/widening) cannot be
-    // folded: a kind/width-mismatched load materializes the object at the
-    // load, keeping the tracked slot's stable kind/width intact.
+    // Coerce the tracked slot value to the original load's exact result type:
+    // same-type passthrough, same-bit-width primitive reinterpretation, or an
+    // AS1↔AS3 Java-reference representation cast. Pointer↔primitive,
+    // unsupported pointer address spaces, and primitive width mismatches
+    // cannot be folded; such a load materializes the object, keeping the
+    // tracked slot's stable kind/width intact.
     Value *Coerced = coerceToType(V, LoadTy, LI);
     if (!Coerced) {
       materializeAt(*BaseID, LI, MatReason::Unhandled);
@@ -6264,13 +6269,13 @@ void Analyzer::processLoad(LoadInst *LI) {
       return;
     }
 
-    // Type-compatibility. For ordinary reference loads, LoadTy and the
-    // inner identity are normally `ptr addrspace(1)` and coerceToType returns
-    // Repl unchanged. Cross-address-space or ptr↔primitive mismatch
-    // materializes the outer at the load (stable-slot-kind invariant).
-    // (Sub-slot pointer loads were already rejected by the WithinSlotByteOff
-    // bail above.) We don't poison InnerID because other paths may still be
-    // able to virtualize it.
+    // The inner virtual identity is semantic AS1. An uncompressed AS1 load
+    // therefore uses Repl unchanged, while a physical compressed-oop AS3 load
+    // receives an AS1→AS3 replacement. An unsupported pointer address space or
+    // a pointer↔primitive mismatch materializes the outer at the load (the
+    // stable-slot-kind invariant). Sub-slot pointer loads were already
+    // rejected by the WithinSlotByteOff bail above. We don't poison InnerID
+    // because other paths may still be able to virtualize it.
     Value *Coerced = coerceToType(Repl, LoadTy, LI);
     if (!Coerced) {
       materializeAt(*BaseID, LI, MatReason::Unhandled);
@@ -6305,12 +6310,13 @@ void Analyzer::processLoad(LoadInst *LI) {
       markIneligible(*BaseID);
       return;
     }
-    // A materialized ref slot can only be loaded back as a pointer (and in
-    // practice, since LLVM 17 uses opaque pointers, only as the same
-    // ptr-AS). coerceToType fails on ptr↔primitive (stable-slot-kind) and
-    // cross-AS pointer pairs — materialize at the load in that case.
-    // (Partial pointer loads were already rejected by the WithinSlotByteOff
-    // bail above.)
+    // A materialized reference is normally represented as semantic AS1.
+    // coerceToType leaves an uncompressed AS1 load unchanged or produces the
+    // AS3 value required by a physical compressed-oop load. It rejects a
+    // pointer↔primitive mismatch (the stable-slot-kind invariant) and pointer
+    // address spaces outside AS1/AS3; materialize at the load in those cases.
+    // Partial pointer loads were already rejected by the WithinSlotByteOff
+    // bail above.
     Value *Coerced = coerceToType(V, LoadTy, LI);
     if (!Coerced) {
       materializeAt(*BaseID, LI, MatReason::Unhandled);
@@ -8027,19 +8033,23 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
              jeandle::MaterializeEffect::InvalidPlanID &&
          "materialization requires an active final-commit plan");
 
+  jeandle::VirtualObject &VObj = *Result.VirtualObjects[ID];
+
   // Validate the complete replay snapshot before recursing into nested
   // objects, emitting effects, or mutating virtual/lock state. Source stores
-  // may carry any sized first-class type, while replay is atomic-unordered and
-  // therefore accepts only the verifier's atomic memory types and widths. An
-  // invalid member is still recorded so final commit rejects its entire
-  // recursive/lock-cascade transaction.
+  // may carry any sized first-class semantic value type, while replay uses the
+  // field's physical storage type for its atomic-unordered store. In
+  // particular, a compressed-oop field has an AS1 semantic value but an AS3
+  // storage type. An invalid member is still recorded so final commit rejects
+  // its entire recursive/lock-cascade transaction.
   if (auto FSIt = C.FieldStates.find(ID); FSIt != C.FieldStates.end())
     for (const auto &KV : FSIt->second) {
       const jeandle::FieldValue &FV = KV.second;
       if (FV.isUnknown())
         continue;
-      if (!jeandle::pea::isLegalMaterializationAtomicType(FV.getDeclaredType(),
-                                                          DL)) {
+      const jeandle::VirtualObject::FieldDesc *FD = VObj.findField(KV.first);
+      if (!FD ||
+          !jeandle::pea::isLegalMaterializationAtomicType(FD->LLVMType, DL)) {
         // Preserve every reaching store that analysis tentatively eliminated,
         // including edge-local field definitions.
         observeFieldDefinitions(ID, C.FieldDefinitions);
@@ -8061,8 +8071,6 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
   // processBlock publishes a dead exit and returns before walking instructions
   // when no incoming contribution is live. Materialization therefore only
   // runs with a live block state or an edge-local copy of one.
-
-  jeandle::VirtualObject &VObj = *Result.VirtualObjects[ID];
 
   // Loop-nest overflow guard. When currentMode == StopNewInLoopNest, every
   // virtual object still in scope was created OUTSIDE the active loop nest:

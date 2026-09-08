@@ -147,6 +147,7 @@ int VirtualObject::getOrCreateFieldIndex(int64_t Offset, Type *Ty,
   auto NewIt = Fields.insert(It, New);
   return static_cast<int>(NewIt - Fields.begin());
 }
+
 const VirtualObject::FieldDesc *VirtualObject::findField(int64_t Offset) const {
   auto It = std::lower_bound(
       Fields.begin(), Fields.end(), Offset,
@@ -814,8 +815,7 @@ bool PEAResult::hasLegalMaterializationAtomicTypes(const DataLayout &DL) const {
     for (const Effect &E : KV.second)
       if (const auto *ME = dyn_cast<MaterializeEffect>(&E))
         for (const MaterializeEffect::FieldEntry &FE : ME->FieldEntries)
-          if (!pea::isLegalMaterializationAtomicType(FE.Value.getDeclaredType(),
-                                                     DL))
+          if (!pea::isLegalMaterializationAtomicType(FE.Storage.LLVMType, DL))
             return false;
   return true;
 }

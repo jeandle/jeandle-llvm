@@ -845,8 +845,8 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
   // VirtualRef→MaterializedRef during prerequisite materialization), which also
   // dominates here.
   for (const auto &FE : E.FieldEntries) {
-    assert(jeandle::pea::isLegalMaterializationAtomicType(
-               FE.Value.getDeclaredType(), DL) &&
+    assert(jeandle::pea::isLegalMaterializationAtomicType(FE.Storage.LLVMType,
+                                                          DL) &&
            "materialize replay field must be a legal atomic store type");
     Value *V = nullptr;
     if (FE.Value.isScalar()) {
