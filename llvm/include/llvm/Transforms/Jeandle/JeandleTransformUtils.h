@@ -314,6 +314,18 @@ inline std::optional<int> getOopHandleLoadId(LoadInst *LI) {
   return jeandle::getOopHandleId(LI->getPointerOperand());
 }
 
+class LazyValueInfo;
+
+/// A jeandle::IsNullEdgeOracle backed by LazyValueInfo: answers "is V provably
+/// null on edge FromBB -> ToBB?" via LVI's edge-predicate query. The
+/// referenced LVI must stay valid for the queried CFG state — only passes that
+/// do not mutate the CFG may hold and use this (LazyValueInfo caches per-block
+/// state; splitting or erasing blocks behind its back is unsafe).
+struct LVINullEdgeOracle {
+  LazyValueInfo &LVI;
+  bool operator()(Value *V, BasicBlock *FromBB, BasicBlock *ToBB) const;
+};
+
 } // namespace llvm
 
 #endif // LLVM_TRANSFORMS_JEANDLE_JEANDLEUTILS_H

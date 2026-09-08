@@ -11,6 +11,7 @@
 #include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 #include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
+#include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Jeandle/Deoptimization.h"
 #include "llvm/IR/Jeandle/GCStrategy.h"
@@ -498,6 +499,32 @@ unsigned getDeoptScopeVOInsertPos(const CallBase &CB) {
     reportInvalidDeoptBundle(
         CB, "missing or mismatched adjacent i32 deopt bci pair");
   return *Start + 2;
+}
+
+/// LazyValueInfo-backed null-edge oracle. This fork's getPredicateOnEdge
+/// returns a Constant*: the constant result of the comparison, or nullptr when
+/// unknown. Unknown answers false (the edge is kept) — only positive proof may
+/// skip an edge. V is stripped of pointer casts, aliases and freeze wrappers
+/// (the same canonicalization the engine uses) so a null test on the
+/// underlying oop is still recognized when the query value carries a wrapper
+/// (freeze(x) equals x unless x is poison, and branching on poison is
+/// undefined, so null proofs transfer).
+bool LVINullEdgeOracle::operator()(Value *V, BasicBlock *FromBB,
+                                   BasicBlock *ToBB) const {
+  while (true) {
+    V = V->stripPointerCastsAndAliases();
+    if (auto *FI = dyn_cast<FreezeInst>(V)) {
+      V = FI->getOperand(0);
+      continue;
+    }
+    break;
+  }
+  auto *PT = dyn_cast<PointerType>(V->getType());
+  if (!PT)
+    return false;
+  Constant *C = LVI.getPredicateOnEdge(
+      ICmpInst::ICMP_EQ, V, ConstantPointerNull::get(PT), FromBB, ToBB);
+  return C && C->isOneValue();
 }
 
 } // namespace llvm

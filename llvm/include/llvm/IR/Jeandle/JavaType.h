@@ -19,6 +19,7 @@
 #define JEANDLE_JAVA_TYPE_H
 
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 
 #include <cstdint>
 
@@ -47,9 +48,11 @@ struct JavaType {
   bool Exact = false;
 
   /// Klasses this value is known NOT to be an instance of.
-  /// Populated from dominating failed type checks (type-denied paths).
-  /// Only the most general (uppermost) excluded classes are stored;
-  /// more specific subtypes are implied.
+  /// Populated from failed type checks (type-denied branch outcomes) met
+  /// along the CFG paths that reach the query point and joined at merges —
+  /// the denying check need not dominate the query point. Only the most
+  /// general (uppermost) excluded classes are stored; more specific subtypes
+  /// are implied.
   SmallDenseSet<uintptr_t, 2> ExcludedKlasses;
   JavaType() = default;
   JavaType(uintptr_t Klass, bool Exact);
@@ -68,18 +71,44 @@ struct JavaType {
   bool operator!=(const JavaType &Other) const { return !(*this == Other); }
 };
 
+/// Oracle answering "is V provably null on the CFG edge FromBB->ToBB?".
+/// Edge-semantics sharpening skips proven-null edges: JavaType is conditioned
+/// on a non-null oop (see struct JavaType above), and a null-proven edge
+/// carries no non-null type constraint. Only positive proof may return true;
+/// when in doubt, return false (keeping the edge is always sound).
+/// The standard implementation is LVINullEdgeOracle (LazyValueInfo-backed);
+/// it recognizes null tests both directly on the edge's branch and through
+/// threaded/indirect forms. Context-sensitive callers must supply one; a null
+/// oracle is only meaningful for context-insensitive (base-only) queries,
+/// where the engine is not run at all.
+using IsNullEdgeOracle =
+    function_ref<bool(Value *V, BasicBlock *FromBB, BasicBlock *ToBB)>;
+
 /// Get the Java type of a value.
 ///
 /// When Context is null, performs a context-insensitive query using only
 /// attributes and metadata attached to the value (and PHI incoming values).
 ///
 /// When Context is provided, additionally performs context-sensitive sharpening
-/// by examining dominating type guards that constrain the value's type at the
-/// point of the context instruction.
+/// with the edge-semantics dataflow engine: guards attached to CFG edges are
+/// met along paths and joined at merges, giving the type constraints that hold
+/// for V at the context instruction. Proven-null edges and back edges are
+/// excluded; both exclusions are exact under the non-null contract (see the
+/// design comment in JavaType.cpp). Null-edge proofs come from the supplied
+/// oracle.
 ///
 /// JavaType does not model nullability. Sharpening derived from
 /// jeandle.check_instanceof is therefore only sound for consumers whose IR/API
-/// contract guarantees that the queried oop is non-null at the check site.
+/// contract guarantees that the queried oop is non-null at the check site
+/// (e.g. check_instanceof's nonnull parameter, or an explicit non-null proof
+/// as in ConstantFieldFolding). Edges on which the value is provably null are
+/// excluded from the analysis via the supplied oracle — including individual
+/// PHI incoming arms — so a PHI whose remaining arms agree on a klass can
+/// come back Known even though the value can be null on the skipped arm.
+/// Consumers that materialize the result as IR facts (metadata, assumes) must
+/// themselves ensure the value is non-null at the point of use, as the IR
+/// semantics of that use (a field load's implicit null check, a virtual
+/// call's receiver dispatch) normally do.
 ///
 /// The query traces through a limited set of IR patterns:
 /// - PHI nodes (with cycle detection for loop back-edges)
@@ -92,27 +121,25 @@ struct JavaType {
 /// - Xor i1 %a, true: logical NOT
 /// - Direct jeandle.check_instanceof calls
 /// Unrecognized patterns conservatively return unknown ({}).
-JavaType getJavaType(Value *V, DominatorTree *DT = nullptr,
-                     Instruction *Context = nullptr);
+JavaType getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
+                     IsNullEdgeOracle IsNullEdge);
 
-/// Compute the type constraints that dominating jeandle.check_instanceof
-/// checks imply for V at Context. Returns ONLY check-derived constraints (a
-/// positive klass when a passing check proves it, with Exact set from
-/// IsEffectivelyFinal, plus excluded klasses from failed checks) — never
-/// attribute/metadata-derived base types.
+/// Compute the type constraints that CFG edge guards imply for V at Context.
+/// Returns ONLY check-derived constraints (a positive klass when a passing
+/// check proves it, with Exact set from IsEffectivelyFinal, plus excluded
+/// klasses from failed checks) — never attribute/metadata-derived base types.
 ///
-/// When DestBB is non-null, Context must be the terminator of a PHI incoming
-/// block and DestBB the PHI's parent block; the incoming block's own
-/// conditional branch is then considered: a PHI incoming use is edge-local,
-/// so if exactly one successor is DestBB, that outcome's constraints apply to
-/// the value flowing along that edge. When DestBB is null, Context's own
-/// branch is not considered.
+/// DestBB must be the PHI's parent block and Context the terminator of the
+/// PHI incoming block: the guard on the edge Context->parent -> DestBB is
+/// also considered, because a PHI incoming use is edge-local — if exactly one
+/// successor is DestBB, that outcome's constraints apply to the value flowing
+/// along that edge.
 ///
-/// The result depends only on the CFG, branch conditions and VM callbacks; it
-/// is constant while those are unchanged. Sound under the same non-null oop
-/// contract as getJavaType.
-JavaType sharpenFromDominators(Value *V, Instruction *Context,
-                               DominatorTree &DT, BasicBlock *DestBB = nullptr);
+/// The result depends only on the CFG, branch conditions, the null-edge
+/// oracle and VM callbacks; it is constant while those are unchanged. Sound
+/// under the same non-null oop contract as getJavaType.
+JavaType sharpen(Value *V, Instruction *Context, DominatorTree &DT,
+                 BasicBlock *DestBB, IsNullEdgeOracle IsNullEdge);
 
 /// Compute the type union of two Java types. Used when the value could be
 /// either type (PHI, select). Widens positive type to LCA and intersects

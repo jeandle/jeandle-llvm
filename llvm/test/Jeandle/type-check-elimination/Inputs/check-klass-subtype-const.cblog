@@ -1,0 +1,6 @@
+# 22 is a subtype of 5 (folds true); 9 is not a subtype of 22 (folds false);
+# 44 is an interface that 22 implements (folds true — a klass constant pair is
+# exact, the runtime predicate is the same IsSubtype).
+IsSubtype 22 5 = true
+IsSubtype 9 22 = false
+IsSubtype 22 44 = true

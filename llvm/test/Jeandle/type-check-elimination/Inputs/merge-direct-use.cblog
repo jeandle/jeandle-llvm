@@ -1,0 +1,11 @@
+# Klass 1 is the declared type of %obj; klass 22 is a subtype of 1. Arm checks
+# stay preserved (nothing known at their sites), the merge query folds.
+IsObjectKlass 22 = false
+IsInterface 1 = false
+GetSecondarySupers 1 = []
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+IsEffectivelyFinal 22 = false
+IsSubtype 22 1 = true
+IsSubtype 1 22 = false
+IsSubtype 22 22 = true

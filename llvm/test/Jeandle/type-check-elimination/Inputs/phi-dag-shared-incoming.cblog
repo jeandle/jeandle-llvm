@@ -1,0 +1,7 @@
+# Klass 5; 22 is a subtype of 5; 9 is a subtype of 5. LCA(22, 9) = 5. The
+# query at the merge must stay unfolded.
+IsObjectKlass 5 = false
+IsEffectivelyFinal 22 = false
+IsObjectKlass 22 = false
+IsInterface 22 = false
+GetSecondarySupers 22 = []

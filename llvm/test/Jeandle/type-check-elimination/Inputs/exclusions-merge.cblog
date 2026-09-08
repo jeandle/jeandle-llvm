@@ -1,0 +1,22 @@
+# Klass 1 is the declared type of %obj. 22 is a subtype of 5, both subtypes of
+# 1; 30 is a subtype of 22. The merged exclusion at M is {22}, which denies the
+# query for 30.
+IsObjectKlass 22 = false
+IsObjectKlass 5 = false
+IsObjectKlass 30 = false
+IsInterface 1 = false
+GetSecondarySupers 1 = []
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+IsInterface 5 = false
+GetSecondarySupers 5 = []
+IsSubtype 22 22 = true
+IsSubtype 22 5 = true
+IsSubtype 5 22 = false
+IsSubtype 22 1 = true
+IsSubtype 1 22 = false
+IsSubtype 5 1 = true
+IsSubtype 1 5 = false
+IsSubtype 1 30 = false
+IsSubtype 30 1 = true
+IsSubtype 30 22 = true
