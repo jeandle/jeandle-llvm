@@ -161,7 +161,8 @@ static bool deleteLoopPolls(Loop &L, LoopInfo &LI, DominatorTree &DT,
 
   auto IsDeleteable = [&](CallInst *P) { return !Required.contains(P); };
 
-  jeandle::LoopSafepointFacts Facts = jeandle::LoopSafepointFacts::get(L, SE);
+  jeandle::LoopSafepointFacts Facts =
+      jeandle::LoopSafepointFacts::get(L, LI, DT, SE);
   const char *Reason = nullptr;
   if (jeandle::isMarkedStripMinedInner(L))
     Reason = "strip-mined-inner"; // poll attribute: poll-free, bounded
@@ -534,6 +535,10 @@ PreservedAnalyses SafepointPollElimination::run(Function &F,
   if (Mode == SafepointPollEliminationMode::AfterStripMining) {
     auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
     auto &SE = AM.getResult<ScalarEvolutionAnalysis>(F);
+    // Poll deletion is a terminal safety decision.  Drop analysis-only
+    // no-wrap strengthening so it uses only facts reproducible from the
+    // current IR; strip mining has already consumed the stronger SCEV state.
+    SE.forgetAllLoops();
     bool Changed =
         completeLoopPollDeletion(F, LI, DT, SE, Mode, DeferEmptyLoopDeletion);
     return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
@@ -548,6 +553,11 @@ PreservedAnalyses SafepointPollElimination::run(Function &F,
   if (!jeandle::isStripMiningEnabled()) {
     auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
     auto &SE = AM.getResult<ScalarEvolutionAnalysis>(F);
+    // IndVarSimplify may have strengthened only cached SCEV flags.  Rebuild
+    // from the final i32 IR before deleting all polls so the independent
+    // coverage verifier can reproduce the same numerical proof.  When strip
+    // mining is enabled this path is skipped and its SCEV facts are preserved.
+    SE.forgetAllLoops();
     Changed |=
         completeLoopPollDeletion(F, LI, DT, SE, Mode, DeferEmptyLoopDeletion);
   }

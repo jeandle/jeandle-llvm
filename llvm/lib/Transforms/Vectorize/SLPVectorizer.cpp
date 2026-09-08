@@ -1716,12 +1716,28 @@ static MemoryLocation getLocation(Instruction *I) {
   return MemoryLocation();
 }
 
-/// \returns True if the instruction is not a volatile or atomic load/store.
+/// Java heap element stores are represented as unordered atomics until the
+/// lowering pipeline has completed.  LLVM's normal SLP legality check rejects
+/// all atomic stores; when the shared vectorizer option is enabled, allow only
+/// primitive, non-volatile unordered stores.  The vector store emitted by SLP
+/// is deliberately non-atomic, so stronger orderings, volatile accesses, and
+/// reference stores remain conservative.
+static bool isVectorizableStore(const StoreInst *SI) {
+  if (SI->isSimple())
+    return true;
+  if (!VectorizerParams::IgnoreAtomicity || SI->isVolatile() ||
+      !SI->isAtomic() || SI->getOrdering() != AtomicOrdering::Unordered)
+    return false;
+  Type *Ty = SI->getValueOperand()->getType();
+  return Ty->isIntegerTy() || Ty->isFloatingPointTy();
+}
+
+/// \returns True if the instruction is safe for SLP scheduling.
 static bool isSimple(Instruction *I) {
   if (LoadInst *LI = dyn_cast<LoadInst>(I))
     return LI->isSimple();
   if (StoreInst *SI = dyn_cast<StoreInst>(I))
-    return SI->isSimple();
+    return isVectorizableStore(SI);
   if (MemIntrinsic *MI = dyn_cast<MemIntrinsic>(I))
     return !MI->isVolatile();
   return true;
@@ -9054,7 +9070,7 @@ BoUpSLP::collectUserStores(const BoUpSLP::TreeEntry *TE) const {
       auto *SI = dyn_cast<StoreInst>(U);
       // Test whether we can handle the store. V might be a global, which could
       // be used in a different function.
-      if (SI == nullptr || !SI->isSimple() || SI->getFunction() != F ||
+      if (SI == nullptr || !isVectorizableStore(SI) || SI->getFunction() != F ||
           !isValidElementType(SI->getValueOperand()->getType()))
         continue;
       // Skip entry if already
@@ -10363,9 +10379,12 @@ BoUpSLP::TreeEntry::EntryState BoUpSLP::getScalarsVectorizationState(
     }
     // Make sure all stores in the bundle are simple - we can't vectorize
     // atomic or volatile stores.
+    bool HasAtomic = cast<StoreInst>(VL0)->isAtomic();
+    AtomicOrdering Ordering = cast<StoreInst>(VL0)->getOrdering();
     for (Value *V : VL) {
       auto *SI = cast<StoreInst>(V);
-      if (!SI->isSimple()) {
+      if (!isVectorizableStore(SI) || SI->isAtomic() != HasAtomic ||
+          (HasAtomic && SI->getOrdering() != Ordering)) {
         LLVM_DEBUG(dbgs() << "SLP: Gathering non-simple stores.\n");
         return TreeEntry::NeedToGather;
       }
@@ -23706,7 +23725,7 @@ void SLPVectorizerPass::collectSeedInstructions(BasicBlock *BB) {
     // Ignore store instructions that are volatile or have a pointer operand
     // that doesn't point to a scalar type.
     if (auto *SI = dyn_cast<StoreInst>(&I)) {
-      if (!SI->isSimple())
+      if (!isVectorizableStore(SI))
         continue;
       if (!isValidElementType(SI->getValueOperand()->getType()))
         continue;

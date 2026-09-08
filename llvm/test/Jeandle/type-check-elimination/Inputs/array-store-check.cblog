@@ -1,0 +1,26 @@
+# JavaType construction expands the known klasses' interface sets.
+IsInterface 100 = false
+GetSecondarySupers 100 = []
+IsInterface 200 = false
+GetSecondarySupers 200 = []
+IsInterface 300 = false
+GetSecondarySupers 300 = []
+IsInterface 400 = false
+GetSecondarySupers 400 = []
+IsInterface 500 = false
+GetSecondarySupers 500 = []
+
+# klass 100 is Object[], whose element klass 1 is java.lang.Object.
+ArrayElementKlass 100 = 1
+IsObjectKlass 1 = true
+
+# klass 200 is StringLike[], whose element klass is 250. Klass 300 is a
+# compatible subtype; klass 400 is incompatible. The latter must remain a
+# runtime check because its value is not proven non-null.
+ArrayElementKlass 200 = 250
+IsObjectKlass 250 = false
+IsSubtype 300 250 = true
+IsSubtype 400 250 = false
+
+# Zero means a primitive array or unavailable element klass information.
+ArrayElementKlass 500 = 0

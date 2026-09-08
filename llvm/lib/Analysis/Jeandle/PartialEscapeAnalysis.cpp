@@ -5107,7 +5107,7 @@ void Analyzer::processInstruction(Instruction *I) {
     // yet:
     //   - TODO: processArrayCopy / processMemSet — llvm.memcpy/memmove
     //     (System.arraycopy) and llvm.memset (Arrays.fill). The only
-    //     llvm.memset producer today is jeandle.new_instance's lower-phase=1
+    //     llvm.memset producer today is jeandle.new_instance's lower-phase=2
     //     template, inlined AFTER PEA, so neither shape reaches PEA yet.
     //   - TODO: llvm.reachability_fence — upstream LLVM this fork tracks
     //     does not define Intrinsic::reachability_fence, and the frontend
@@ -6288,7 +6288,7 @@ bool Analyzer::foldGetClass(CallBase *CB) {
 bool Analyzer::foldCheckCast(CallBase *CB) {
   // jeandle.checkcast itself is lower-phase="0" by design: its expansion
   // exposes a null check (foldICmpEquality) and a jeandle.check_instanceof
-  // call (lower-phase="1"), which is the subtype-check op this fold sees in
+  // call (lower-phase="2"), which is the subtype-check op this fold sees in
   // production. The direct jeandle.checkcast form is only reachable from lit
   // tests.
   if (CB->arg_size() < 2)
@@ -6317,7 +6317,7 @@ bool Analyzer::foldCheckCast(CallBase *CB) {
 bool Analyzer::foldInstanceOf(CallBase *CB) {
   // jeandle.instanceof itself is lower-phase="0" by design: its expansion
   // exposes a null check (foldICmpEquality) and a jeandle.check_instanceof
-  // call (lower-phase="1", handled by foldCheckCast). The direct
+  // call (lower-phase="2", handled by foldCheckCast). The direct
   // jeandle.instanceof form is only reachable from lit tests.
   if (CB->arg_size() < 2)
     return false;
