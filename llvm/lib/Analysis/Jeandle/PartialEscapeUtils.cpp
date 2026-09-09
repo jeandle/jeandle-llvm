@@ -307,6 +307,7 @@ Value *stripPointerCastsAndOffsets(Value *Ptr, const DataLayout &DL,
 
   int64_t Offset = 0;
   Value *V = Ptr;
+  bool CrossedNarrowOopBoundary = false;
   // Bound the walk defensively; Jeandle IR typically has < 5 layers.
   for (unsigned Depth = 0; Depth < 32; ++Depth) {
     if (auto *GEP = dyn_cast<GEPOperator>(V)) {
@@ -319,8 +320,21 @@ Value *stripPointerCastsAndOffsets(Value *Ptr, const DataLayout &DL,
         return V;
       }
       std::optional<int64_t> GEPDelta = Acc.trySExtValue();
-      std::optional<int64_t> NewOffset =
-          GEPDelta ? checkedOffsetAdd(Offset, *GEPDelta) : std::nullopt;
+      if (!GEPDelta) {
+        if (Unresolved)
+          *Unresolved = true;
+        return V;
+      }
+      // Offset accumulated before the first AS1<->AS3 boundary belongs to
+      // the outer representation and remains valid. A GEP found after that
+      // boundary belongs to an inner representation; its byte delta cannot
+      // be added to the outer offset without the compressed-oop base/shift.
+      if (CrossedNarrowOopBoundary && *GEPDelta != 0) {
+        if (Unresolved)
+          *Unresolved = true;
+        return V;
+      }
+      std::optional<int64_t> NewOffset = checkedOffsetAdd(Offset, *GEPDelta);
       if (!NewOffset) {
         if (Unresolved)
           *Unresolved = true;
@@ -338,7 +352,12 @@ Value *stripPointerCastsAndOffsets(Value *Ptr, const DataLayout &DL,
       continue;
     }
     if (auto *ASC = dyn_cast<AddrSpaceCastOperator>(V)) {
-      // Only chase through casts that stay in JavaHeapAddrSpace.
+      // Chase AS1-preserving casts. AS1<->AS3 compressed-oop casts preserve
+      // whole-oop identity, but their numeric representations use different
+      // byte coordinates: encode/decode applies the VM heap base and shift.
+      // Preserve an already accumulated outer AS1 offset, but reject a
+      // non-zero outer AS3 offset or any non-zero GEP subsequently found on
+      // the inner side of the first representation boundary.
       auto *DstPT = dyn_cast<PointerType>(ASC->getType());
       auto *SrcPT = dyn_cast<PointerType>(ASC->getOperand(0)->getType());
       if (!DstPT || !SrcPT) {
@@ -354,7 +373,21 @@ Value *stripPointerCastsAndOffsets(Value *Ptr, const DataLayout &DL,
                              SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
                             (DstAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
                              SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace);
-      if (!SameWideAS && !WideNarrowPair) {
+      if (WideNarrowPair) {
+        // Before the first boundary Offset is expressed in the cast result's
+        // representation. Only AS1 has the Java-heap byte coordinates that
+        // resolveFieldOffset promises; an AS3 delta would need scaling.
+        if (!CrossedNarrowOopBoundary &&
+            DstAS == jeandle::AddrSpace::NarrowOopAddrSpace && Offset != 0) {
+          if (Unresolved)
+            *Unresolved = true;
+          return V;
+        }
+        CrossedNarrowOopBoundary = true;
+        V = ASC->getOperand(0);
+        continue;
+      }
+      if (!SameWideAS) {
         if (OutOffset)
           *OutOffset = Offset;
         return V;
