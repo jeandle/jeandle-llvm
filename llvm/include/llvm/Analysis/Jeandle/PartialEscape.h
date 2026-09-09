@@ -88,7 +88,7 @@ struct MonitorIdRef {
 // original enter from IR — the transform cannot depend on the original call's
 // lifetime. Callee is the jeandle.monitorenter_* function; NonReceiverArgs are
 // operands 1..N (e.g. the BasicLock); the receiver (operand 0) is the effect's
-// real receiver: OrigAlloc or SyntheticPhi.
+// real receiver: OrigAlloc or SyntheticReplayPhi.
 // BytecodeDepth is the ascending re-emit sort key.
 struct MaterializedLock {
   Function *Callee = nullptr;
@@ -103,7 +103,7 @@ struct MaterializedLock {
 // more precise than an OrigAlloc key, which would be last-write-wins across
 // per-pred materializations of the same object. The transform resolves the
 // receiver via `MaterializedReceiverOf[SourceEffect]` (set once per effect to
-// OrigAlloc or SyntheticPhi in applyMaterialize, read by the lock-cascade
+// OrigAlloc or SyntheticReplayPhi in applyMaterialize, read by the lock-cascade
 // re-emit path). Materialization never spawns a per-pred invoke, so the
 // per-effect key disambiguates cascade members without any fallback chain.
 // See PEAResult::LockReplayBatches.
@@ -174,17 +174,17 @@ public:
   // (NeverEscapes) or KEPT and reused as the materialized value itself for
   // PartiallyEscapes. A synthetic Case-C VO (a merge of distinct but
   // compatible virtual objects into one synthetic VO — see
-  // PartialEscapeAnalysis.cpp's file header) uses SyntheticPhi instead. The
-  // analysis rewrites every VirtualRef to the referenced object's real
-  // identity during prerequisite materialization (see processLoad/
-  // processStore/resolveVirtualRef), so the transform only replays field
-  // stores and re-emits locks onto the selected receiver. Ordinary receivers
-  // are OrigAlloc; prepared Case-C receivers are SyntheticPhi. OrigAlloc's
-  // role is a pure identity token / the single sound SSA materialized value,
-  // never a fresh allocation in the final IR.
-  // WeakTrackingVH: an atomic deopt-pool rewrite may clone the allocation
-  // invoke and RAUW the original. The handle follows to the clone so
-  // transform-time uses remain valid.
+  // PartialEscapeAnalysis.cpp's file header) retains its original SyntheticPhi
+  // as a logical carrier and uses SyntheticReplayPhi as its AS1 replay
+  // receiver. The analysis rewrites every VirtualRef to the referenced
+  // object's real identity during prerequisite materialization (see
+  // processLoad/processStore/resolveVirtualRef), so the transform only replays
+  // field stores and re-emits locks onto the selected receiver. Ordinary
+  // receivers are OrigAlloc; prepared Case-C receivers are SyntheticReplayPhi.
+  // OrigAlloc is a pure identity token / the single sound SSA materialized
+  // value, never a fresh allocation in the final IR. WeakTrackingVH: an atomic
+  // deopt-pool rewrite may clone the allocation invoke and RAUW the original.
+  // The handle follows to the clone so transform-time uses remain valid.
   WeakTrackingVH AllocationCall;
 
   // The JVM klass pointer taken from the allocation call's first operand
@@ -220,13 +220,28 @@ public:
   // per-pred VOs in original PHI-incoming order. A proven-dead structural
   // incoming retains an InvalidObjectID slot until CFG cleanup removes it;
   // Unseen loop inputs are backfilled by the loop fixpoint. SyntheticPhi is
-  // the merge-block PHINode the VO is aliased to. If the synthetic identity
-  // later escapes, every real leaf allocation is retained at its original
-  // allocation site and the complete current state is replayed once onto
-  // SyntheticPhi. No allocation is created for the synthetic itself.
+  // the original merge-block PHI that carries the logical identity and is
+  // registered in AliasMap; it can be either a wide AS1 oop PHI or a
+  // compressed AS3 oop PHI. Structural source-edge analysis deliberately
+  // continues to use that original carrier.
+  //
+  // Replay needs a dereferenceable AS1 receiver. For an AS1 carrier,
+  // SyntheticReplayPhi is the carrier itself. For an AS3 carrier it is a
+  // separate analyzer-built AS1 PHI whose incoming values are the real
+  // identities of SyntheticSourceIDs on the corresponding original edges.
+  // That PHI is only inserted if prepareSyntheticDAG commits a materialized
+  // synthetic; it is never a decode of the AS3 carrier. This separation keeps
+  // compressed representation values out of replay stores while retaining the
+  // original AS3 PHI for all virtual-state reasoning.
+  //
+  // If the synthetic identity later escapes, every real leaf allocation is
+  // retained at its original allocation site and the complete current state is
+  // replayed once onto SyntheticReplayPhi. No allocation is created for the
+  // synthetic itself.
   bool IsSynthetic = false;
   SmallVector<ObjectID, 4> SyntheticSourceIDs;
   PHINode *SyntheticPhi = nullptr;
+  PHINode *SyntheticReplayPhi = nullptr;
 
   // Defined out-of-line (PartialEscape.cpp): CallBase is incomplete here and
   // the WeakTrackingVH assignment needs the CallBase* → Value* conversion.
@@ -745,8 +760,8 @@ public:
 // Materialize an escape point by replaying tracked field stores and re-emitting
 // surviving monitorenters onto the real identity. For an ordinary VO this is
 // OrigAlloc (VObj.AllocationCall), which dominates every escape point. For a
-// prepared synthetic Case-C VO, it is SyntheticPhi. Neither form emits a fresh
-// allocation invoke. The receiver is recorded in
+// prepared synthetic Case-C VO, it is SyntheticReplayPhi. Neither form emits
+// a fresh allocation invoke. The receiver is recorded in
 // `MaterializedReceiverOf[&E]`.
 // Ordinary phase.
 class MaterializeEffect : public Effect {
@@ -777,7 +792,7 @@ public:
   // handle is NOT recomputed at apply time; WeakTrackingVH is only there to
   // fail loudly rather than dangling.
   WeakTrackingVH InsertBefore;
-  // Replay receiver: OrigAlloc for an ordinary VO, SyntheticPhi for a
+  // Replay receiver: OrigAlloc for an ordinary VO, SyntheticReplayPhi for a
   // synthetic Case-C VO. WeakTrackingVH follows any safepoint clone.
   WeakTrackingVH Target;
   // The field values to replay onto the receiver: one (offset, value) pair
@@ -832,15 +847,28 @@ public:
 // Insert an analyzer-built unparented PHINode at a merge block and wire its
 // incomings. Ordinary phase.
 //
-// CreatePHIEffects are field-value PHIs that merge a per-offset field value
-// across predecessors or around a loop. They are emitted by mergeFieldStates
-// and synthesizeCaseC.
+// Most CreatePHIEffects are field-value PHIs that merge one per-offset field
+// value across predecessors or around a loop. A prepared compressed-oop
+// Case-C synthetic additionally uses this exact insertion/wiring machinery
+// for an AS1 replay-identity PHI. Keeping both forms in one effect is
+// intentional: edge normalization must update every PHI that has an incoming
+// on a replayed edge, and the final availability audit must validate every
+// recorded incoming uniformly.
 class CreatePHIEffect : public Effect {
 public:
+  enum class Role : uint8_t {
+    FieldValue,
+    SyntheticReplayIdentity,
+  };
+
+  // Which modeled value the PHI supplies. FieldOffset is meaningful only for
+  // FieldValue; a SyntheticReplayIdentity instead supplies its owner's AS1
+  // materialization receiver.
+  Role PhiRole = Role::FieldValue;
   // The PHI's value type (the tracked field's type at FieldOffset).
   Type *PHIType = nullptr;
   // Byte offset of the merged field within the virtual object; the mutation
-  // owner's field slot this PHI supplies.
+  // owner's field slot this PHI supplies. Ignored for SyntheticReplayIdentity.
   int64_t FieldOffset = 0;
   // WeakTrackingVH: an incoming value may be a call result whose call is
   // cloned by the deopt-pool phase; the handle follows the RAUW.
@@ -848,8 +876,8 @@ public:
   // Predecessor block for each entry of PHIIncomingValues, pairwise.
   SmallVector<BasicBlock *, 4> PHIIncomingBlocks;
   // The unparented PHINode built by the analyzer (owned by
-  // PEAResult::OwnedPhis / OwnedLoopFieldPhis until the transform inserts it
-  // into Block).
+  // PEAResult::OwnedPhis, OwnedLoopFieldPhis, or OwnedSyntheticReplayPhis
+  // until the transform inserts it into Block).
   PHINode *PhiInst = nullptr;
 
   Kind getKind() const override { return Kind::CreatePHI; }
@@ -1008,8 +1036,8 @@ public:
   };
   // Final per-object classification: NeverEscapes allocations are erased;
   // PartiallyEscapes keep OrigAlloc as the real receiver and replay onto it
-  // (a prepared synthetic identity replays onto SyntheticPhi instead, with
-  // its source allocations kept but not replayed); AlwaysEscapes were
+  // (a prepared synthetic identity replays onto SyntheticReplayPhi instead,
+  // with its source allocations kept but not replayed); AlwaysEscapes were
   // disqualified during analysis and their recorded effects were dropped,
   // so nothing is replayed for them. Stamped by dropEffectsForIneligible
   // (AlwaysEscapes) and by commit() (the other two kinds).
@@ -1132,6 +1160,15 @@ public:
   // OwnedPhis.
   SmallVector<WeakTrackingVH, 4> OwnedLoopFieldPhis;
 
+  // AS1 replay-identity PHIs for compressed Case-C synthetics. Their shells
+  // are referenced by VirtualObject::SyntheticReplayPhi and by monotonic
+  // BlockEffects across ordinary merge retries, and possibly by cached
+  // synthetic VOs across loop B/B' retries. They must therefore survive every
+  // analyzer rollback, regardless of whether the carrier itself is in a loop.
+  // The corresponding CreatePHIEffect is rebuilt or refreshed for the current
+  // traversal.
+  SmallVector<WeakTrackingVH, 4> OwnedSyntheticReplayPhis;
+
   // Parented LLVM PHIs the transform should RAUW to poison + erase after
   // the cfg-kill phase's EliminateAllocation sweep. These are Case-B aliases
   // on a virtual that ended up NeverEscapes: the PHI was registered as an
@@ -1171,12 +1208,13 @@ public:
   // Truncate OwnedPhis/OwnedInsts to the given marks, deleting each trailing
   // entry that is still unparented (the transform only inserts these into a
   // BasicBlock later, so anything added during a discarded merge iteration or
-  // loop-iteration is unparented at rollback time). OwnedLoopFieldPhis is
-  // intentionally NOT touched — it is the per-loop PHI cache whose stability
-  // across fixpoint iterations is the whole point. Shared by deleteOwnedSince
-  // (per-merge rollback) and restoreLoopSnapshot (loop-iteration rollback) so
-  // the WeakTrackingVH -> dyn_cast -> delete/deleteValue -> pop_back logic
-  // lives in exactly one place.
+  // loop-iteration is unparented at rollback time). OwnedLoopFieldPhis and
+  // OwnedSyntheticReplayPhis are intentionally NOT touched: the former is the
+  // per-loop PHI cache, while the latter is reachable from persistent
+  // VirtualObject/effect state across both merge and loop retries. Shared by
+  // deleteOwnedSince (per-merge rollback) and restoreLoopSnapshot
+  // (loop-iteration rollback) so the WeakTrackingVH -> dyn_cast ->
+  // delete/deleteValue -> pop_back logic lives in exactly one place.
   void truncateOwnedTo(size_t PhisMark, size_t InstsMark);
 };
 

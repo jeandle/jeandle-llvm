@@ -26,9 +26,9 @@
 // real identity. For an ordinary VO this is its ORIGINAL allocation
 // (OrigAlloc = VObj.AllocationCall); for a prepared synthetic Case-C VO (one
 // synthetic VO merged from a pointer PHI's distinct but compatible virtual
-// incomings; see PartialEscapeAnalysis.cpp) it is SyntheticPhi. Both dominate
-// their escape points. Ordinary PartiallyEscapes
-// allocations are kept alive, so their original allocation-site deopt bundles
+// incomings; see PartialEscapeAnalysis.cpp) it is SyntheticReplayPhi.
+// Both dominate their escape points. Ordinary PartiallyEscapes allocations
+// are kept alive, so their original allocation-site deopt bundles
 // remain intact. NeverEscapes VOs are eliminated (OrigAlloc erased) and
 // described by a deopt-bundle descriptor (HotSpot reallocs at deopt). The
 // InsertBefore eager-update hook (relocateDependentMaterializes) is retained
@@ -148,7 +148,7 @@ static bool splitReplayEdges(jeandle::PEAResult &Result) {
 
   // Landingpad predecessor splitting clones the landingpad and may synthesize
   // intermediate PHIs for the selected and remaining unwind predecessors.
-  // Insert analysis-owned field PHIs first so LLVM's canonical utility updates
+  // Insert every analysis-owned PHI first so LLVM's canonical utility updates
   // them together with every PHI already present in the IR.
   SmallPtrSet<BasicBlock *, 4> LandingPadTargets;
   for (const EdgePlan &Plan : Plans) {
@@ -173,7 +173,8 @@ static bool splitReplayEdges(jeandle::PEAResult &Result) {
     for (jeandle::CreatePHIEffect *PE : DeferredPhis) {
       PHINode *Phi = PE->PhiInst;
       assert(Phi && !Phi->getParent() &&
-             "deferred field PHI must be unparented before CFG normalization");
+             "deferred analyzer-built PHI must be unparented before CFG "
+             "normalization");
       Phi->insertBefore(PE->Block->getFirstNonPHIIt());
       assert(PE->PHIIncomingValues.size() == PE->PHIIncomingBlocks.size());
       for (unsigned I = 0; I < PE->PHIIncomingValues.size(); ++I)
@@ -224,7 +225,7 @@ static bool splitReplayEdges(jeandle::PEAResult &Result) {
 
     // Landingpad-targeted deferred PHIs were inserted above and therefore were
     // rewritten by SplitBlockPredecessors itself. Ordinary targets can still
-    // own unparented field-value PHIs; keep their recorded incoming blocks
+    // own unparented analyzer-built PHIs; keep their recorded incoming blocks
     // synchronized with the normalized CFG. replaceSuccessorWith redirects
     // every duplicate edge from Source (e.g. switch cases sharing a
     // destination) onto the single new Edge->CurrentTarget edge, so duplicate
@@ -798,8 +799,8 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
   CallBase *OrigAlloc = cast_or_null<CallBase>((Value *)VObj.AllocationCall);
   Value *MatVal = E.Target;
   if (VObj.IsSynthetic)
-    assert(MatVal == VObj.SyntheticPhi &&
-           "synthetic materialization must replay onto SyntheticPhi");
+    assert(MatVal == VObj.SyntheticReplayPhi &&
+           "synthetic materialization must replay onto SyntheticReplayPhi");
   else
     assert((Value *)OrigAlloc == MatVal &&
            "ordinary materialization must replay onto OrigAlloc");
@@ -811,7 +812,7 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
   // applyMaterialize is reached only for PartiallyEscapes VOs (NeverEscapes go
   // to EliminateAllocation; AlwaysEscapes effects were dropped by the
   // analyzer). Ordinary receivers are OrigAlloc; synthetic receivers are the
-  // prepared SyntheticPhi.
+  // prepared SyntheticReplayPhi.
   MaterializedReceiverOf[&E] = MatVal;
 
   Instruction *InsertBefore = dyn_cast_or_null<Instruction>(E.InsertBefore);
@@ -966,9 +967,9 @@ struct jeandle::TransformContext {
   jeandle::PEAResult &Result;
   bool &Changed;
 
-  // effect -> real replay receiver (OrigAlloc or SyntheticPhi). Filled as each
-  // Materialize applies; consumed by the tail effect at a multi-object escape
-  // point to resolve each MergedLock's receiver.
+  // effect -> real replay receiver (OrigAlloc or SyntheticReplayPhi). Filled as
+  // each Materialize applies; consumed by the tail effect at a multi-object
+  // escape point to resolve each MergedLock's receiver.
   DenseMap<const jeandle::MaterializeEffect *, Value *> &MaterializedReceiverOf;
 
   // Reverse index: live InsertBefore -> Materialize effects keyed on it. A
@@ -1160,13 +1161,11 @@ void jeandle::MaterializeEffect::apply(jeandle::TransformContext &Ctx) {
 }
 
 void jeandle::CreatePHIEffect::apply(jeandle::TransformContext &Ctx) {
-  // Field-value PHI: merges a per-offset field VALUE (scalar or
-  // materialized-ref pointer) across preds / around a loop. Emitted by
-  // mergeFieldStates and synthesizeCaseC. This is NOT a materialized-object
-  // PHI — it tracks a real field value that must be merged. The analyzer's
-  // recorded (PHIIncomingValues[I], PHIIncomingBlocks[I]) are valid as-is:
-  // each incoming is a dominating field value, and a materialized-ref
-  // incoming is the peer VO's OrigAlloc, which is kept alive.
+  // FieldValue merges one per-offset scalar/materialized-reference value.
+  // SyntheticReplayIdentity instead merges the real AS1 source identities of
+  // an AS3 Case-C carrier. Both forms need exactly the same insertion and CFG
+  // edge-normalization discipline: every recorded incoming is valid on its
+  // recorded predecessor edge before this PHI becomes visible to replay.
   PHINode *Phi = PhiInst;
   assert(Phi && "CreatePHI effect requires a PhiInst");
   if (Phi->getParent()) {

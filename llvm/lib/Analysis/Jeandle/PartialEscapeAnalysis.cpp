@@ -1081,7 +1081,7 @@ private:
   // Materialize effect are classified PartiallyEscapes and kept at their
   // original allocation sites. No source field or lock replay is emitted: the
   // synthetic's point-local MaterializeEffect replays the complete current
-  // state once onto SyntheticPhi.
+  // state once onto SyntheticReplayPhi.
   DenseSet<jeandle::ObjectID> KeptSyntheticSourceAllocations;
 
   // Per-block exit snapshots, keyed by the block that produced them.
@@ -1387,6 +1387,11 @@ private:
                                    int64_t Offset, Type *Ty, unsigned N,
                                    const Twine &Name);
 
+  // Return the AS1 replay identity for a Case-C synthetic. An AS1 carrier is
+  // its own replay identity; an AS3 carrier gets an unparented AS1 PHI shell
+  // whose effect is emitted only when the synthetic is prepared to escape.
+  PHINode *getOrCreateSyntheticReplayIdentityPhi(jeandle::ObjectID ID);
+
   // Analyze one basic block: classify its entry (live / dead / deferred),
   // rebuild the per-block state from its predecessors (inherit or merge),
   // then walk its instructions and publish the exit snapshot.
@@ -1604,10 +1609,11 @@ private:
                                      BasicBlock *TargetMerge = nullptr);
 
   // Prepare a Case-C identity without targeting its borrowed AllocationCall.
-  // A complete read-only DAG preflight precedes the monotonic commit: each
-  // synthetic PHI is recorded as a valid real replay receiver and every
-  // ordinary leaf allocation is retained at its original allocation site.
-  // Fields and locks are replayed only by the current MaterializeContext.
+  // A complete read-only DAG/replay-plan preflight precedes the monotonic
+  // commit; successful return means every synthetic has a usable AS1 replay
+  // receiver and every ordinary leaf allocation has been retained at its
+  // original site. Fields and locks are replayed only by the current
+  // MaterializeContext.
   bool prepareSyntheticDAG(jeandle::ObjectID ID);
   // The read-only preflight: ID's synthetic DAG is preparable iff every
   // synthetic node has a well-formed PHI (parented, one incoming per source
@@ -1617,11 +1623,44 @@ private:
                               DenseSet<jeandle::ObjectID> &Visiting,
                               DenseSet<jeandle::ObjectID> &Planned,
                               DenseSet<jeandle::ObjectID> &Leaves);
-  // The monotonic commit: record every synthetic node in the DAG as prepared
-  // (replay receiver valid, classification erased) bottom-up. Committing is
-  // the cycle-defense stack.
+  // The monotonic commit: record every synthetic node in the fully preflighted
+  // DAG as prepared and clear its stale classification, bottom-up. Committing
+  // is the cycle-defense stack.
   void commitPreparedSyntheticDAG(jeandle::ObjectID ID,
                                   DenseSet<jeandle::ObjectID> &Committing);
+  struct SyntheticReplayDecodePlan {
+    AddrSpaceCastInst *Decode = nullptr;
+    jeandle::ReplaceLoadEffect *ExistingEffect = nullptr;
+  };
+  struct SyntheticReplayIdentityNodePlan {
+    jeandle::ObjectID ID = jeandle::InvalidObjectID;
+    PHINode *Carrier = nullptr;
+    PHINode *ExistingReplay = nullptr;
+    BasicBlock *Merge = nullptr;
+    bool NeedsSeparateReplay = false;
+    SmallVector<jeandle::ObjectID, 4> IncomingSourceIDs;
+    SmallVector<BasicBlock *, 4> IncomingBlocks;
+    jeandle::CreatePHIEffect *ExistingCreateEffect = nullptr;
+    SmallVector<SyntheticReplayDecodePlan, 2> DirectDecodes;
+  };
+  struct SyntheticReplayIdentityPlan {
+    // Nodes are appended source-first so installation can resolve every
+    // synthetic incoming through an already-created replay receiver.
+    SmallVector<SyntheticReplayIdentityNodePlan, 4> Nodes;
+    DenseMap<jeandle::ObjectID, unsigned> NodeIndex;
+  };
+  // Read-only replay preflight. Validate the complete current source DAG,
+  // receiver placement, incoming availability, and conflicts with the current
+  // effect ledger, recording a source-first installation plan. In particular,
+  // this never creates a replay-PHI shell or mutates an existing Effect.
+  bool buildSyntheticReplayIdentityPlan(jeandle::ObjectID ID,
+                                        SyntheticReplayIdentityPlan &Plan);
+  // Install a fully validated replay plan after the monotonic prepare commit.
+  // This is intentionally infallible: loop-stable PHI shells are created or
+  // reused and the current traversal's rollback-sensitive Effects are then
+  // created or refreshed exactly as recorded by the plan.
+  void
+  installSyntheticReplayIdentityPlan(const SyntheticReplayIdentityPlan &Plan);
   // Whether a replay on the PH -> TargetMerge edge is expressible: the edge
   // must exist, and either PH has a single distinct successor or the edge
   // can be split (no callbr/indirectbr).
@@ -2088,8 +2127,8 @@ private:
   void collectRetryVirtualizationSites(jeandle::ObjectID ID);
 
   // The real SSA identity of a VO: OrigAlloc for an ordinary object, or the
-  // Case-C merge PHI for a synthetic.  The latter applies both to conservative
-  // ineligibility and to successful prepared point-local replay.
+  // AS1 Case-C replay PHI for a synthetic. The original SyntheticPhi remains
+  // the logical carrier and may be AS3; it must never become a replay base.
   Value *realIdentityOf(jeandle::ObjectID ID);
 };
 
@@ -2191,7 +2230,7 @@ void Analyzer::markIneligible(jeandle::ObjectID ID, bool FreshRetry) {
 Value *Analyzer::realIdentityOf(jeandle::ObjectID ID) {
   jeandle::VirtualObject &VObj = *Result.VirtualObjects[ID];
   if (VObj.IsSynthetic)
-    return VObj.SyntheticPhi;
+    return VObj.SyntheticReplayPhi;
   return VObj.AllocationCall;
 }
 
@@ -2325,8 +2364,11 @@ void Analyzer::initializeLoopHeaderPhiAliases(BasicBlock *Header,
 
   for (PHINode &Phi : Header->phis()) {
     Type *Ty = Phi.getType();
-    if (!Ty->isPointerTy() || cast<PointerType>(Ty)->getAddressSpace() !=
-                                  jeandle::AddrSpace::JavaHeapAddrSpace)
+    if (!Ty->isPointerTy())
+      continue;
+    unsigned AS = cast<PointerType>(Ty)->getAddressSpace();
+    if (AS != jeandle::AddrSpace::JavaHeapAddrSpace &&
+        AS != jeandle::AddrSpace::NarrowOopAddrSpace)
       continue;
 
     Aliases.resetAlias(&Phi);
@@ -2781,6 +2823,50 @@ PHINode *Analyzer::getOrCreateLoopFieldPhi(BasicBlock *BB, jeandle::ObjectID ID,
   Result.OwnedLoopFieldPhis.emplace_back(Phi);
   LoopFieldPhiCache[K] = Phi;
   return Phi;
+}
+
+// Return the real AS1 replay identity for a Case-C synthetic. The original
+// SyntheticPhi remains the alias/structural carrier: for AS1 it is already a
+// valid receiver, whereas an AS3 carrier represents compressed storage and
+// must not be dereferenced by replay. The AS3 form therefore gets a separate
+// AS1 PHI of the source object real identities. The shell survives every
+// analyzer rollback because both the synthetic VO and monotonic BlockEffects
+// may retain references to it across an ordinary merge retry; only its effect
+// is rebuilt or refreshed for the current traversal.
+PHINode *Analyzer::getOrCreateSyntheticReplayIdentityPhi(jeandle::ObjectID ID) {
+  assert(ID < Result.VirtualObjects.size() &&
+         "replay plan must name an existing virtual object");
+  jeandle::VirtualObject &VObj = *Result.VirtualObjects[ID];
+  PHINode *Carrier = VObj.SyntheticPhi;
+  assert(VObj.IsSynthetic && Carrier && Carrier->getParent() &&
+         "replay plan must have a parented synthetic carrier");
+
+  auto *CarrierTy = cast<PointerType>(Carrier->getType());
+  unsigned CarrierAS = CarrierTy->getAddressSpace();
+  if (CarrierAS == jeandle::AddrSpace::JavaHeapAddrSpace) {
+    assert((!VObj.SyntheticReplayPhi || VObj.SyntheticReplayPhi == Carrier) &&
+           "AS1 synthetic cannot have a distinct replay identity");
+    VObj.SyntheticReplayPhi = Carrier;
+    return Carrier;
+  }
+  assert(CarrierAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
+         "preflight must reject a non-oop synthetic carrier");
+
+  PointerType *WideTy =
+      PointerType::get(F.getContext(), jeandle::AddrSpace::JavaHeapAddrSpace);
+  if (PHINode *Replay = VObj.SyntheticReplayPhi) {
+    assert(Replay->getType() == WideTy && !Replay->getParent() &&
+           Replay->getNumIncomingValues() == 0 &&
+           "cached replay-PHI shell changed after preflight");
+    return Replay;
+  }
+
+  unsigned N = Carrier->getNumIncomingValues();
+  PHINode *Replay = PHINode::Create(WideTy, N, "pea.casec.replay.phi");
+  Result.OwnedSyntheticReplayPhis.emplace_back(Replay);
+  VObj.SyntheticReplayPhi = Replay;
+  PhiHome[Replay] = Carrier->getParent();
+  return Replay;
 }
 
 // Construct an analysis-only AS3 -> AS1 cast for processStore when the
@@ -3673,10 +3759,14 @@ bool Analyzer::MergeProcessor::mergeFieldStates(jeandle::ObjectID ID) {
                                         /*TargetMerge=*/BB);
         if (Result.NextSeqNo != PreSeqNo)
           Changed = true;
-        // The real input is OrigAlloc for an ordinary inner or SyntheticPhi
-        // for a Case-C inner.  It must dominate this predecessor edge; a
-        // synthetic PHI only dominates the region that inherited it.
+        // The real input is OrigAlloc for an ordinary inner or
+        // SyntheticReplayPhi for a prepared Case-C inner. A failed AS3
+        // preparation has no replay identity, so never record a null value.
         Value *InnerVal = A.realIdentityOf(InnerID);
+        if (!InnerVal) {
+          LocalBail = true;
+          break;
+        }
         if (auto *RealI = dyn_cast_or_null<Instruction>(InnerVal)) {
           if (!RealI->getParent() ||
               !A.DT.dominates(RealI, PredBBs[i]->getTerminator())) {
@@ -3881,12 +3971,14 @@ void Analyzer::deleteOwnedSince(size_t PhiMark, size_t InstMark) {
   Result.truncateOwnedTo(PhiMark, InstMark);
 }
 
-// Classify every Java-heap pointer PHI at BB's entry (see the file header
-// for the Case A/B/C classification) and make its merge decision:
+// Classify every Java-reference pointer PHI (wide AS1 or compressed AS3) at
+// BB's entry (see the file header for the Case A/B/C classification) and make
+// its merge decision:
 //  * Case B — every resolved incoming agrees on one still-virtual ObjectID:
 //    register the PHI as a whole-object alias and record it so commit() can
 //    erase it if the VO is NeverEscapes.
-//  * Case C — resolved incomings are distinct but compatible virtual IDs:
+//  * Case C — wide-AS1 resolved incomings are distinct but compatible virtual
+//    IDs:
 //    synthesizeCaseC builds one synthetic VO merging the per-pred VOs.
 //  * Case A — a non-virtual incoming or a Case-C bail: materialize each
 //    virtual incoming at its predecessor's terminator.
@@ -3898,15 +3990,17 @@ void Analyzer::deleteOwnedSince(size_t PhiMark, size_t InstMark) {
 // decision is re-derived from scratch on every call, so any stale alias on
 // the PHI is reset up front.
 void Analyzer::processBlockPhis(BasicBlock *BB, jeandle::EffectList &Out) {
-  // Walk explicit LLVM PHIs of java-heap pointers. Other PHIs (e.g., scalar
-  // i32 PHIs of folded virtual-load results) flow through normal SSA and are
-  // not the concern of the analyzer.
+  // Walk explicit LLVM PHIs of Java references. Other PHIs (e.g., scalar i32
+  // PHIs of folded virtual-load results) flow through normal SSA and are not
+  // the concern of the analyzer.
   for (PHINode &Phi : BB->phis()) {
     Type *Ty = Phi.getType();
     if (!Ty->isPointerTy())
       continue;
-    if (cast<PointerType>(Ty)->getAddressSpace() !=
-        jeandle::AddrSpace::JavaHeapAddrSpace)
+    unsigned PhiAS = cast<PointerType>(Ty)->getAddressSpace();
+    bool IsWideOopPhi = PhiAS == jeandle::AddrSpace::JavaHeapAddrSpace;
+    bool IsNarrowOopPhi = PhiAS == jeandle::AddrSpace::NarrowOopAddrSpace;
+    if (!IsWideOopPhi && !IsNarrowOopPhi)
       continue;
 
     // Resolve each incoming against its predecessor's exit snapshot. A
@@ -4086,16 +4180,17 @@ void Analyzer::processBlockPhis(BasicBlock *BB, jeandle::EffectList &Out) {
     }
 
     // Case C: every incoming resolves to a virtual ID, but the IDs are not
-    // all equal. Attempt to synthesize a single merged VirtualObject. On
-    // success the PHI is aliased to the new VO and downstream uses fold
-    // through it. On failure (compatibility, identity, or per-entry type
-    // checks) we fall through to Case A.
+    // all equal. A synthetic keeps the original PHI as its logical carrier.
+    // For an AS3 carrier, prepareSyntheticDAG creates a separate AS1 PHI from
+    // the real source identities only when replay is required; the compressed
+    // value is never used as an object base. On Case-C failure (compatibility,
+    // identity, or per-entry type checks) we likewise fall through to Case A.
     bool TryCaseC = (First /* at least one virtual */) &&
                     !AllSame; // Case B already returned if AllSame succeeded.
     LLVM_DEBUG(dbgs() << "PEA-PHI-DECIDE: phi '" << Phi.getName() << "' in "
                       << BB->getName() << ": AllSame=" << AllSame
                       << " First=" << (First ? (int)*First : -1)
-                      << " AnyDerived=" << AnyDerived
+                      << " AnyDerived=" << AnyDerived << " AS=" << PhiAS
                       << " TryCaseC=" << TryCaseC << "\n");
     if (TryCaseC && !AnyDerived) {
       bool EveryInputVirtual = true;
@@ -4193,6 +4288,17 @@ void Analyzer::processBlockPhis(BasicBlock *BB, jeandle::EffectList &Out) {
       Value *OrigAlloc = Result.VirtualObjects[OID]->AllocationCall;
       if (V == OrigAlloc)
         continue; // object-carry already names the retained allocation.
+      // A folded whole-reference field load is not structurally derived from
+      // OrigAlloc, but its ReplaceLoad effect rewrites it to OrigAlloc. It is
+      // therefore already the correct carried identity after this edge-local
+      // materialization. Require the authoritative whole-object alias as well
+      // so an arbitrary load/derived address cannot bypass the structural
+      // check.
+      std::optional<jeandle::ObjectID> IncomingAlias =
+          Aliases.getVirtualAlias(V);
+      if (IncomingAlias && *IncomingAlias == OID &&
+          Aliases.isWholeObjectVirtualAlias(V))
+        continue;
       int64_t Off = 0;
       bool NonConst = false;
       Value *Base =
@@ -4809,6 +4915,9 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
     int64_t Off;
     Type *PhiType = nullptr;
     bool AllSame = true;
+    // Every live predecessor stores its own source VO in this field. Case C
+    // preserves that relation as a self-reference to the synthetic VO.
+    bool IsMergedSelfReference = false;
     jeandle::FieldValue SoleValue;
     SmallVector<jeandle::FieldValue, 4> PerPredFVs;
   };
@@ -4821,6 +4930,7 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
     P.PerPredFVs.resize(LiveN);
     Type *PhiType = nullptr;
     bool AllPointer = true;
+    bool IsMergedSelfReference = true;
     for (unsigned i = 0; i < LiveN; ++i) {
       jeandle::FieldValue FV = jeandle::FieldValue::unknown();
       auto FIt = ExitInfos[i]->FieldStates.find(PerPredIDs[i]);
@@ -4830,6 +4940,8 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
           FV = OIt->second;
       }
       P.PerPredFVs[i] = FV;
+      if (!FV.isVirtualRef() || FV.getVirtualRef() != PerPredIDs[i])
+        IsMergedSelfReference = false;
       if (FV.isUnknown())
         continue;
       Type *T =
@@ -4854,6 +4966,7 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
       PhiType = PointerType::get(F.getContext(),
                                  jeandle::AddrSpace::JavaHeapAddrSpace);
     P.PhiType = PhiType;
+    P.IsMergedSelfReference = IsMergedSelfReference;
     // Detect AllSame across preds (shallowEquals comparison).
     jeandle::FieldValue First = P.PerPredFVs[0];
     P.SoleValue = First;
@@ -4883,15 +4996,17 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
       MergedDefinitions.erase(Off);
   }
 
-  // A differing VirtualRef field requires materializing each referenced
-  // object on the corresponding incoming edge before the merged field PHI is
-  // created.  Preflight every such edge before emitting any child
-  // materialization: if one edge is unsplittable, retaining only a prefix of
-  // the children would leave a half-committed Case-C plan.  Keep the complete
+  // A differing non-self VirtualRef field requires materializing each
+  // referenced object on the corresponding incoming edge before the merged
+  // field PHI is created. A per-predecessor self-reference needs neither an
+  // edge replay nor a field PHI: it becomes a self-reference to the synthetic
+  // VO below. Preflight every remaining edge before emitting any child
+  // materialization; if one edge is unsplittable, retaining only a prefix of
+  // the children would leave a half-committed Case-C plan. Keep the complete
   // owner/child group real instead.
   bool UnsupportedVirtualRefEdge = false;
   for (const OffsetPlan &P : Plans) {
-    if (P.AllSame)
+    if (P.AllSame || P.IsMergedSelfReference)
       continue;
     for (unsigned I = 0; I < LiveN; ++I)
       if (P.PerPredFVs[I].isVirtualRef() &&
@@ -4912,6 +5027,8 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
   // cache hit we reuse the existing ID (and existing VirtualObjects slot)
   // and merely refresh its synthetic metadata. On a miss we duplicate Ref,
   // allocate a fresh ID via createVirtualObject, and tag it synthetic.
+  const unsigned CarrierAS =
+      cast<PointerType>(Phi->getType())->getAddressSpace();
   jeandle::ObjectID NewID;
   if (CachedExistingID != jeandle::InvalidObjectID) {
     NewID = CachedExistingID;
@@ -4920,6 +5037,9 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
     VO.SyntheticSourceIDs.assign(SourceIDsByOriginal.begin(),
                                  SourceIDsByOriginal.end());
     VO.SyntheticPhi = Phi;
+    if (CarrierAS == jeandle::AddrSpace::JavaHeapAddrSpace)
+      VO.SyntheticReplayPhi = Phi;
+    // An AS3 cache hit retains its possibly already-created replay-PHI shell.
   } else {
     auto NewVOUP = Ref.duplicate();
     NewID = Result.createVirtualObject(std::move(NewVOUP));
@@ -4928,11 +5048,13 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
     NewVO.SyntheticSourceIDs.assign(SourceIDsByOriginal.begin(),
                                     SourceIDsByOriginal.end());
     NewVO.SyntheticPhi = Phi;
+    NewVO.SyntheticReplayPhi =
+        CarrierAS == jeandle::AddrSpace::JavaHeapAddrSpace ? Phi : nullptr;
   }
   // Note: NewVO.AllocationCall is shared with Ref (the first per-pred VO).
-  // It MUST NOT be used as a Materialize target or for RAUW. SyntheticPhi is
-  // the replay receiver; AllocationCall remains non-null only because
-  // structural accessors shared with ordinary VOs expect it.
+  // It MUST NOT be used as a Materialize target or for RAUW. SyntheticReplayPhi
+  // is the replay receiver; SyntheticPhi remains the logical alias carrier.
+  // AllocationCall stays non-null because structural accessors expect it.
 
   // Rebuild the synthetic VO's Fields as the UNION of every per-pred VO's
   // Fields. duplicate() only copied Ref's (pred-0's) Fields, but the merged
@@ -4962,16 +5084,28 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
 
   // Materialize inner virtuals if any per-pred entry is a VirtualRef. This
   // happens BEFORE we emit CreatePHI effects so the PHI inputs point at each
-  // inner VO's real identity (OrigAlloc or SyntheticPhi). Any failure here
-  // marks the VO ineligible and returns false; the per-entry CreatePHI effects
-  // we add below (for NewID) get dropped at commit. Inner materializations may
-  // have side-effects on snapshot state, but those are independently sound.
+  // inner VO's real identity (OrigAlloc or SyntheticReplayPhi). Any failure
+  // here marks the VO ineligible and returns false; the per-entry CreatePHI
+  // effects we add below (for NewID) get dropped at commit. Inner
+  // materializations may have side-effects on snapshot state, but those are
+  // independently sound.
   DenseMap<int64_t, jeandle::FieldValue> Merged;
   jeandle::EffectList PendingPhiEffects;
 
   for (const OffsetPlan &P : Plans) {
     if (P.AllSame) {
       Merged[P.Off] = P.SoleValue;
+      continue;
+    }
+    if (P.IsMergedSelfReference) {
+      assert(P.PhiType->isPointerTy() &&
+             P.PhiType->getPointerAddressSpace() ==
+                 jeandle::AddrSpace::JavaHeapAddrSpace &&
+             "merged self-reference must use the semantic oop type");
+      // On each edge the field denotes exactly that edge's source identity.
+      // After Case C those identities are represented by NewID, so retaining
+      // the relation avoids materializing the sources merely to build a PHI.
+      Merged[P.Off] = jeandle::FieldValue::virtualRef(NewID, P.PhiType);
       continue;
     }
     // Compute per-pred Value* for the synthesized PHI.
@@ -5011,6 +5145,10 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
         // Same defensive ExitInfo rewrite as the merge per-VO loop; see the
         // matching comment in mergeFieldStates.
         Value *InnerValue = realIdentityOf(InnerID);
+        if (!InnerValue) {
+          Eligible[NewID] = false;
+          return false;
+        }
         ExitInfos[i]->FieldStates[PerPredIDs[i]][P.Off] =
             jeandle::FieldValue::materializedRef(InnerValue);
         In = InnerValue;
@@ -6259,6 +6397,7 @@ void Analyzer::processLoad(LoadInst *LI) {
       return;
     }
 
+    const jeandle::VirtualObject &InnerVO = *Result.VirtualObjects[InnerID];
     Value *Repl = nullptr;
     if (InnerOS->isMaterialized()) {
       // Defensive: the analyzer rewrites VirtualRef → MaterializedRef on
@@ -6268,25 +6407,32 @@ void Analyzer::processLoad(LoadInst *LI) {
       // pointer — same shape as the MaterializedRef branch below.
       Repl = InnerOS->getMaterializedValue();
     } else {
-      Repl = realIdentityOf(InnerID);
+      // A still-virtual load forwards the logical object identity. For an
+      // ordinary VO AllocationCall serves both roles; for a Case-C synthetic
+      // the original SyntheticPhi is the logical carrier and may be AS3.
+      // SyntheticReplayPhi is deliberately unavailable until materialization
+      // prepares the replay DAG, so using it here would spuriously abandon
+      // every compressed synthetic loaded through another virtual object.
+      Repl = InnerVO.IsSynthetic ? static_cast<Value *>(InnerVO.SyntheticPhi)
+                                 : static_cast<Value *>(InnerVO.AllocationCall);
     }
     // The fallback must yield a value that exists in IR. Keep the outer object
     // real if the ObjectState invariant is violated.
     if (!Repl ||
         (isa<Instruction>(Repl) && !cast<Instruction>(Repl)->getParent()) ||
-        (Result.VirtualObjects[InnerID]->IsSynthetic &&
-         !isValueAvailableAt(Repl, LI))) {
+        (InnerVO.IsSynthetic && !isValueAvailableAt(Repl, LI))) {
       markIneligible(*BaseID);
       return;
     }
 
-    // The inner virtual identity is semantic AS1. An uncompressed AS1 load
-    // therefore uses Repl unchanged, while a physical compressed-oop AS3 load
-    // receives an AS1→AS3 replacement. An unsupported pointer address space or
-    // a pointer↔primitive mismatch materializes the outer at the load (the
-    // stable-slot-kind invariant). Sub-slot pointer loads were already
-    // rejected by the WithinSlotByteOff bail above. We don't poison InnerID
-    // because other paths may still be able to virtualize it.
+    // Coerce the logical/materialized identity to the load's physical
+    // representation. AS1 and AS3 carriers pass through unchanged when they
+    // already match; the opposite representation receives the corresponding
+    // oop cast. An unsupported pointer address space or a pointer↔primitive
+    // mismatch materializes the outer at the load (the stable-slot-kind
+    // invariant). Sub-slot pointer loads were already rejected by the
+    // WithinSlotByteOff bail above. We don't poison InnerID because other
+    // paths may still be able to virtualize it.
     Value *Coerced = coerceToType(Repl, LoadTy, LI);
     if (!Coerced) {
       materializeAt(*BaseID, LI, MatReason::Unhandled);
@@ -7779,9 +7925,9 @@ void Analyzer::materializeVirtualCallArgs(CallBase *CB) {
 // Materialize placement is escape-point / predecessor-end: materializeAt
 // places at the escape-point instruction; materializeAtPredFromExitInfo places
 // at the predecessor's terminator. These positions govern field and lock
-// replay, not allocation creation: the receiver is the dominating OrigAlloc or
-// SyntheticPhi. Edge-local replay is moved onto the corresponding split edge
-// by the transform when the predecessor has other successors.
+// replay, not allocation creation: the receiver is the dominating OrigAlloc
+// or SyntheticReplayPhi. Edge-local replay moves to the corresponding split
+// edge by the transform when the predecessor has other successors.
 
 // Returns true iff CB has at least one "deopt" operand bundle.
 static bool hasDeoptBundle(CallBase *CB) {
@@ -7915,7 +8061,7 @@ bool Analyzer::canPrepareSyntheticDAG(jeandle::ObjectID ID,
                                       DenseSet<jeandle::ObjectID> &Visiting,
                                       DenseSet<jeandle::ObjectID> &Planned,
                                       DenseSet<jeandle::ObjectID> &Leaves) {
-  if (PreparedSyntheticIDs.count(ID) || Planned.count(ID))
+  if (Planned.count(ID))
     return true;
   if (ID >= Result.VirtualObjects.size() || !Eligible.lookup(ID))
     return false;
@@ -7986,8 +8132,6 @@ void Analyzer::observeSyntheticSourceDefinitions(
 // rejected.
 void Analyzer::commitPreparedSyntheticDAG(
     jeandle::ObjectID ID, DenseSet<jeandle::ObjectID> &Committing) {
-  if (PreparedSyntheticIDs.count(ID))
-    return;
   bool Inserted = Committing.insert(ID).second;
   assert(Inserted && "preflight must reject a cyclic synthetic DAG");
   (void)Inserted;
@@ -8002,10 +8146,231 @@ void Analyzer::commitPreparedSyntheticDAG(
   Committing.erase(ID);
 }
 
-bool Analyzer::prepareSyntheticDAG(jeandle::ObjectID ID) {
-  if (PreparedSyntheticIDs.count(ID))
+// Build a source-first, mutation-free plan for every replay identity required
+// by this synthetic DAG. Existing loop-stable PHI shells and current Effects
+// are only inspected here. The plan validates everything the installer will
+// consume, so no fallible operation remains after the monotonic prepare commit.
+bool Analyzer::buildSyntheticReplayIdentityPlan(
+    jeandle::ObjectID ID, SyntheticReplayIdentityPlan &Plan) {
+  if (Plan.NodeIndex.count(ID))
+    return true;
+  assert(ID < Result.VirtualObjects.size() && Eligible.lookup(ID) &&
+         "DAG preflight must validate every planned synthetic");
+  jeandle::VirtualObject &VObj = *Result.VirtualObjects[ID];
+  PHINode *Carrier = VObj.SyntheticPhi;
+  assert(VObj.IsSynthetic && Carrier && Carrier->getParent() &&
+         VObj.SyntheticSourceIDs.size() == Carrier->getNumIncomingValues() &&
+         "DAG preflight must validate the synthetic carrier/source shape");
+
+  auto *CarrierTy = dyn_cast<PointerType>(Carrier->getType());
+  if (!CarrierTy)
     return false;
-  if (CurrentMode == Mode::StopNewInLoopNest) {
+  unsigned CarrierAS = CarrierTy->getAddressSpace();
+  PointerType *WideTy =
+      PointerType::get(F.getContext(), jeandle::AddrSpace::JavaHeapAddrSpace);
+
+  SyntheticReplayIdentityNodePlan Node;
+  Node.ID = ID;
+  Node.Carrier = Carrier;
+  Node.Merge = Carrier->getParent();
+  Node.IncomingSourceIDs.assign(VObj.SyntheticSourceIDs.begin(),
+                                VObj.SyntheticSourceIDs.end());
+  Node.IncomingBlocks.reserve(Carrier->getNumIncomingValues());
+
+  if (CarrierAS == jeandle::AddrSpace::JavaHeapAddrSpace) {
+    if (VObj.SyntheticReplayPhi && VObj.SyntheticReplayPhi != Carrier)
+      return false;
+    Node.ExistingReplay = Carrier;
+  } else if (CarrierAS == jeandle::AddrSpace::NarrowOopAddrSpace) {
+    Node.NeedsSeparateReplay = true;
+    Node.ExistingReplay = VObj.SyntheticReplayPhi;
+    if (Node.ExistingReplay &&
+        (Node.ExistingReplay->getType() != WideTy ||
+         Node.ExistingReplay->getParent() ||
+         Node.ExistingReplay->getNumIncomingValues() != 0))
+      return false;
+  } else {
+    return false;
+  }
+
+  for (jeandle::ObjectID SourceID : VObj.SyntheticSourceIDs) {
+    if (SourceID == jeandle::InvalidObjectID)
+      continue;
+    assert(SourceID < Result.VirtualObjects.size() &&
+           "DAG preflight must validate every source ID");
+    if (Result.VirtualObjects[SourceID]->IsSynthetic &&
+        !buildSyntheticReplayIdentityPlan(SourceID, Plan))
+      return false;
+  }
+
+  auto IdentityAvailableAt = [&](jeandle::ObjectID SourceID, Instruction *IP) {
+    jeandle::VirtualObject &Source = *Result.VirtualObjects[SourceID];
+    if (!Source.IsSynthetic) {
+      Value *Identity = Source.AllocationCall;
+      assert(Identity &&
+             "DAG preflight must validate every ordinary leaf identity");
+      return Identity->getType() == WideTy && isValueAvailableAt(Identity, IP);
+    }
+    auto It = Plan.NodeIndex.find(SourceID);
+    assert(It != Plan.NodeIndex.end() &&
+           "source-first replay planning must record every synthetic source");
+    const SyntheticReplayIdentityNodePlan &SourcePlan = Plan.Nodes[It->second];
+    if (!SourcePlan.NeedsSeparateReplay)
+      return isValueAvailableAt(SourcePlan.Carrier, IP);
+    // A separate replay PHI will be inserted at the beginning of Merge. Its
+    // shell need not exist yet to prove availability at IP.
+    BasicBlock *IPBlock = IP->getParent();
+    return SourcePlan.Merge == IPBlock ||
+           DT.dominates(SourcePlan.Merge, IPBlock);
+  };
+
+  for (unsigned I = 0, E = Carrier->getNumIncomingValues(); I != E; ++I) {
+    BasicBlock *Pred = Carrier->getIncomingBlock(I);
+    Node.IncomingBlocks.push_back(Pred);
+    jeandle::ObjectID SourceID = VObj.SyntheticSourceIDs[I];
+    if (SourceID != jeandle::InvalidObjectID &&
+        !IdentityAvailableAt(SourceID, Pred->getTerminator()))
+      return false;
+  }
+
+  if (Node.NeedsSeparateReplay && Node.ExistingReplay) {
+    for (auto &KV : Result.BlockEffects)
+      for (jeandle::Effect &E : KV.second) {
+        auto *PE = dyn_cast<jeandle::CreatePHIEffect>(&E);
+        if (!PE || PE->PhiInst != Node.ExistingReplay)
+          continue;
+        if (Node.ExistingCreateEffect || !E.hasMutationOwner() ||
+            E.getMutationOwner() != ID ||
+            PE->PhiRole !=
+                jeandle::CreatePHIEffect::Role::SyntheticReplayIdentity)
+          return false;
+        Node.ExistingCreateEffect = PE;
+      }
+  }
+
+  // A separate replay identity lives at the same merge as the AS3 carrier, so
+  // dominance can be validated without creating its PHI shell.
+  if (Node.NeedsSeparateReplay) {
+    for (User *U : Carrier->users()) {
+      auto *Decode = dyn_cast<AddrSpaceCastInst>(U);
+      if (!Decode || !Decode->getParent() || Decode->getType() != WideTy)
+        continue;
+      assert((Node.Merge == Decode->getParent() ||
+              DT.dominates(Node.Merge, Decode->getParent())) &&
+             "a carrier must dominate each direct decode user");
+
+      SyntheticReplayDecodePlan DecodePlan;
+      DecodePlan.Decode = Decode;
+      for (auto &KV : Result.BlockEffects)
+        for (jeandle::Effect &E : KV.second) {
+          if (E.getTarget() != Decode)
+            continue;
+          auto *RE = dyn_cast<jeandle::ReplaceLoadEffect>(&E);
+          if (!RE || DecodePlan.ExistingEffect || !E.hasMutationOwner() ||
+              E.getMutationOwner() != ID)
+            return false;
+          DecodePlan.ExistingEffect = RE;
+        }
+      Node.DirectDecodes.push_back(DecodePlan);
+    }
+  }
+
+  unsigned NodeIndex = Plan.Nodes.size();
+  Plan.Nodes.push_back(std::move(Node));
+  Plan.NodeIndex[ID] = NodeIndex;
+  return true;
+}
+
+// Install a fully preflighted source-first plan. Every remaining check is an
+// assertion: any recoverable failure was rejected before prepareSyntheticDAG
+// committed its monotonic metadata.
+void Analyzer::installSyntheticReplayIdentityPlan(
+    const SyntheticReplayIdentityPlan &Plan) {
+  PointerType *WideTy =
+      PointerType::get(F.getContext(), jeandle::AddrSpace::JavaHeapAddrSpace);
+
+  for (const SyntheticReplayIdentityNodePlan &Node : Plan.Nodes) {
+    PHINode *Replay = getOrCreateSyntheticReplayIdentityPhi(Node.ID);
+    assert(Replay && "preflighted synthetic must have a replay identity");
+    if (!Node.NeedsSeparateReplay) {
+      assert(Replay == Node.Carrier && Replay->getType() == WideTy &&
+             "AS1 synthetic carrier must be its replay identity");
+      continue;
+    }
+
+    assert(Replay != Node.Carrier && Replay->getType() == WideTy &&
+           !Replay->getParent() && Replay->getNumIncomingValues() == 0 &&
+           (!Node.ExistingReplay || Replay == Node.ExistingReplay) &&
+           "AS3 replay-PHI shell must match its preflighted shape");
+    assert(Result.VirtualObjects[Node.ID]->SyntheticSourceIDs.size() ==
+               Node.IncomingSourceIDs.size() &&
+           Node.IncomingSourceIDs.size() == Node.IncomingBlocks.size() &&
+           "replay plan must cover every current carrier incoming");
+    PhiHome[Replay] = Node.Merge;
+
+    auto Fill = [&](jeandle::CreatePHIEffect &PE) {
+      PE.Block = Node.Merge;
+      PE.PHIType = WideTy;
+      PE.PhiRole = jeandle::CreatePHIEffect::Role::SyntheticReplayIdentity;
+      PE.FieldOffset = 0;
+      PE.PHIIncomingValues.clear();
+      PE.PHIIncomingBlocks.clear();
+      for (unsigned I = 0, E = Node.IncomingSourceIDs.size(); I != E; ++I) {
+        jeandle::ObjectID SourceID = Node.IncomingSourceIDs[I];
+        Value *Incoming = SourceID == jeandle::InvalidObjectID
+                              ? static_cast<Value *>(PoisonValue::get(WideTy))
+                              : realIdentityOf(SourceID);
+        assert(Incoming && Incoming->getType() == WideTy &&
+               isValueAvailableAt(Incoming,
+                                  Node.IncomingBlocks[I]->getTerminator()) &&
+               "replay incoming changed after read-only preflight");
+        PE.PHIIncomingValues.push_back(Incoming);
+        PE.PHIIncomingBlocks.push_back(Node.IncomingBlocks[I]);
+      }
+    };
+
+    if (Node.ExistingCreateEffect) {
+      assert(Node.ExistingCreateEffect->PhiInst == Replay &&
+             "preflighted replay effect changed before installation");
+      Fill(*Node.ExistingCreateEffect);
+    } else {
+      auto PE = std::make_unique<jeandle::CreatePHIEffect>();
+      PE->SeqNo = Result.nextSeqNo();
+      PE->setMutationOwner(Node.ID);
+      PE->PhiInst = Replay;
+      Fill(*PE);
+      Result.addBlockEffect(std::move(PE));
+    }
+
+    for (const SyntheticReplayDecodePlan &DecodePlan : Node.DirectDecodes) {
+      AddrSpaceCastInst *Decode = DecodePlan.Decode;
+      assert(Decode && Decode->getParent() &&
+             isValueAvailableAt(Replay, Decode) &&
+             "replay decode changed after read-only preflight");
+      if (DecodePlan.ExistingEffect) {
+        assert(DecodePlan.ExistingEffect->getTarget() == Decode &&
+               "preflighted decode effect changed before installation");
+        DecodePlan.ExistingEffect->Replacement = Replay;
+        continue;
+      }
+
+      // ReplaceLoadEffect is the established target-generic RAUW/erase effect.
+      // The target is this exact direct carrier decode, never an arbitrary
+      // narrow-oop cast.
+      auto RE = std::make_unique<jeandle::ReplaceLoadEffect>();
+      RE->Block = Decode->getParent();
+      RE->Target = Decode;
+      RE->Replacement = Replay;
+      RE->SeqNo = Result.nextSeqNo();
+      RE->setMutationOwner(Node.ID);
+      Result.addBlockEffect(std::move(RE));
+    }
+  }
+}
+
+bool Analyzer::prepareSyntheticDAG(jeandle::ObjectID ID) {
+  bool WasPrepared = PreparedSyntheticIDs.count(ID);
+  if (CurrentMode == Mode::StopNewInLoopNest && !WasPrepared) {
     OverflowFlag = true;
     return false;
   }
@@ -8018,15 +8383,24 @@ bool Analyzer::prepareSyntheticDAG(jeandle::ObjectID ID) {
     markIneligible(ID, /*FreshRetry=*/true);
     return false;
   }
-  // The read-only preflight above covers the complete DAG. Commit the backing
-  // allocation retention only after every synthetic node and ordinary leaf
-  // has been validated, so a malformed nested source cannot leave a partial
-  // prepare plan.
+
+  SyntheticReplayIdentityPlan ReplayPlan;
+  if (!buildSyntheticReplayIdentityPlan(ID, ReplayPlan)) {
+    DenseSet<jeandle::ObjectID> Observed;
+    observeSyntheticSourceDefinitions(ID, Observed);
+    markIneligible(ID, /*FreshRetry=*/true);
+    return false;
+  }
+
+  // Both read-only preflights succeeded. Commit the backing allocation
+  // retention and prepared-ID closure before infallibly installing the replay
+  // Effects, so no failed validation can leave partially committed metadata.
   for (jeandle::ObjectID Leaf : Leaves)
     KeptSyntheticSourceAllocations.insert(Leaf);
 
   DenseSet<jeandle::ObjectID> Committing;
   commitPreparedSyntheticDAG(ID, Committing);
+  installSyntheticReplayIdentityPlan(ReplayPlan);
   return true;
 }
 
@@ -8105,10 +8479,9 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
   // A Case-C synthetic has no allocation of its own. Prepare its complete
   // identity DAG so every ordinary leaf allocation remains at its original
   // allocation site, then continue through the common point-local field/lock
-  // replay path with SyntheticPhi as the receiver.
+  // replay path with SyntheticReplayPhi as the receiver.
   if (VObj.IsSynthetic) {
-    prepareSyntheticDAG(ID);
-    if (!Eligible.lookup(ID) || OverflowFlag)
+    if (!prepareSyntheticDAG(ID) || !Eligible.lookup(ID) || OverflowFlag)
       return;
   }
 
@@ -8122,8 +8495,8 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
   // VirtualRef to an inner virtual, materialize the inner first, then rewrite
   // the outer's FieldStates entry to a MaterializedRef at the inner's real
   // identity. Ordinary inner objects use OrigAlloc; prepared Case-C inner
-  // objects use SyntheticPhi. Both identities dominate the replay point, as
-  // checked below.
+  // objects use SyntheticReplayPhi. Both identities dominate the replay point,
+  // as checked below.
   {
     auto FSIt = C.FieldStates.find(ID);
     if (FSIt != C.FieldStates.end()) {
@@ -8144,18 +8517,34 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
           continue;
         jeandle::ObjectID InnerID = OffIt->second.getVirtualRef();
         C.Recurse(InnerID, MatReason::Nested);
+        // A Case-C synthetic has no usable materialized identity until its
+        // replay DAG has been prepared. In particular, an AS3 logical carrier
+        // cannot serve as an AS1 replay receiver. If nested preparation failed,
+        // reject the enclosing transaction so the original outer store and the
+        // synthetic's source allocations survive together.
+        const jeandle::VirtualObject &InnerVO = *Result.VirtualObjects[InnerID];
+        if (InnerVO.IsSynthetic && (!Eligible.lookup(InnerID) ||
+                                    !PreparedSyntheticIDs.count(InnerID) ||
+                                    !InnerVO.SyntheticReplayPhi)) {
+          observeFieldDefinitions(ID, C.FieldDefinitions);
+          markIneligible(ID, /*FreshRetry=*/true);
+          return;
+        }
         // Record the inner's materialized (or kept-real) value for
-        // field-replay. When the inner can no longer be materialized as a
-        // virtual (a synthetic Case-C VO, or an object that hit an
-        // availability bail of its own), its real value survives in IR —
-        // the original allocation, or the Case-C merge PHI for a synthetic —
-        // and the outer replays that pointer into the field instead of
-        // giving up on the outer too. An entry whose object is already
+        // field-replay. An ordinary object that hit an availability bail keeps
+        // its original allocation; a successfully prepared Case-C synthetic
+        // contributes its replay PHI. The outer can replay either pointer into
+        // the field instead of giving up too. An entry whose object is already
         // materialized contributes its materialized value. The value
         // dominates the materialize point (OrigAlloc dominates every escape
         // point; a Case-C PHI dominates every block that inherited a
         // reference to it) — verified by the availability gate below.
         Value *InnerVal = realIdentityOf(InnerID);
+        if (!InnerVal) {
+          observeFieldDefinitions(ID, C.FieldDefinitions);
+          markIneligible(ID, /*FreshRetry=*/true);
+          return;
+        }
         C.FieldStates[ID][Off] = jeandle::FieldValue::materializedRef(InnerVal);
         // updateStatesForMaterialized: every other still-tracked object whose
         // FieldStates references InnerID must also flip to MaterializedRef.
@@ -8585,8 +8974,8 @@ void Analyzer::commit() {
               return false;
           }
         } else if (const auto *PE = dyn_cast<jeandle::CreatePHIEffect>(E)) {
-          // Field-value PHI (the only remaining CreatePHI variant): every
-          // incoming must be producible at apply time.
+          // Both a field-value PHI and a synthetic replay-identity PHI need
+          // every incoming to be producible at apply time.
           for (const WeakTrackingVH &In : PE->PHIIncomingValues)
             if (!IsAvailableValue(In, OwnedPhis))
               return false;
@@ -9066,10 +9455,14 @@ void Analyzer::validateFinalDeoptObligations() {
   DenseMap<Value *, jeandle::ObjectID> ObjectIdentity;
   for (const auto &VObjUP : Result.VirtualObjects) {
     const jeandle::VirtualObject &VObj = *VObjUP;
-    Value *Identity = VObj.IsSynthetic ? static_cast<Value *>(VObj.SyntheticPhi)
-                                       : (Value *)VObj.AllocationCall;
-    if (Identity)
-      ObjectIdentity.try_emplace(Identity, VObj.getID());
+    if (VObj.IsSynthetic) {
+      if (VObj.SyntheticPhi)
+        ObjectIdentity.try_emplace(VObj.SyntheticPhi, VObj.getID());
+      if (VObj.SyntheticReplayPhi)
+        ObjectIdentity.try_emplace(VObj.SyntheticReplayPhi, VObj.getID());
+    } else if (VObj.AllocationCall) {
+      ObjectIdentity.try_emplace(VObj.AllocationCall, VObj.getID());
+    }
   }
 
   SmallPtrSet<CallBase *, 8> RecordedAllocationSites;

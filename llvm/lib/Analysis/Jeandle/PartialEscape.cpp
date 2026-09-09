@@ -347,10 +347,11 @@ std::unique_ptr<VirtualObject> VirtualObject::duplicate() const {
   Clone->copyStructuralFieldsFrom(*this);
   // Synthetic-state fields are NOT copied — duplicate() is shared by the
   // generic VirtualObject clone path AND the Case C synthesis path; the
-  // latter sets IsSynthetic/SyntheticSourceIDs/SyntheticPhi explicitly after
-  // calling duplicate.
+  // latter sets IsSynthetic/SyntheticSourceIDs/SyntheticPhi/SyntheticReplayPhi
+  // explicitly after calling duplicate.
   Clone->IsSynthetic = false;
   Clone->SyntheticPhi = nullptr;
+  Clone->SyntheticReplayPhi = nullptr;
   return Clone;
 }
 
@@ -724,7 +725,8 @@ void PEAResult::computeEscapePointLocks() {
 
 static void destroyUnparentedOwnedInstructions(
     ArrayRef<WeakTrackingVH> Phis, ArrayRef<WeakTrackingVH> Insts,
-    ArrayRef<WeakTrackingVH> LoopFieldPhis = {}) {
+    ArrayRef<WeakTrackingVH> LoopFieldPhis = {},
+    ArrayRef<WeakTrackingVH> SyntheticReplayPhis = {}) {
   SmallPtrSet<Instruction *, 16> Seen;
   SmallVector<Instruction *, 16> ToDelete;
   auto Collect = [&](ArrayRef<WeakTrackingVH> Values) {
@@ -735,6 +737,7 @@ static void destroyUnparentedOwnedInstructions(
   };
 
   Collect(LoopFieldPhis);
+  Collect(SyntheticReplayPhis);
   Collect(Phis);
   Collect(Insts);
 
@@ -751,7 +754,8 @@ PEAResult::~PEAResult() {
   // Once an analyzer-owned instruction has been inserted into a BasicBlock,
   // that block's ilist owns it. WeakTrackingVH also auto-nulls when an
   // unrelated cleanup path has already deleted the value.
-  destroyUnparentedOwnedInstructions(OwnedPhis, OwnedInsts, OwnedLoopFieldPhis);
+  destroyUnparentedOwnedInstructions(OwnedPhis, OwnedInsts, OwnedLoopFieldPhis,
+                                     OwnedSyntheticReplayPhis);
 }
 
 void PEAResult::truncateOwnedTo(size_t PhisMark, size_t InstsMark) {
@@ -856,8 +860,12 @@ void Effect::dump(raw_ostream &OS) const {
     OS << " [VO=" << static_cast<unsigned>(getMutationOwner()) << "]";
   if (Block && Block->hasName())
     OS << " block=%" << Block->getName();
-  if (const auto *PE = dyn_cast<CreatePHIEffect>(this))
-    OS << " offset=" << PE->FieldOffset;
+  if (const auto *PE = dyn_cast<CreatePHIEffect>(this)) {
+    if (PE->PhiRole == CreatePHIEffect::Role::FieldValue)
+      OS << " offset=" << PE->FieldOffset;
+    else
+      OS << " role=SyntheticReplayIdentity";
+  }
   if (const auto *PE = dyn_cast<RewriteDeoptPoolEffect>(this))
     OS << " nodes=" << PE->getPlan().graph().nodes().size()
        << " current=" << PE->getPlan().graph().currentMembers().size()
