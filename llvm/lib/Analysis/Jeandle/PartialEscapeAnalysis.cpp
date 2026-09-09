@@ -5784,44 +5784,46 @@ bool Analyzer::processStore(StoreInst *SI) {
   while (Value *A = Aliases.getScalarAlias(Val))
     Val = A;
 
+  // Do not synthesize value-side normalization for a store PEA cannot fold.
+  // In particular, a naked AS3 value stored through a non-virtual base must
+  // remain a no-op for PEA: otherwise every outer round places a dead AS3 ->
+  // AS1 cast, canonicalization removes it, and the transform never becomes
+  // idle.
+  auto BaseID = jeandle::pea::resolveVirtualRef(Ptr, CurrentState, Aliases, DL);
+  if (!BaseID)
+    return false;
+
   // Compressed-oop stores carry a physical AS3 pointer while PEA tracks Java
   // references semantically as AS1. Preserve the physical value for field
-  // layout, but normalize the value used by identity/field-state tracking.
-  // Frontend AS1<->AS3 addrspacecasts and null are normalized to the semantic
-  // Java-heap pointer for identity tracking. A naked AS3 value gets an
-  // analysis-owned AS3->AS1 semantic cast while its AS3 storage type remains
-  // recorded in the field layout.
+  // layout. Frontend AS1->AS3 addrspacecasts and null can be normalized
+  // without creating IR. For a naked AS3 value, identity/materialization
+  // queries operate directly on the narrow value (their resolver understands
+  // the AS1<->AS3 representation boundary), and we defer creating an AS3->AS1
+  // semantic cast until a Scalar FieldValue actually needs an AS1 SSA value.
+  // A VirtualRef needs only the semantic type plus ObjectID, so it never needs
+  // that cast.
   Value *SemanticVal = Val;
+  PointerType *DeferredWideTy = nullptr;
   if (Val->getType()->isPointerTy() &&
       Val->getType()->getPointerAddressSpace() ==
           jeandle::AddrSpace::NarrowOopAddrSpace) {
+    PointerType *WideTy = PointerType::get(
+        SI->getContext(), jeandle::AddrSpace::JavaHeapAddrSpace);
     if (isa<ConstantPointerNull>(Val)) {
-      SemanticVal = ConstantPointerNull::get(PointerType::get(
-          SI->getContext(), jeandle::AddrSpace::JavaHeapAddrSpace));
+      SemanticVal = ConstantPointerNull::get(WideTy);
     } else if (auto *ASC = dyn_cast<AddrSpaceCastOperator>(Val)) {
       Value *Wide = ASC->getOperand(0);
       if (Wide->getType()->isPointerTy() &&
           Wide->getType()->getPointerAddressSpace() ==
               jeandle::AddrSpace::JavaHeapAddrSpace)
         SemanticVal = Wide;
-    } else {
-      PointerType *WideTy = PointerType::get(
-          SI->getContext(), jeandle::AddrSpace::JavaHeapAddrSpace);
-      Instruction *Cast = getOrCreateSemanticOopCast(SI, Val, WideTy);
-      if (Cast) {
-        SemanticVal = Cast;
-        auto Identity = jeandle::pea::resolveVirtualIdentity(
-            Val, CurrentState, Aliases, DL,
-            jeandle::pea::VirtualIdentityMode::WholeObject);
-        if (Identity.isDefined())
-          Aliases.addVirtualAlias(SemanticVal, Identity.getObjectID(),
-                                  /*WholeObject=*/true);
-      }
-    }
+      else
+        DeferredWideTy = WideTy;
+    } else
+      DeferredWideTy = WideTy;
   }
-  auto BaseID = jeandle::pea::resolveVirtualRef(Ptr, CurrentState, Aliases, DL);
-  if (!BaseID)
-    return false;
+  Type *SemanticTy = DeferredWideTy ? static_cast<Type *>(DeferredWideTy)
+                                    : SemanticVal->getType();
 
   // Java volatile fields reach this layer as atomic accesses with the
   // appropriate ordering, not as LLVM `volatile`. LLVM volatile has separate
@@ -5934,7 +5936,7 @@ bool Analyzer::processStore(StoreInst *SI) {
     // its materialized pointer into the outer's field. We record the nested
     // reference here and let materializeAt rewrite it later.
     FieldStates[*BaseID][*Offset] =
-        jeandle::FieldValue::virtualRef(RefID, SemanticVal->getType());
+        jeandle::FieldValue::virtualRef(RefID, SemanticTy);
     FieldDefinitionSet &Defs = FieldDefinitions[*BaseID][*Offset];
     Defs.clear();
     Defs.insert(SI);
@@ -5954,6 +5956,15 @@ bool Analyzer::processStore(StoreInst *SI) {
   if (jeandle::pea::resolveVirtualRef(SemanticVal, CurrentState, Aliases, DL)) {
     materializeOperandsAtStore();
     return true;
+  }
+  if (DeferredWideTy) {
+    // Only scalar semantic state needs a real AS1 SSA value. Do not register
+    // this analysis-owned cast in AliasMap: resolveVirtualIdentity already
+    // chases AS1<->AS3 casts, and an iteration rollback may delete the
+    // unparented cast while deliberately retaining the closure-global map.
+    SemanticVal = getOrCreateSemanticOopCast(SI, Val, DeferredWideTy);
+    assert(SemanticVal && SemanticVal->getType() == SemanticTy &&
+           "semantic oop normalization produced the wrong type");
   }
   FieldStates[*BaseID][*Offset] = jeandle::FieldValue::scalar(SemanticVal);
   FieldDefinitionSet &Defs = FieldDefinitions[*BaseID][*Offset];
