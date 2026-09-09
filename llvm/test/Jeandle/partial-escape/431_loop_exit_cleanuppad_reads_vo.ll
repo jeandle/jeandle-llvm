@@ -9,7 +9,7 @@
 ; the cleanup's load FOLDS to the stored constant. %o stays NeverEscapes and is
 ; eliminated; the cleanup calls @use(42).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @may_throw()
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
@@ -19,7 +19,7 @@ entry:
   br label %loop
 loop:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-  ptr inttoptr (i64 12345 to ptr), i32 32)
+  ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
   to label %body unwind label %oom
 body:
   %f = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

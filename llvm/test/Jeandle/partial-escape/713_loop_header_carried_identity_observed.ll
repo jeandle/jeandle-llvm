@@ -8,14 +8,14 @@
 ; their distinct identities); Jeandle must stay equally conservative and
 ; retain both allocations.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i1 @__gxx_personality_v0(...)
 
 define i32 @test_carried_identity_observed(i32 %n)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %v0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
         to label %ph unwind label %u
 ph:
   %s0 = getelementptr inbounds i8, ptr addrspace(1) %v0, i64 8
@@ -36,7 +36,7 @@ loop:
   br i1 %cond, label %replace, label %latch
 replace:
   %v1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
         to label %rn unwind label %u
 rn:
   br label %latch

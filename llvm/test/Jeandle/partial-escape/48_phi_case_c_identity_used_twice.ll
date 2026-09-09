@@ -13,7 +13,7 @@
 ;              left also -> merge2 with %o1 as one incoming
 ; merge2 forces %o1 to have a second PHI user.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -23,7 +23,7 @@ entry:
   br i1 %c, label %left, label %right
 left:
   %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %lcont unwind label %u
 lcont:
   ; A second use of %o1 in an unrelated PHI (in alt-merge). This forces
@@ -31,7 +31,7 @@ lcont:
   br i1 %d, label %alt_merge, label %merge1
 right:
   %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %rcont unwind label %u
 rcont:
   br label %merge1

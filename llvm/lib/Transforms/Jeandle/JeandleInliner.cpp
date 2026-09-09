@@ -80,6 +80,7 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/Threading.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 
@@ -160,36 +161,18 @@ static int getInlineScopeID(const CallBase &CB) {
   return static_cast<int>(CI->getSExtValue());
 }
 
-[[noreturn]] static void reportInvalidStatepointID(const CallBase &CB,
-                                                   const char *Reason) {
-  std::string Message;
-  raw_string_ostream OS(Message);
-
-  OS << "JeandleInliner: " << Reason;
-  if (const Function *Caller = CB.getCaller())
-    OS << " in " << Caller->getName();
-  OS << ": " << CB;
-
-  OS.flush();
-  report_fatal_error(StringRef(Message));
-}
-
 static bool getStatepointID(const CallBase &CB, uint64_t &StatepointID) {
   Attribute Attr =
       CB.getAttributes().getFnAttr(jeandle::Attribute::StatepointID);
   if (!Attr.isValid())
     return false;
   if (!Attr.isStringAttribute())
-    reportInvalidStatepointID(CB, "invalid statepoint-id attribute");
+    reportInvalidStatepointID(CB, "JeandleInliner",
+                              "invalid statepoint-id attribute");
   if (Attr.getValueAsString().getAsInteger(10, StatepointID))
-    reportInvalidStatepointID(CB, "invalid statepoint-id attribute");
+    reportInvalidStatepointID(CB, "JeandleInliner",
+                              "invalid statepoint-id attribute");
   return true;
-}
-
-static void setStatepointID(CallBase &CB, uint64_t StatepointID) {
-  CB.removeFnAttr(jeandle::Attribute::StatepointID);
-  CB.addFnAttr(Attribute::get(CB.getContext(), jeandle::Attribute::StatepointID,
-                              std::to_string(StatepointID)));
 }
 
 // A statepoint-id points to JVM-side CallSiteInfo and must not be shared by
@@ -208,7 +191,8 @@ static void ensureUniqueStatepointID(CallBase &CB,
   int64_t NewStatepointID =
       VC.GetNewStatepointID(static_cast<int64_t>(StatepointID));
   if (NewStatepointID < 0)
-    reportInvalidStatepointID(CB, "GetNewStatepointID returned a negative id");
+    reportInvalidStatepointID(CB, "JeandleInliner",
+                              "GetNewStatepointID returned a negative id");
   setStatepointID(CB, static_cast<uint64_t>(NewStatepointID));
 }
 

@@ -68,6 +68,24 @@ public:
   static constexpr const char *MhIntrinsicName = "mh-intrinsic-name";
 
   static constexpr const char *MonomorphicTarget = "monomorphic-target";
+
+  /// Marks virtual fallback calls that must not be profile-devirtualized again.
+  static constexpr const char *ProfileDevirtualizationMiss =
+      "profile-devirtualization-miss";
+
+  /// Classification attributes attached to jeandle.arraycopy call sites.
+  static constexpr const char *ArrayCopyKind = "jeandle.arraycopy.kind";
+
+  static constexpr const char *ValidatedArrayCopy =
+      "jeandle.arraycopy.validated";
+
+  static constexpr const char *ArrayCopyNegativeLengthGuard =
+      "jeandle.arraycopy.negative-length-guard";
+
+  static constexpr const char *ArrayCopyKindArrayCopy = "arraycopy";
+  static constexpr const char *ArrayCopyKindCloneInst = "clone-inst";
+  static constexpr const char *ArrayCopyKindCloneArray = "clone-array";
+  static constexpr const char *ArrayCopyKindCloneOopArray = "clone-oop-array";
 };
 
 } // namespace llvm::jeandle

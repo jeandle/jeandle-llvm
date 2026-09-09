@@ -14,7 +14,7 @@
 
 target datalayout = "e-p:64:64-p1:64:64"
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @safepoint()
 declare ptr addrspace(1) @llvm.ptr.annotation.p1.p0(ptr addrspace(1), ptr, ptr, i32, ptr)
 declare i32 @__gxx_personality_v0(...)
@@ -26,7 +26,7 @@ define i1 @observable_zero_gep_freeze(i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %after.a unwind label %unwind
 after.a:
   %alias0 = getelementptr i8, ptr addrspace(1) %a, i64 0
@@ -37,7 +37,7 @@ left:
   br label %merge
 right:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
            [ "deopt"(i32 26, i32 26, i64 12, ptr addrspace(1) %a) ]
        to label %right.cont unwind label %unwind
 right.cont:
@@ -62,7 +62,7 @@ define i1 @observable_annotation_alias(i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %after.a unwind label %unwind
 after.a:
   %alias = call ptr addrspace(1) @llvm.ptr.annotation.p1.p0(
@@ -73,7 +73,7 @@ left:
   br label %merge
 right:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %right.cont unwind label %unwind
 right.cont:
   br label %merge
@@ -99,7 +99,7 @@ define i1 @observable_ordinary_phi(i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %after.a unwind label %unwind
 after.a:
   br i1 %c, label %left, label %right
@@ -107,7 +107,7 @@ left:
   br label %merge
 right:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %right.cont unwind label %unwind
 right.cont:
   br label %merge
@@ -133,7 +133,7 @@ define i1 @observable_select(i1 %c, i1 %pick)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %after.a unwind label %unwind
 after.a:
   %alias = select i1 %pick, ptr addrspace(1) %a, ptr addrspace(1) %a
@@ -142,7 +142,7 @@ left:
   br label %merge
 right:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %right.cont unwind label %unwind
 right.cont:
   br label %merge
@@ -168,7 +168,7 @@ define i1 @observable_derived_geps(i1 %c, i64 %offset)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 32)
+           ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
        to label %after.a unwind label %unwind
 after.a:
   %nonzero = getelementptr i8, ptr addrspace(1) %a, i64 8
@@ -178,7 +178,7 @@ left:
   br label %merge
 right:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 32)
+           ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
        to label %right.cont unwind label %unwind
 right.cont:
   br label %merge
@@ -203,7 +203,7 @@ define i32 @compatible_wrapped_field_access(i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %left unwind label %unwind
 left:
   %alias0 = getelementptr i8, ptr addrspace(1) %a, i64 0
@@ -212,7 +212,7 @@ left:
   br i1 %c, label %merge, label %right
 right:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
            [ "deopt"(i32 26, i32 26, i64 12, ptr addrspace(1) %a) ]
        to label %right.cont unwind label %unwind
 right.cont:
@@ -238,7 +238,7 @@ define i32 @compatible_annotation_field_access(i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 24)
+           ptr inttoptr (i64 12345 to ptr), i32 24, i1 false)
        to label %left unwind label %unwind
 left:
   %a.field = getelementptr i8, ptr addrspace(1) %a, i64 8
@@ -249,7 +249,7 @@ left:
   br i1 %c, label %merge, label %right
 right:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 24)
+           ptr inttoptr (i64 12345 to ptr), i32 24, i1 false)
        to label %right.cont unwind label %unwind
 right.cont:
   %b.field = getelementptr i8, ptr addrspace(1) %b, i64 8
@@ -283,7 +283,7 @@ define i1 @observable_ptrtoint_roundtrip(i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %after.a unwind label %unwind
 after.a:
   %bits = ptrtoint ptr addrspace(1) %a to i64
@@ -293,7 +293,7 @@ left:
   br label %merge
 right:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %right.cont unwind label %unwind
 right.cont:
   br label %merge
@@ -322,7 +322,7 @@ define i32 @compatible_ptrtoint_boundary(i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %after.a unwind label %unwind
 after.a:
   %bits = ptrtoint ptr addrspace(1) %a to i64
@@ -333,7 +333,7 @@ left:
   br label %merge
 right:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %right.cont unwind label %unwind
 right.cont:
   store i32 13, ptr addrspace(1) %b, align 4
@@ -364,7 +364,7 @@ define i32 @post_merge_deopt_side_entry(i1 %c, i1 %bypass)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %after.a unwind label %unwind
 after.a:
   store i32 7, ptr addrspace(1) %a, align 4
@@ -375,7 +375,7 @@ left:
   br label %merge
 right:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 12345 to ptr), i32 16)
+           ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %right.cont unwind label %unwind
 right.cont:
   store i32 13, ptr addrspace(1) %b, align 4

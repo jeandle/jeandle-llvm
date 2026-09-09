@@ -19,7 +19,7 @@
 ; (materialize-commit lock capture). Validates that the overflow
 ; escalation composes with the lock model.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -29,7 +29,7 @@ define void @test_overflow_locked(i32 %n) gc "hotspotgc" personality ptr @__gxx_
 entry:
   %lock = alloca i64, align 8
   %pre = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 7777 to ptr), i32 16)
+              ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
           to label %e.cont unwind label %u
 e.cont:
   call hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1) %pre, ptr %lock)

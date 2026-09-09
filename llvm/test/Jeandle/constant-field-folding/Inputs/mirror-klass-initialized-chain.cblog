@@ -1,0 +1,2 @@
+GetMirrorKlass 0 = 123456
+IsKlassInitialized 123456 = true

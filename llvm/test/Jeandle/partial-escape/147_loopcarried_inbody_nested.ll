@@ -6,7 +6,7 @@
 ; processed by recursive processLoop, so its OWN post-body merge must handle the
 ; carried alloc (the outer loop's merge does not see inner-body allocs).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -26,7 +26,7 @@ ihdr:
   br i1 %ic, label %ibody, label %iexit
 ibody:
   %IX = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5555 to ptr), i32 16)
+            ptr inttoptr (i64 5555 to ptr), i32 16, i1 false)
           to label %ibcont unwind label %u
 ibcont:
   %isf = getelementptr inbounds i8, ptr addrspace(1) %IX, i64 8

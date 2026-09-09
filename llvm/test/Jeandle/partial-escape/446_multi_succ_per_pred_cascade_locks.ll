@@ -23,7 +23,7 @@
 ; terminator twice — idempotent, harmless. Each merge releases its selected
 ; inner and outer owners.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -39,11 +39,11 @@ entry:
   %pad0.lock = alloca i64, align 8
   %pad1.lock = alloca i64, align 8
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-          ptr inttoptr (i64 11111 to ptr), i32 16)
+          ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %na unwind label %u
 na:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-          ptr inttoptr (i64 22222 to ptr), i32 16)
+          ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
        to label %fld unwind label %u
 fld:
   ; a.f = b: materializing a per-pred cascades b (forward prereq).
@@ -93,8 +93,8 @@ u:
 
 ; CHECK-LABEL: define void @test_multi_succ_per_pred_cascade_locks
 ; Both original allocation invokes are retained (a, then b).
-; CHECK: invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16)
-; CHECK: invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16)
+; CHECK: invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
+; CHECK: invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
 ; No additional allocation invokes anywhere.
 ; CHECK-NOT: pea.mat = invoke
 ; The a.f=b field store is replayed onto OrigAlloc %a with OrigAlloc %b (twice

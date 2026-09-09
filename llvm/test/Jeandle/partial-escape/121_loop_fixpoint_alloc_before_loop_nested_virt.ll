@@ -12,14 +12,14 @@
 ; loop header, (b) %inner is body-local and is created/destroyed each
 ; iteration with the same ID (AllocSiteToVO).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_alloc_before_loop_nested(i32 %n) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 1111 to ptr), i32 16)
+            ptr inttoptr (i64 1111 to ptr), i32 16, i1 false)
        to label %prep unwind label %u
 prep:
   br label %loop
@@ -29,7 +29,7 @@ loop:
   br i1 %c, label %body, label %exit
 body:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-                  ptr inttoptr (i64 2222 to ptr), i32 16)
+                  ptr inttoptr (i64 2222 to ptr), i32 16, i1 false)
             to label %bcont unwind label %u
 bcont:
   %is = getelementptr inbounds i8, ptr addrspace(1) %inner, i64 8

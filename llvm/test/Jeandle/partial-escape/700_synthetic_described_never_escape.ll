@@ -9,7 +9,7 @@
 ; only via a deopt frame state is encoded as a VO descriptor and reallocated
 ; by the runtime at deopt.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare void @safepoint()
 
 define void @synthetic_described_never_escape(i1 %choose) gc "hotspotgc" {
@@ -17,13 +17,13 @@ entry:
   br i1 %choose, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 70001 to ptr), i32 24) [ "deopt"(i32 700011) ]
+      ptr inttoptr (i64 70001 to ptr), i32 24, i1 false) [ "deopt"(i32 700011) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 41, ptr addrspace(1) %af unordered, align 4
   br label %merge
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 70001 to ptr), i32 24) [ "deopt"(i32 700012) ]
+      ptr inttoptr (i64 70001 to ptr), i32 24, i1 false) [ "deopt"(i32 700012) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 42, ptr addrspace(1) %bf unordered, align 4
   br label %merge

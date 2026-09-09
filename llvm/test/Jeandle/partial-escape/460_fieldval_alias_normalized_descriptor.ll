@@ -7,20 +7,20 @@
 ; the whole-pool rewrite must emit the NORMALIZED terminal %x in
 ; the VO descriptor, not the freed %lg.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @scalar_folded_load_in_descriptor(i32 %x) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %p = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 100 to ptr), i32 16)
+            ptr inttoptr (i64 100 to ptr), i32 16, i1 false)
        to label %n1 unwind label %u
 n1:
   %pf = getelementptr inbounds i8, ptr addrspace(1) %p, i64 8
   store atomic i32 %x, ptr addrspace(1) %pf unordered, align 4
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 200 to ptr), i32 16)
+            ptr inttoptr (i64 200 to ptr), i32 16, i1 false)
        to label %n2 unwind label %u
 n2:
   %of = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

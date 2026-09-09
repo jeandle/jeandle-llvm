@@ -12,7 +12,7 @@
 ; deferred Materialize retains OrigAlloc and replays the final field state;
 ; it does not emit a new allocation.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink_i32(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -27,7 +27,7 @@ hdr:
 
 body:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-                  ptr inttoptr (i64 7777 to ptr), i32 16)
+                  ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
               to label %b unwind label %u
 b:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 8

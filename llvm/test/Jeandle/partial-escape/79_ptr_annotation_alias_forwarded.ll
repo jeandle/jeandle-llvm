@@ -7,7 +7,7 @@
 ; store/load is tracked on the correct virtual field and the object can be
 ; scalar-replaced without conflating distinct fields.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare ptr addrspace(1) @llvm.ptr.annotation.p1.p0(ptr addrspace(1), ptr, ptr, i32, ptr)
 declare i32 @__gxx_personality_v0(...)
 
@@ -17,7 +17,7 @@ declare i32 @__gxx_personality_v0(...)
 define i32 @test_ptr_annotation_alias_forward() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %base = getelementptr inbounds i8, ptr addrspace(1) %o, i64 0

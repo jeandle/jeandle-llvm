@@ -1,0 +1,19 @@
+# Declared klasses: %object_A is 5 (Animal), %object_B is 9 (a subtype of
+# Dog); the path_A edge proves %object_A is 22 (Dog, subtype of 5, supertype
+# of 9). Post-fix the phi is meet(22, 9) = 22 and the query folds; pre-fix it
+# is meet(5, 9) = 5 and the query is preserved (both LCA entries are needed
+# so the RED run fails on CHECK lines, not on a missing callback key).
+IsObjectKlass 22 = false
+IsEffectivelyFinal 22 = false
+IsSubtype 5 22 = false
+IsSubtype 22 5 = true
+IsInterface 5 = false
+GetCommonSuperKlass 5 9 = 5
+GetCommonSuperKlass 22 9 = 22
+IsSubtype 22 22 = true
+
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+GetSecondarySupers 5 = []
+IsInterface 9 = false
+GetSecondarySupers 9 = []

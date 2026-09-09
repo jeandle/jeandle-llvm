@@ -11,7 +11,7 @@
 ; fallback at PartialEscapeAnalysis.cpp already handles the pattern; we
 ; assert the end-to-end behaviour stays sound.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -21,7 +21,7 @@ entry:
   br i1 %c, label %alloc, label %nullarm
 alloc:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %merge unwind label %u
 nullarm:
   br label %merge

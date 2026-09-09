@@ -12,17 +12,17 @@
 ; %v leak (NeverEscapes -> poison) while the reference store survives as
 ; `store ptr poison`.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_store_bail_overlap_leaks_value() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-  ptr inttoptr (i64 12345 to ptr), i32 32)
+  ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
   to label %n unwind label %u
 n:
   %v = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-  ptr inttoptr (i64 99999 to ptr), i32 24)
+  ptr inttoptr (i64 99999 to ptr), i32 24, i1 false)
   %slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
   store atomic i32 5, ptr addrspace(1) %slot unordered, align 4
   store atomic ptr addrspace(1) %v, ptr addrspace(1) %slot unordered, align 4

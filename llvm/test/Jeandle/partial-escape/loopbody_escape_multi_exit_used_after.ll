@@ -5,7 +5,7 @@
 ; via @sink (case A), and is consumed on both the natural exit and a
 ; conditional side exit. A single materialization must dominate both exits.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare void @ret_use_a(ptr addrspace(1))
 declare void @ret_use_b(ptr addrspace(1))
@@ -14,7 +14,7 @@ declare i32 @__gxx_personality_v0(...)
 define void @test_multi_exit_used_after(i32 %n, i32 %k) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %prep unwind label %u
 prep:
   br label %loop

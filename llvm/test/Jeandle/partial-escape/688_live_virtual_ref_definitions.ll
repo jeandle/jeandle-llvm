@@ -10,7 +10,7 @@
 ; allocation and the live null store must remain, but the overwritten
 ; reference store and its unreachable child allocation must still disappear.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc i1 @jeandle.check_if_value_based(ptr addrspace(1))
 declare void @use_bool(i1)
 declare void @may_throw()
@@ -23,11 +23,11 @@ define void @same_block_overwrite() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68801 to ptr), i32 16)
+      ptr inttoptr (i64 68801 to ptr), i32 16, i1 false)
       to label %alloc.outer unwind label %unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68802 to ptr), i32 24)
+      ptr inttoptr (i64 68802 to ptr), i32 24, i1 false)
       to label %body unwind label %unwind
 body:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -53,11 +53,11 @@ define void @diamond_overwrite(i1 %choose) gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68811 to ptr), i32 16)
+      ptr inttoptr (i64 68811 to ptr), i32 16, i1 false)
       to label %alloc.outer unwind label %unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68812 to ptr), i32 24)
+      ptr inttoptr (i64 68812 to ptr), i32 24, i1 false)
       to label %choose.block unwind label %unwind
 choose.block:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -90,11 +90,11 @@ define void @loop_overwrite(i32 %count) gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68821 to ptr), i32 16)
+      ptr inttoptr (i64 68821 to ptr), i32 16, i1 false)
       to label %alloc.outer unwind label %unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68822 to ptr), i32 24)
+      ptr inttoptr (i64 68822 to ptr), i32 24, i1 false)
       to label %preheader unwind label %unwind
 preheader:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -129,15 +129,15 @@ define void @nested_overwrite() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %leaf = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68831 to ptr), i32 16)
+      ptr inttoptr (i64 68831 to ptr), i32 16, i1 false)
       to label %alloc.middle unwind label %unwind
 alloc.middle:
   %middle = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68832 to ptr), i32 24)
+      ptr inttoptr (i64 68832 to ptr), i32 24, i1 false)
       to label %alloc.outer unwind label %unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68833 to ptr), i32 24)
+      ptr inttoptr (i64 68833 to ptr), i32 24, i1 false)
       to label %body unwind label %unwind
 body:
   %middle.slot = getelementptr inbounds i8, ptr addrspace(1) %middle, i64 16
@@ -167,11 +167,11 @@ define void @deopt_observes_pre_overwrite_definition() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68841 to ptr), i32 16)
+      ptr inttoptr (i64 68841 to ptr), i32 16, i1 false)
       to label %alloc.outer unwind label %unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68842 to ptr), i32 24)
+      ptr inttoptr (i64 68842 to ptr), i32 24, i1 false)
       to label %body unwind label %unwind
 body:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -202,11 +202,11 @@ define void @invoke_paths_after_overwrite() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68851 to ptr), i32 16)
+      ptr inttoptr (i64 68851 to ptr), i32 16, i1 false)
       to label %alloc.outer unwind label %alloc.unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68852 to ptr), i32 24)
+      ptr inttoptr (i64 68852 to ptr), i32 24, i1 false)
       to label %body unwind label %alloc.unwind
 body:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -239,11 +239,11 @@ define void @critical_edge_overwrite(i1 %take.source, i1 %early)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68861 to ptr), i32 16)
+      ptr inttoptr (i64 68861 to ptr), i32 16, i1 false)
       to label %alloc.outer unwind label %unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68862 to ptr), i32 24)
+      ptr inttoptr (i64 68862 to ptr), i32 24, i1 false)
       to label %choose unwind label %unwind
 choose:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -284,11 +284,11 @@ define void @diamond_mixed_live_and_dead(i1 %choose) gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68871 to ptr), i32 16)
+      ptr inttoptr (i64 68871 to ptr), i32 16, i1 false)
       to label %alloc.outer unwind label %unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68872 to ptr), i32 24)
+      ptr inttoptr (i64 68872 to ptr), i32 24, i1 false)
       to label %choose.block unwind label %unwind
 choose.block:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -324,19 +324,19 @@ define void @casec_owner_overwritten(i1 %choose) gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68881 to ptr), i32 16)
+      ptr inttoptr (i64 68881 to ptr), i32 16, i1 false)
       to label %choose.block unwind label %unwind
 choose.block:
   br i1 %choose, label %left, label %right
 left:
   %left.owner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68882 to ptr), i32 24)
+      ptr inttoptr (i64 68882 to ptr), i32 24, i1 false)
       to label %left.cont unwind label %unwind
 left.cont:
   br label %merge
 right:
   %right.owner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68882 to ptr), i32 24)
+      ptr inttoptr (i64 68882 to ptr), i32 24, i1 false)
       to label %right.cont unwind label %unwind
 right.cont:
   br label %merge
@@ -367,19 +367,19 @@ define void @casec_owner_live(i1 %choose) gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68891 to ptr), i32 16)
+      ptr inttoptr (i64 68891 to ptr), i32 16, i1 false)
       to label %choose.block unwind label %unwind
 choose.block:
   br i1 %choose, label %left, label %right
 left:
   %left.owner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68892 to ptr), i32 24)
+      ptr inttoptr (i64 68892 to ptr), i32 24, i1 false)
       to label %left.cont unwind label %unwind
 left.cont:
   br label %merge
 right:
   %right.owner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68892 to ptr), i32 24)
+      ptr inttoptr (i64 68892 to ptr), i32 24, i1 false)
       to label %right.cont unwind label %unwind
 right.cont:
   br label %merge
@@ -409,11 +409,11 @@ define void @invoke_observes_virtual_owner() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68893 to ptr), i32 16)
+      ptr inttoptr (i64 68893 to ptr), i32 16, i1 false)
       to label %alloc.outer unwind label %alloc.unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68894 to ptr), i32 24)
+      ptr inttoptr (i64 68894 to ptr), i32 24, i1 false)
       to label %body unwind label %alloc.unwind
 body:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -453,7 +453,7 @@ define void @store_after_ineligible_root() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68895 to ptr), i32 24)
+      ptr inttoptr (i64 68895 to ptr), i32 24, i1 false)
       to label %body unwind label %unwind
 body:
   %is.vb = call hotspotcc i1 @jeandle.check_if_value_based(
@@ -480,7 +480,7 @@ define void @branch_store_other_branch_bails(i1 %bail) gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68896 to ptr), i32 24)
+      ptr inttoptr (i64 68896 to ptr), i32 24, i1 false)
       to label %choose unwind label %unwind
 choose:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -516,11 +516,11 @@ define void @nested_state_before_link_bail() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68897 to ptr), i32 24)
+      ptr inttoptr (i64 68897 to ptr), i32 24, i1 false)
       to label %alloc.outer unwind label %unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68898 to ptr), i32 24)
+      ptr inttoptr (i64 68898 to ptr), i32 24, i1 false)
       to label %body unwind label %unwind
 body:
   %child.value = getelementptr inbounds i8, ptr addrspace(1) %child, i64 16
@@ -551,11 +551,11 @@ define void @nested_state_after_link_bail() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68899 to ptr), i32 24)
+      ptr inttoptr (i64 68899 to ptr), i32 24, i1 false)
       to label %alloc.outer unwind label %unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68900 to ptr), i32 24)
+      ptr inttoptr (i64 68900 to ptr), i32 24, i1 false)
       to label %body unwind label %unwind
 body:
   %outer.child = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -585,11 +585,11 @@ define void @nested_state_diamond_bail(i1 %choose) gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68901 to ptr), i32 24)
+      ptr inttoptr (i64 68901 to ptr), i32 24, i1 false)
       to label %alloc.outer unwind label %unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68902 to ptr), i32 24)
+      ptr inttoptr (i64 68902 to ptr), i32 24, i1 false)
       to label %choose.block unwind label %unwind
 choose.block:
   %outer.child = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
@@ -628,15 +628,15 @@ define void @nested_state_multilevel_cycle_bail() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %leaf = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68903 to ptr), i32 32)
+      ptr inttoptr (i64 68903 to ptr), i32 32, i1 false)
       to label %alloc.middle unwind label %unwind
 alloc.middle:
   %middle = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68904 to ptr), i32 24)
+      ptr inttoptr (i64 68904 to ptr), i32 24, i1 false)
       to label %alloc.outer unwind label %unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68905 to ptr), i32 24)
+      ptr inttoptr (i64 68905 to ptr), i32 24, i1 false)
       to label %body unwind label %unwind
 body:
   %leaf.value = getelementptr inbounds i8, ptr addrspace(1) %leaf, i64 16
@@ -673,11 +673,11 @@ define void @nested_state_invoke_after_bail() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68906 to ptr), i32 24)
+      ptr inttoptr (i64 68906 to ptr), i32 24, i1 false)
       to label %alloc.outer unwind label %alloc.unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68907 to ptr), i32 24)
+      ptr inttoptr (i64 68907 to ptr), i32 24, i1 false)
       to label %body unwind label %alloc.unwind
 body:
   %child.value = getelementptr inbounds i8, ptr addrspace(1) %child, i64 16
@@ -717,11 +717,11 @@ define void @nested_state_overwritten_before_bail() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68908 to ptr), i32 24)
+      ptr inttoptr (i64 68908 to ptr), i32 24, i1 false)
       to label %alloc.outer unwind label %unwind
 alloc.outer:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68909 to ptr), i32 24)
+      ptr inttoptr (i64 68909 to ptr), i32 24, i1 false)
       to label %body unwind label %unwind
 body:
   %child.value = getelementptr inbounds i8, ptr addrspace(1) %child, i64 16

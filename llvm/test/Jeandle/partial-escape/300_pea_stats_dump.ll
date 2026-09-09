@@ -25,14 +25,14 @@
 ;               object materializes AT the store (Materialize effect survives,
 ;               OrigAlloc kept) and is stamped PartiallyEscapes.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 declare void @sink(ptr addrspace(1))
 
 define i32 @t_never() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
          to label %n unwind label %u
 n:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 8
@@ -47,7 +47,7 @@ u:
 define void @t_partial(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
          to label %n unwind label %u
 n:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 8
@@ -69,7 +69,7 @@ u:
 define void @t_always(i64 %dyn_off) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 33333 to ptr), i32 16)
+            ptr inttoptr (i64 33333 to ptr), i32 16, i1 false)
          to label %n unwind label %u
 n:
   ; runtime byte offset -> resolveFieldOffset bails -> materialize at the

@@ -119,6 +119,9 @@ STATISTIC(JeandlePEAMaterializedCascade,
           "Materializations triggered by strict-lock cascade");
 STATISTIC(JeandlePEAMaterializedNested,
           "Materializations triggered by nested-virtual prerequisite");
+STATISTIC(JeandlePEADeadLoopNests,
+          "Loop nests published dead without a body traversal (no live "
+          "forward edge into the header)");
 
 // When set, dump per-function PEA classification stats
 // on errs() after commit(). The line is prefixed with `;; PEA stats` so it
@@ -206,16 +209,39 @@ static llvm::cl::opt<std::string> JeandleEscapeAnalyzeOnly(
 static llvm::cl::list<std::string> JeandleEscapeAnalyzeFunctions(
     "jeandle-pea-analyze-function", llvm::cl::Hidden,
     llvm::cl::desc("PEA: only analyze functions whose name exactly matches "
-                   "one of the supplied names. May be repeated. Empty (the "
-                   "default) preserves substring-filter behavior."),
+                   "one of the supplied names. At runtime, a numeric method "
+                   "identity suffix is also accepted. May be repeated. Empty "
+                   "(the default) preserves substring-filter behavior."),
     llvm::cl::value_desc("function"));
 
 static bool matchesExactAnalyzeFunction(llvm::StringRef FunctionName) {
   if (JeandleEscapeAnalyzeFunctions.empty())
     return true;
-  for (const std::string &Allowed : JeandleEscapeAnalyzeFunctions)
-    if (FunctionName == llvm::StringRef(Allowed))
+  for (const std::string &Allowed : JeandleEscapeAnalyzeFunctions) {
+    StringRef AllowedName(Allowed);
+    if (FunctionName == AllowedName)
       return true;
+
+    // JDK-generated symbols append a numeric ciMethod identity. Try the stable
+    // name first, then accept that runtime suffix.
+    constexpr StringLiteral RootSuffix = ".root";
+    bool FunctionIsRoot = FunctionName.ends_with(RootSuffix);
+    bool AllowedIsRoot = AllowedName.ends_with(RootSuffix);
+    if (FunctionIsRoot != AllowedIsRoot)
+      continue;
+
+    StringRef Candidate = FunctionName;
+    StringRef StableName = AllowedName;
+    if (FunctionIsRoot) {
+      Candidate = Candidate.drop_back(RootSuffix.size());
+      StableName = StableName.drop_back(RootSuffix.size());
+    }
+    if (!Candidate.consume_front(StableName) || !Candidate.consume_front(".") ||
+        Candidate.empty() ||
+        !llvm::all_of(Candidate, [](char C) { return C >= '0' && C <= '9'; }))
+      continue;
+    return true;
+  }
   return false;
 }
 
@@ -603,6 +629,7 @@ struct PEAAttemptStatistics {
   uint64_t ModeEscalations = 0;
   uint64_t MaterializedCascade = 0;
   uint64_t MaterializedNested = 0;
+  uint64_t DeadLoopNests = 0;
 
   void publish() const {
     JeandlePEAVirtualized += Virtualized;
@@ -617,6 +644,7 @@ struct PEAAttemptStatistics {
     JeandlePEAModeEscalations += ModeEscalations;
     JeandlePEAMaterializedCascade += MaterializedCascade;
     JeandlePEAMaterializedNested += MaterializedNested;
+    JeandlePEADeadLoopNests += DeadLoopNests;
   }
 };
 
@@ -1595,6 +1623,15 @@ private:
                               ArrayRef<BasicBlock *> FunctionRPO,
                               const BlockExitData *HeaderSeed = nullptr);
 
+  // Publish a dead exit for every block of loop nest L (sub-loop blocks
+  // included) without running any body traversal. Used when no forward
+  // (non-latch) contribution to the header is Live: latches are reachable
+  // only through the header, and the header only through forward edges, so
+  // the nest is runtime-unreachable. Successors then merge through the
+  // ordinary dead-pred machinery instead of silently skipping this nest's
+  // edges.
+  void publishDeadLoopNest(Loop *L);
+
   // How much of a LoopSnapshot restoreLoopSnapshot rewinds: Iteration
   // restores only the loop blocks' traversal-local state for an ordinary
   // B/B' retry; Full additionally restores the preheader for the
@@ -1985,6 +2022,12 @@ private:
   // plan (the folding effect may have been filtered out); returns the
   // killers whose proof no longer holds.
   SmallVector<Instruction *, 8> validateCFGDeadnessProofs() const;
+  // Check that every surviving CreatePHIEffect carries exactly one incoming
+  // per current structural predecessor edge of its target block. A missing
+  // slot means an Unseen pred was skipped at emission time with no later
+  // revisit to backfill it; the transform's CFG cleanup would corrupt such a
+  // PHI.
+  bool validateSurvivingPhiArity() const;
   // Publish a validated attempt's diagnostics: flush the attempt-local
   // statistics to the global counters, emit the effect trace, and dump the
   // optional per-function escape classification.
@@ -5318,6 +5361,22 @@ void Analyzer::processAllocation(CallBase *CB) {
   const bool IsArray = jeandle::pea::isJeandleNewArray(CB);
   assert((IsInstance ^ IsArray) &&
          "allocation must be either instance or array");
+  (void)IsArray;
+
+  // The third operand of jeandle.new_instance is not an allocation hint. It
+  // selects the runtime slow path, which performs initialization and
+  // instantiation checks with observable exception/side-effect semantics.
+  // PEA does not model that path, so only the exact fast-path form is
+  // virtualizable. In particular, a runtime-unknown value must not be
+  // treated as false merely because the fast path is the common case.
+  if (IsInstance) {
+    if (CB->arg_size() != 3)
+      return;
+    auto *InitialSlowTest = dyn_cast<ConstantInt>(CB->getArgOperand(2));
+    if (!InitialSlowTest || !InitialSlowTest->getType()->isIntegerTy(1) ||
+        !InitialSlowTest->isZero())
+      return;
+  }
 
   // Refuse to virtualize identity-sensitive allocations.
   // HasFinalizer: classes that override finalize() require HotSpot's
@@ -5369,14 +5428,15 @@ void Analyzer::processAllocation(CallBase *CB) {
     // resolveFieldOffset) will be eligible. ArrayBaseOffset is always set
     // (per-kind when known, else the VM's Object-kind default) so the
     // resolveAccess header guard never degrades to `< 0`.
-    if (auto Kind = jeandle::pea::elementTypeForArrayKlass(Klass)) {
+    jeandle::JBasicType Kind = jeandle::elementTypeForArrayKlass(Klass);
+    if (Kind != jeandle::JBasicType::Count) {
       VO->ArrayBaseOffset =
-          static_cast<uint32_t>(VMConsts.arrayBaseOffsetFor(*Kind));
+          static_cast<uint32_t>(VMConsts.arrayBaseOffsetFor(Kind));
       if (Type *ElemTy =
-              jeandle::pea::llvmElementTypeFor(*Kind, F.getContext())) {
+              jeandle::pea::llvmElementTypeFor(Kind, F.getContext())) {
         VO->ArrayElementType = ElemTy;
         VO->ArrayIndexScale =
-            static_cast<uint32_t>(VMConsts.elementSizeFor(*Kind));
+            static_cast<uint32_t>(VMConsts.elementSizeFor(Kind));
       }
     } else {
       // Unknown element kind: we cannot pin the per-kind element type, but
@@ -6528,7 +6588,9 @@ bool Analyzer::foldArrayStoreCheck(CallBase *CB) {
     ValueKlass = Result.VirtualObjects[*ValueID]->Klass;
   } else {
     // Fall back to attribute / metadata sharpening for non-virtual values.
-    jeandle::JavaType JT = jeandle::getJavaType(Val);
+    // Context-insensitive query: no dominator tree and no context, so the
+    // edge-semantics engine does not run and the oracle is unused.
+    jeandle::JavaType JT = jeandle::getJavaType(Val, nullptr, nullptr, nullptr);
     ValueKlass = JT.Klass;
   }
 
@@ -8824,8 +8886,8 @@ void Analyzer::validateFinalDeoptObligations() {
     SmallVector<jeandle::ObjectID, 8> Worklist(1, RootID);
     while (!Worklist.empty()) {
       jeandle::ObjectID ID = Worklist.pop_back_val();
-      if (!Visited.insert(ID).second || ID == jeandle::InvalidObjectID ||
-          ID >= Result.VirtualObjects.size())
+      if (ID == jeandle::InvalidObjectID ||
+          ID >= Result.VirtualObjects.size() || !Visited.insert(ID).second)
         continue;
       const jeandle::VirtualObject &VObj = *Result.VirtualObjects[ID];
       if (VObj.IsSynthetic) {
@@ -8865,8 +8927,8 @@ void Analyzer::validateFinalDeoptObligations() {
     SmallVector<jeandle::ObjectID, 8> Worklist(1, RootID);
     while (!Worklist.empty()) {
       jeandle::ObjectID ID = Worklist.pop_back_val();
-      if (!Visited.insert(ID).second || ID == jeandle::InvalidObjectID ||
-          ID >= Result.VirtualObjects.size())
+      if (ID == jeandle::InvalidObjectID ||
+          ID >= Result.VirtualObjects.size() || !Visited.insert(ID).second)
         continue;
       const jeandle::VirtualObject &VObj = *Result.VirtualObjects[ID];
       if (VObj.IsSynthetic) {
@@ -9048,6 +9110,35 @@ void Analyzer::validateFinalDeoptObligations() {
       }
     }
   }
+}
+
+bool Analyzer::validateSurvivingPhiArity() const {
+  for (const auto &KV : Result.BlockEffects) {
+    const jeandle::EffectList &Effects = KV.second;
+    for (size_t I = 0; I < Effects.size(); ++I) {
+      const auto *PE = dyn_cast<jeandle::CreatePHIEffect>(&Effects[I]);
+      if (!PE)
+        continue;
+      // appendFullPhiInputs pads dead predecessor slots with poison, so a
+      // committed PHI whose recorded incoming blocks do not cover exactly
+      // the current structural predecessor edges lost an Unseen pred at
+      // emission time with no later revisit to backfill it.
+      SmallVector<BasicBlock *, 8> Recorded(PE->PHIIncomingBlocks.begin(),
+                                            PE->PHIIncomingBlocks.end());
+      SmallVector<BasicBlock *, 8> Structural(predecessors(PE->Block));
+      llvm::sort(Recorded);
+      llvm::sort(Structural);
+      if (Recorded != Structural) {
+        LLVM_DEBUG(dbgs() << "PEA: committed field PHI in block ";
+                   PE->Block->printAsOperand(dbgs(), false);
+                   dbgs() << " of @" << F.getName()
+                          << " does not match its structural predecessors; "
+                             "bailing analysis\n");
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 // Validates every recorded CFG deadness proof against the final plan and
@@ -9792,6 +9883,22 @@ void Analyzer::processLoopBodyOnePass(Loop *L, ArrayRef<BasicBlock *> LoopRPO,
   }
 }
 
+void Analyzer::publishDeadLoopNest(Loop *L) {
+  for (BasicBlock *BB : L->blocks()) {
+    PendingMergePhis.erase(BB);
+    PendingMaterializeAllVOs.erase(BB);
+    BlockExitInfo DeadExit;
+    DeadExit.IsDead = true;
+    // Overwrite mirrors the entry gate's dead-exit publication.
+    BlockExits[BB] = std::move(DeadExit);
+  }
+  ++AttemptStats.DeadLoopNests;
+  LLVM_DEBUG(dbgs() << "PEA: loop nest @ " << L->getHeader()->getName()
+                    << " has no live forward contribution; published dead "
+                       "exits for "
+                    << L->getNumBlocks() << " blocks\n");
+}
+
 // Loop fixpoint driver. The section banner above ("Real loop fixpoint")
 // describes the overall structure: no-preheader fallback, mode escalation,
 // snapshot, outer retry loop wrapping the inner B/B' fixpoint, and the
@@ -9840,6 +9947,28 @@ void Analyzer::processLoop(Loop *L, ArrayRef<BasicBlock *> FunctionRPO) {
         continue;
       if (Seen.insert(P).second)
         ForwardPreds.push_back(P);
+    }
+
+    // Classify forward contributions before any VO bail or body walk. With
+    // no Live forward edge the cycle is runtime-unreachable: the latch is
+    // reachable only through the header, and the header only through forward
+    // edges (a Dead edge is proof-backed; an Unseen forward pred means a
+    // stranded upstream region, which the end-of-walk publication net in
+    // run() rejects independently). Publish dead exits for the whole nest
+    // instead of running a body walk whose header would defer at the entry
+    // gate. The queries also record folded-edge proofs for the dead edges.
+    // The VO bail below only matters when a live forward pred can carry
+    // virtuals into the header.
+    bool AnyLiveForward = false;
+    {
+      ScopedEdgeExitViews EdgeViews(*this);
+      for (BasicBlock *P : ForwardPreds)
+        AnyLiveForward |= contributionFor(P, Header).isLive();
+    }
+    if (!AnyLiveForward) {
+      publishDeadLoopNest(L);
+      Result.NeedsCFGCleanup = true;
+      return;
     }
 
     // Bail every VO that is virtual at any forward pred — drop it back to the
@@ -9977,12 +10106,16 @@ void Analyzer::processLoop(Loop *L, ArrayRef<BasicBlock *> FunctionRPO) {
         ForwardState = *Forward.Data;
     }
     if (!ForwardState) {
-      // B is a live abstract state. A dead or not-yet-published forward edge
-      // must use the ordinary structural entry gate instead of being promoted
-      // into a seeded live traversal.
-      for (BasicBlock *BB : LoopBlocks)
-        BlockExits.erase(BB);
-      processLoopBodyOnePass(L, LoopRPO, FunctionRPO);
+      // No Live forward contribution: the nest is runtime-unreachable. A
+      // Dead forward edge is a proven-untaken entry; an Unseen one means the
+      // preheader itself deferred (only a stranded upstream region causes
+      // that), which the end-of-walk publication net in run() rejects
+      // independently. Publish dead exits for the whole nest instead of
+      // running an unseeded body pass whose header would defer at the entry
+      // gate (latch contributions are Unseen at this point), leaving every
+      // loop block unpublished.
+      publishDeadLoopNest(L);
+      Result.NeedsCFGCleanup = true;
       if (L->getLoopDepth() == 1)
         CurrentMode = SavedModeForNest;
       return;
@@ -10307,6 +10440,22 @@ jeandle::PEAResult Analyzer::run() {
   if (InvalidLoopMonotonicity)
     return jeandle::PEAResult();
 
+  // Publication invariant: every RPO-reached block must have published an
+  // exit (Live or Dead). A missing entry means the block deferred at the
+  // entry gate and was never backfilled — a stranded all-dead-boundary cycle
+  // the loop fixpoint never owned, or an analysis bug. Downstream merges may
+  // already have skipped such predecessors, leaving committed field PHIs
+  // with missing incoming slots; bail the whole function rather than risk
+  // malformed IR at transform-time CFG cleanup.
+  for (BasicBlock *BB : FunctionRPO) {
+    if (BlockExits.contains(BB))
+      continue;
+    LLVM_DEBUG(dbgs() << "PEA: RPO block never published an exit: ";
+               BB->printAsOperand(dbgs(), false);
+               dbgs() << " in @" << F.getName() << "; bailing analysis\n");
+    return jeandle::PEAResult();
+  }
+
   // Safety net — drain preheader virtuals ONLY for loops the RPO
   // walk never reached (unreachable top-level loops, or sub-loops whose
   // outer recursion bailed before recursing). Everything else has been
@@ -10317,6 +10466,8 @@ jeandle::PEAResult Analyzer::run() {
     return jeandle::PEAResult();
   commit();
   if (!RetryVirtualizationAllocationSites.empty())
+    return jeandle::PEAResult();
+  if (!validateSurvivingPhiArity())
     return jeandle::PEAResult();
   validateFinalDeoptObligations();
   if (InvalidDeoptObligation)

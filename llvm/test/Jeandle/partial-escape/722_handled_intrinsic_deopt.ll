@@ -6,7 +6,7 @@
 ; deopt bundle is executable frame state.  The virtual root must be described
 ; before the intrinsic handler returns.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @llvm.sideeffect()
 declare ptr addrspace(1)
     @llvm.launder.invariant.group.p1(ptr addrspace(1))
@@ -16,7 +16,7 @@ define void @handled_intrinsic_deopt()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 72201 to ptr), i32 16)
+      ptr inttoptr (i64 72201 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 
 body:
@@ -41,12 +41,12 @@ define void @handled_intrinsic_nested_deopt(i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 72202 to ptr), i32 24)
+      ptr inttoptr (i64 72202 to ptr), i32 24, i1 false)
       to label %alloc.inner unwind label %unwind
 
 alloc.inner:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 72203 to ptr), i32 16)
+      ptr inttoptr (i64 72203 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 
 body:
@@ -86,12 +86,12 @@ entry:
 
 left:
   %left.object = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 72204 to ptr), i32 16)
+      ptr inttoptr (i64 72204 to ptr), i32 16, i1 false)
       to label %merge unwind label %unwind
 
 right:
   %right.object = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 72204 to ptr), i32 16)
+      ptr inttoptr (i64 72204 to ptr), i32 16, i1 false)
       to label %merge unwind label %unwind
 
 merge:
@@ -121,7 +121,7 @@ define void @handled_intrinsic_derived_deopt()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 72205 to ptr), i32 24)
+      ptr inttoptr (i64 72205 to ptr), i32 24, i1 false)
       to label %body unwind label %unwind
 
 body:
@@ -148,7 +148,7 @@ define void @handled_intrinsic_informational_bundle()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 72206 to ptr), i32 16)
+      ptr inttoptr (i64 72206 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 
 body:
@@ -171,7 +171,7 @@ define void @handled_intrinsic_ordinary_operand()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 72207 to ptr), i32 16)
+      ptr inttoptr (i64 72207 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 
 body:
@@ -198,7 +198,7 @@ define void @real_allocation_stops_dependency_walk()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %virtual = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 72208 to ptr), i32 16)
+      ptr inttoptr (i64 72208 to ptr), i32 16, i1 false)
       to label %alloc.real unwind label %unwind
 
 alloc.real:
@@ -206,7 +206,7 @@ alloc.real:
   ; VirtualObject.  Its allocation-safepoint bundle independently describes
   ; %virtual.
   %real = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr null, i32 16)
+      ptr null, i32 16, i1 false)
       [ "deopt"(i32 99, i32 99, i64 12,
                   ptr addrspace(1) %virtual) ]
       to label %body unwind label %unwind
@@ -227,7 +227,7 @@ unwind:
 
 ; CHECK-LABEL: define void @real_allocation_stops_dependency_walk()
 ; CHECK-NOT: invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 72208
-; CHECK: %[[REAL:[A-Za-z0-9._]+]] = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr null, i32 16)
+; CHECK: %[[REAL:[A-Za-z0-9._]+]] = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr null, i32 16, i1 false)
 ; CHECK-SAME: [ "deopt"(i32 99, i32 99,
 ; CHECK-SAME: i64 262156, i64 72208, i32 0,
 ; CHECK-SAME: i64 524300, i32 0) ]

@@ -10,7 +10,7 @@
 ; still compiles cleanly and the unreachable region survives until a
 ; later canonicalisation drops it.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define i32 @test_unvisited(i32 %n) gc "hotspotgc" personality ptr @__gxx_personality_v0 {

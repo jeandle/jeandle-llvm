@@ -23,7 +23,7 @@
 ; monitor operations remain folded; the complete current synthetic state is
 ; replayed once onto the original Case-C PHI at the actual escape point.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -36,13 +36,13 @@ entry:
   br i1 %choose, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69201 to ptr), i32 24) [ "deopt"(i32 692011) ]
+      ptr inttoptr (i64 69201 to ptr), i32 24, i1 false) [ "deopt"(i32 692011) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 7, ptr addrspace(1) %af unordered, align 4
   br label %merge
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69201 to ptr), i32 24) [ "deopt"(i32 692012) ]
+      ptr inttoptr (i64 69201 to ptr), i32 24, i1 false) [ "deopt"(i32 692012) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 13, ptr addrspace(1) %bf unordered, align 4
   br label %merge
@@ -102,13 +102,13 @@ entry:
   br i1 %choose, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69202 to ptr), i32 16) [ "deopt"(i32 692021) ]
+      ptr inttoptr (i64 69202 to ptr), i32 16, i1 false) [ "deopt"(i32 692021) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 21, ptr addrspace(1) %af unordered, align 4
   br i1 %take.merge, label %merge, label %bypass
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69202 to ptr), i32 16) [ "deopt"(i32 692022) ]
+      ptr inttoptr (i64 69202 to ptr), i32 16, i1 false) [ "deopt"(i32 692022) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 22, ptr addrspace(1) %bf unordered, align 4
   br label %merge
@@ -145,19 +145,19 @@ entry:
   ]
 a0:
   %o0 = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69203 to ptr), i32 16) [ "deopt"(i32 692031) ]
+      ptr inttoptr (i64 69203 to ptr), i32 16, i1 false) [ "deopt"(i32 692031) ]
   %f0 = getelementptr inbounds i8, ptr addrspace(1) %o0, i64 8
   store atomic i32 30, ptr addrspace(1) %f0 unordered, align 4
   br label %merge
 a1:
   %o1 = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69203 to ptr), i32 16) [ "deopt"(i32 692032) ]
+      ptr inttoptr (i64 69203 to ptr), i32 16, i1 false) [ "deopt"(i32 692032) ]
   %f1 = getelementptr inbounds i8, ptr addrspace(1) %o1, i64 8
   store atomic i32 31, ptr addrspace(1) %f1 unordered, align 4
   br label %merge
 a2:
   %o2 = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69203 to ptr), i32 16) [ "deopt"(i32 692033) ]
+      ptr inttoptr (i64 69203 to ptr), i32 16, i1 false) [ "deopt"(i32 692033) ]
   %f2 = getelementptr inbounds i8, ptr addrspace(1) %o2, i64 8
   store atomic i32 32, ptr addrspace(1) %f2 unordered, align 4
   br label %merge
@@ -198,13 +198,13 @@ entry:
   br i1 %source, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69204 to ptr), i32 16) [ "deopt"(i32 692041) ]
+      ptr inttoptr (i64 69204 to ptr), i32 16, i1 false) [ "deopt"(i32 692041) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 61, ptr addrspace(1) %af unordered, align 4
   br label %casec
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69204 to ptr), i32 16) [ "deopt"(i32 692042) ]
+      ptr inttoptr (i64 69204 to ptr), i32 16, i1 false) [ "deopt"(i32 692042) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 62, ptr addrspace(1) %bf unordered, align 4
   br label %casec
@@ -249,17 +249,17 @@ caseb:
 define void @casec_live_child_state(i1 %choose) gc "hotspotgc" {
 entry:
   %child = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69205 to ptr), i32 16) [ "deopt"(i32 692051) ]
+      ptr inttoptr (i64 69205 to ptr), i32 16, i1 false) [ "deopt"(i32 692051) ]
   %child.field = getelementptr inbounds i8, ptr addrspace(1) %child, i64 8
   store atomic i32 123, ptr addrspace(1) %child.field unordered, align 4
   br i1 %choose, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69206 to ptr), i32 24) [ "deopt"(i32 692061) ]
+      ptr inttoptr (i64 69206 to ptr), i32 24, i1 false) [ "deopt"(i32 692061) ]
   br label %merge
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69206 to ptr), i32 24) [ "deopt"(i32 692062) ]
+      ptr inttoptr (i64 69206 to ptr), i32 24, i1 false) [ "deopt"(i32 692062) ]
   br label %merge
 merge:
   %owner = phi ptr addrspace(1) [ %a, %left ], [ %b, %right ]
@@ -299,12 +299,12 @@ entry:
   br i1 %choose, label %left, label %right
 left:
   %left.child = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69207 to ptr), i32 16) [ "deopt"(i32 692071) ]
+      ptr inttoptr (i64 69207 to ptr), i32 16, i1 false) [ "deopt"(i32 692071) ]
   %left.child.field = getelementptr inbounds i8,
       ptr addrspace(1) %left.child, i64 8
   store atomic i32 211, ptr addrspace(1) %left.child.field unordered, align 4
   %left.owner = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69208 to ptr), i32 24) [ "deopt"(i32 692081) ]
+      ptr inttoptr (i64 69208 to ptr), i32 24, i1 false) [ "deopt"(i32 692081) ]
   %left.owner.child = getelementptr inbounds i8,
       ptr addrspace(1) %left.owner, i64 16
   store atomic ptr addrspace(1) %left.child,
@@ -312,12 +312,12 @@ left:
   br label %merge
 right:
   %right.child = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69207 to ptr), i32 16) [ "deopt"(i32 692072) ]
+      ptr inttoptr (i64 69207 to ptr), i32 16, i1 false) [ "deopt"(i32 692072) ]
   %right.child.field = getelementptr inbounds i8,
       ptr addrspace(1) %right.child, i64 8
   store atomic i32 212, ptr addrspace(1) %right.child.field unordered, align 4
   %right.owner = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69208 to ptr), i32 24) [ "deopt"(i32 692082) ]
+      ptr inttoptr (i64 69208 to ptr), i32 24, i1 false) [ "deopt"(i32 692082) ]
   %right.owner.child = getelementptr inbounds i8,
       ptr addrspace(1) %right.owner, i64 16
   store atomic ptr addrspace(1) %right.child,
@@ -367,11 +367,11 @@ entry:
   br i1 %choose, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69209 to ptr), i32 16) [ "deopt"(i32 692091) ]
+      ptr inttoptr (i64 69209 to ptr), i32 16, i1 false) [ "deopt"(i32 692091) ]
   br label %merge
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69209 to ptr), i32 16) [ "deopt"(i32 692092) ]
+      ptr inttoptr (i64 69209 to ptr), i32 16, i1 false) [ "deopt"(i32 692092) ]
   br label %merge
 merge:
   %p = phi ptr addrspace(1) [ %a, %left ], [ %b, %right ]
@@ -409,13 +409,13 @@ entry:
   br i1 %choose, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69210 to ptr), i32 24) [ "deopt"(i32 692101) ]
+      ptr inttoptr (i64 69210 to ptr), i32 24, i1 false) [ "deopt"(i32 692101) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 301, ptr addrspace(1) %af unordered, align 4
   br label %merge
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69210 to ptr), i32 24) [ "deopt"(i32 692102) ]
+      ptr inttoptr (i64 69210 to ptr), i32 24, i1 false) [ "deopt"(i32 692102) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 302, ptr addrspace(1) %bf unordered, align 4
   br label %merge

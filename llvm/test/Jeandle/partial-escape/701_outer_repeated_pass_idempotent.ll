@@ -21,7 +21,7 @@
 ; must leave the stable allocation, replay stores, PHI-free merge, and monitor
 ; operations unchanged.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
     ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(
@@ -36,7 +36,7 @@ entry:
   %lock = alloca i64, align 8
   %guard.lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 70100 to ptr), i32 16)
+            ptr inttoptr (i64 70100 to ptr), i32 16, i1 false)
        to label %allocated unwind label %unwind
 allocated:
   %field = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

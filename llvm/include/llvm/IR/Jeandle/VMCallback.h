@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <string>
 #include <tuple>
+#include <vector>
 
 namespace llvm::jeandle {
 
@@ -46,6 +47,21 @@ using ConstantFieldResult = std::tuple<int, int64_t>;
 /// Constraint or holder, target method, packed deoptimization or target info,
 /// and target method name returned by CHA devirtualization.
 using CHAOptResult = std::tuple<uintptr_t, uintptr_t, uintptr_t, std::string>;
+
+/// A profiled receiver, its resolved method, execution count, and method name.
+using ProfileDevirtualizationTargetResult =
+    std::tuple<uintptr_t, uintptr_t, int64_t, std::string>;
+
+/// First target, total count, packed deoptimization information, miss policy,
+/// and optional second target returned by profile-guided devirtualization.
+using ProfileDevirtualizationResult =
+    std::tuple<ProfileDevirtualizationTargetResult, int64_t, uintptr_t, bool,
+               ProfileDevirtualizationTargetResult>;
+
+/// GetMirrorKlass result used when the oop is not a constant Class mirror or
+/// its represented type is unavailable. Zero remains available to encode the
+/// known-null Klass field of a primitive Class mirror.
+inline constexpr uintptr_t MirrorKlassUnavailable = ~uintptr_t{0};
 
 /// Result reported for an inline attempt after LLVM starts processing it.
 /// Keep the numeric values stable because the JVM records them.
@@ -188,9 +204,21 @@ enum class JeandleInlineReason : int {
   def(GetOopKlass, uintptr_t, Uintptr,                                           \
       (int a1), (a1),                                                            \
       (VMCallbackValueType::Int), 1)                                             \
-  def(GetJavaMirror, int, Int,                                               \
-      (uintptr_t a1), (a1),                                                  \
-      (VMCallbackValueType::Uintptr), 1)                                     \
+  def(GetKlassConstant, uintptr_t, Uintptr,                                      \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetJavaMirror, int, Int,                                                   \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetMirrorKlass, uintptr_t, Uintptr,                                        \
+      (int a1), (a1),                                                            \
+      (VMCallbackValueType::Int), 1)                                             \
+  def(GetKlassLayoutHelper, int, Int,                                            \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(IsKlassInitialized, bool, Bool,                                            \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
   def(IsOkToInline, bool, Bool,                                                  \
       (int a1, int a2, uintptr_t a3), (a1, a2, a3),                              \
       (VMCallbackValueType::Int, VMCallbackValueType::Int,                       \
@@ -226,7 +254,19 @@ enum class JeandleInlineReason : int {
       (VMCallbackValueType::Uintptr, VMCallbackValueType::Int), 2)               \
   def(GetSignatureArgTypeKlass, uintptr_t, Uintptr,                              \
       (uintptr_t a1, int a2), (a1, a2),                                          \
-      (VMCallbackValueType::Uintptr, VMCallbackValueType::Int), 2)
+      (VMCallbackValueType::Uintptr, VMCallbackValueType::Int), 2)               \
+  def(GetProfileDevirtualizationInfo, ProfileDevirtualizationResult, Tuple,      \
+      (uintptr_t a1, uintptr_t a2, uintptr_t a3, int a4, int a5),                \
+      (a1, a2, a3, a4, a5),                                                     \
+      (VMCallbackValueType::Uintptr, VMCallbackValueType::Uintptr,               \
+       VMCallbackValueType::Uintptr, VMCallbackValueType::Int,                   \
+       VMCallbackValueType::Int), 5)                                             \
+  def(UpdateToStaticOptVirtualCall, bool, Bool,                                  \
+      (int64_t a1), (a1),                                                        \
+      (VMCallbackValueType::Long), 1)                                            \
+  def(GetSecondarySupers, std::vector<uintptr_t>, Array,                         \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)
 // clang-format on
 
 // =============================================================================
@@ -347,12 +387,28 @@ enum class JeandleInlineReason : int {
 ///   GetOopKlass         — Returns the actual runtime klass pointer of the
 ///                         constant oop with the given oop id, or 0 if it is
 ///                         unavailable. Pure (id -> klass).
+///   GetKlassConstant    — Returns a stable compile-time Klass pointer constant
+///                         for a known Klass, or 0 if unavailable. The VM
+///                         records the Klass dependency before returning it.
 ///   GetJavaMirror       — Given a VM Klass pointer, returns the oop id of its
 ///                         Java mirror (the java.lang.Class object), or -1 if
 ///                         unavailable. Used by PEA's foldGetClass to fold
 ///                         jeandle.get_class on a virtual receiver (whose exact
 ///                         klass is statically known) to the constant Class
 ///                         mirror. Pure (Klass -> mirror oop id).
+///   GetMirrorKlass      — For a constant java.lang.Class mirror, returns its
+///                         represented reference Klass pointer, or 0 when the
+///                         mirror represents a primitive type. Returns
+///                         MirrorKlassUnavailable for a non-mirror or an
+///                         unavailable value. Pure (id -> represented klass).
+///   GetKlassLayoutHelper
+///                       — Returns Klass::layout_helper() for a constant Klass
+///                         pointer, or 0 if unavailable. Pure (klass ->
+///                         layout helper).
+///   IsKlassInitialized  — Returns true iff a constant Klass is an initialized
+///                         instance klass. ConstantFieldFolding only acts on a
+///                         true result because initialization is monotonic;
+///                         false retains the dynamic initialization check.
 ///   IsOkToInline        — Given an inline scope id, call-site BCI, and callee
 ///                         Java method pointer, returns whether the VM allows
 ///                         this inline attempt.
@@ -377,15 +433,22 @@ enum class JeandleInlineReason : int {
 ///                         failures before returning, so LLVM expects a true
 ///                         result.
 ///                         "oop_handle_Test_1") for a given oop id.
-///   GetOopKlass         — Returns the actual runtime klass pointer of the
-///                         constant oop with the given oop id, or 0 if it is
-///                         unavailable. Pure (id -> klass).
 ///   GetCHAOptInfo       — Returns (constraint or holder, target method,
 ///                         packed deoptimization or target info, target method
 ///                         name) for CHA devirtualization. A zero first field
 ///                         means the call site cannot be optimized.
 ///   UpdateCallSite
 ///                       — Updates the call site to given destination.
+///   GetProfileDevirtualizationInfo
+///                       — Queries receiver profiles and target resolution in
+///                         the VM using the call-site's inline scope and
+///                         bytecode context. Returns a self-contained
+///                         monomorphic or bimorphic optimization result, or
+///                         empty if the call should remain virtual. The third
+///                         field packs the deoptimization reason and accessor
+///                         bits.
+///   UpdateToStaticOptVirtualCall
+///                       — Updates the call site to a static opt virtual call.
 ///                         This callback has side effects on jvm side.
 ///   GetSignatureAccessingKlass
 ///                       — Returns the signature accessing klass as a Klass
@@ -406,6 +469,9 @@ enum class JeandleInlineReason : int {
 ///                         index, excluding the receiver and not a JVM
 ///                         stack-slot index.
 ///                         Callers must only query reference parameters.
+///   GetSecondarySupers
+///                       — Returns the secondary super klass pointers of the
+///                       input klass
 
 struct VMCallbacks {
   ALL_JEANDLE_VM_CALLBACKS(DEF_VM_CALLBACK_FIELD)

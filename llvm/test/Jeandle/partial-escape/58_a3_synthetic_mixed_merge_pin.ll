@@ -17,7 +17,7 @@
 ; SSA, which by dominance requires OrigAlloc to dominate the merge. A
 ; debug-only assertion at that branch catches any future regression.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -28,7 +28,7 @@ entry:
   br i1 %c0, label %A, label %B
 A:
   %oA = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %An unwind label %u
 An:
   %af = getelementptr inbounds i8, ptr addrspace(1) %oA, i64 8
@@ -36,7 +36,7 @@ An:
   br label %M1
 B:
   %oB = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %Bn unwind label %u
 Bn:
   %bf = getelementptr inbounds i8, ptr addrspace(1) %oB, i64 8

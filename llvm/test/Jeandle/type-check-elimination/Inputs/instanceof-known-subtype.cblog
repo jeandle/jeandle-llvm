@@ -2,3 +2,28 @@
 # IsSubtype(5, 4) = true => fold to true.
 IsObjectKlass 4 = false
 IsSubtype 5 4 = true
+IsObjectKlass 4 = false
+IsSubtype 5 4 = true
+IsObjectKlass 4 = false
+IsSubtype 5 4 = true
+# Same-Klass base/exact intersection: exact klass 5 is incompatible with 3.
+IsObjectKlass 3 = false
+IsSubtype 5 3 = false
+IsSubtype 5 3 = false
+IsInterface 5 = false
+# Inner exact guard followed by an outer non-exact guard for klass 5.
+IsObjectKlass 5 = false
+IsSubtype 5 5 = true
+IsObjectKlass 3 = false
+IsSubtype 3 5 = false
+IsInterface 3 = false
+IsEffectivelyFinal 5 = false
+IsSubtype 5 3 = false
+IsSubtype 5 3 = false
+IsInterface 5 = false
+
+GetSecondarySupers 3 = []
+IsInterface 4 = false
+GetSecondarySupers 4 = []
+
+GetSecondarySupers 5 = []

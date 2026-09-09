@@ -9,7 +9,7 @@
 ; effects must not be reused across rollback; otherwise both materialize
 ; effects at one physical lock site can identify themselves as the batch tail.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
     ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(
@@ -23,11 +23,11 @@ entry:
   %la = alloca i64, align 8
   %lb = alloca i64, align 8
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 73101 to ptr), i32 16)
+           ptr inttoptr (i64 73101 to ptr), i32 16, i1 false)
        to label %new.b unwind label %unwind
 new.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 73102 to ptr), i32 16)
+           ptr inttoptr (i64 73102 to ptr), i32 16, i1 false)
        to label %preheader unwind label %unwind
 preheader:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(

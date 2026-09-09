@@ -6,18 +6,18 @@
 ; cycle's back edge q.h = o resolves through o's OrigAlloc — no cascade
 ; coordination, no additional allocation invoke, no materialized-object PHI.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @self_field_cycle3_perpred(i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 32) to label %oi unwind label %u
+  %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 32, i1 false) to label %oi unwind label %u
 oi:
-  %p = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 32) to label %pi unwind label %u
+  %p = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 32, i1 false) to label %pi unwind label %u
 pi:
-  %q = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 33333 to ptr), i32 32) to label %fld unwind label %u
+  %q = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 33333 to ptr), i32 32, i1 false) to label %fld unwind label %u
 fld:
   %of = getelementptr inbounds i8, ptr addrspace(1) %o, i64 0
   store atomic ptr addrspace(1) %p, ptr addrspace(1) %of unordered, align 8

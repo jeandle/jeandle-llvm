@@ -6,7 +6,7 @@
 ; An object that is not exposed to the callee remains virtual on the unwind
 ; edge and retains its independently tracked field state.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @mutate_and_maybe_throw(ptr addrspace(1), i1)
 declare i32 @__gxx_personality_v0(...)
 
@@ -14,7 +14,7 @@ define i32 @test_call_arg_unwind(i1 %take.normal)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 24)
+            ptr inttoptr (i64 11111 to ptr), i32 24, i1 false)
        to label %body unwind label %alloc.unwind
 body:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 16
@@ -48,11 +48,11 @@ define i32 @test_unrelated_virtual_unwind(i1 %take.normal)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %passed = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 24)
+            ptr inttoptr (i64 11111 to ptr), i32 24, i1 false)
        to label %allocate.local unwind label %alloc.unwind
 allocate.local:
   %local = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 24)
+            ptr inttoptr (i64 22222 to ptr), i32 24, i1 false)
        to label %body unwind label %alloc.unwind
 body:
   %local.slot = getelementptr inbounds i8, ptr addrspace(1) %local, i64 16

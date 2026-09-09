@@ -18,14 +18,14 @@
 ; reuse-OrigAlloc the object escapes via @external(%o): the original %o is
 ; retained and consumed directly; materialization introduces no new invoke.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @external(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @t_derived_off16() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 32)
+            ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
          to label %n unwind label %u
 n:
   %g = getelementptr inbounds i8, ptr addrspace(1) %o, i64 16
@@ -40,7 +40,7 @@ u:
 define void @t_derived_off0() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 32)
+            ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
          to label %n unwind label %u
 n:
   %g = getelementptr inbounds i8, ptr addrspace(1) %o, i64 0
@@ -54,7 +54,7 @@ u:
 define void @t_whole_object() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 32)
+            ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
          to label %n unwind label %u
 n:
   call void @external(ptr addrspace(1) %o)

@@ -10,14 +10,14 @@
 ; two.  Unsupported values must materialize before their original non-atomic
 ; store; legal fixed vectors remain virtual until the return escape.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define ptr addrspace(1) @reject_i24(i24 %value) gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74101 to ptr), i32 32)
+      ptr inttoptr (i64 74101 to ptr), i32 32, i1 false)
       to label %body unwind label %unwind
 body:
   %slot = getelementptr i8, ptr addrspace(1) %obj, i64 8
@@ -38,7 +38,7 @@ define ptr addrspace(1) @reject_x86_fp80(x86_fp80 %value) gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74102 to ptr), i32 32)
+      ptr inttoptr (i64 74102 to ptr), i32 32, i1 false)
       to label %body unwind label %unwind
 body:
   %slot = getelementptr i8, ptr addrspace(1) %obj, i64 16
@@ -59,7 +59,7 @@ define ptr addrspace(1) @reject_fixed_vector_96(<3 x i32> %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74103 to ptr), i32 32)
+      ptr inttoptr (i64 74103 to ptr), i32 32, i1 false)
       to label %body unwind label %unwind
 body:
   %slot = getelementptr i8, ptr addrspace(1) %obj, i64 8
@@ -80,7 +80,7 @@ define ptr addrspace(1) @reject_scalable_vector(<vscale x 2 x i32> %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74104 to ptr), i32 32)
+      ptr inttoptr (i64 74104 to ptr), i32 32, i1 false)
       to label %body unwind label %unwind
 body:
   %slot = getelementptr i8, ptr addrspace(1) %obj, i64 8
@@ -101,7 +101,7 @@ define ptr addrspace(1) @reject_aggregate() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74105 to ptr), i32 32)
+      ptr inttoptr (i64 74105 to ptr), i32 32, i1 false)
       to label %body unwind label %unwind
 body:
   %slot = getelementptr i8, ptr addrspace(1) %obj, i64 8
@@ -122,7 +122,7 @@ define ptr addrspace(1) @accept_fixed_vector_128(<4 x i32> %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74106 to ptr), i32 32)
+      ptr inttoptr (i64 74106 to ptr), i32 32, i1 false)
       to label %body unwind label %unwind
 body:
   %slot = getelementptr i8, ptr addrspace(1) %obj, i64 8
@@ -143,7 +143,7 @@ define ptr addrspace(1) @accept_fixed_vector_8(<8 x i1> %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74107 to ptr), i32 32)
+      ptr inttoptr (i64 74107 to ptr), i32 32, i1 false)
       to label %body unwind label %unwind
 body:
   %slot = getelementptr i8, ptr addrspace(1) %obj, i64 8
@@ -166,7 +166,7 @@ define ptr addrspace(1) @accept_i8_physical_boolean(i8 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74108 to ptr), i32 32)
+      ptr inttoptr (i64 74108 to ptr), i32 32, i1 false)
       to label %body unwind label %unwind
 body:
   %slot = getelementptr i8, ptr addrspace(1) %obj, i64 8
@@ -188,7 +188,7 @@ define ptr addrspace(1) @accept_fixed_pointer_vector(
     personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74109 to ptr), i32 32)
+      ptr inttoptr (i64 74109 to ptr), i32 32, i1 false)
       to label %body unwind label %unwind
 body:
   %slot = getelementptr i8, ptr addrspace(1) %obj, i64 8

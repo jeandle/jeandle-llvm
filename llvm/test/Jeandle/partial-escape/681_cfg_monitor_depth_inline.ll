@@ -10,7 +10,7 @@
 ; slot is deliberately allocated first; lexical CFG nesting still makes the
 ; caller lock depth zero and the callee lock depth one.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1)) nounwind
@@ -20,9 +20,9 @@ entry:
   %callee.lock = alloca i64, align 8
   %caller.lock = alloca i64, align 8
   %caller = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68101 to ptr), i32 16)
+      ptr inttoptr (i64 68101 to ptr), i32 16, i1 false)
   %callee = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68102 to ptr), i32 16)
+      ptr inttoptr (i64 68102 to ptr), i32 16, i1 false)
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
       ptr addrspace(1) %caller, ptr %caller.lock)
   br i1 %choose, label %callee.left, label %callee.right

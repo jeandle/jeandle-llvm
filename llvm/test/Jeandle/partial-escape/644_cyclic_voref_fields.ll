@@ -13,18 +13,18 @@
 ; first), which the two-pass / deferred VORef-field resolution must handle —
 ; validated end-to-end by a jtreg test; this lit pins the LLVM emit contract.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32, i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @cyclic_voref_fields(i32 %x, i32 %y) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 100 to ptr), i32 24)
+            ptr inttoptr (i64 100 to ptr), i32 24, i1 false)
        to label %alloc_b unwind label %u
 alloc_b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 200 to ptr), i32 24)
+            ptr inttoptr (i64 200 to ptr), i32 24, i1 false)
        to label %body unwind label %u
 body:
   ; a: offset 8 = ref %b, offset 16 = int %x

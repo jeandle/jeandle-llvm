@@ -12,7 +12,7 @@
 ; which is live when the object escapes, is re-emitted at the materialise point;
 ; the first balanced enter/exit pair is fully elided and never re-emitted.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -23,7 +23,7 @@ entry:
   %l1 = alloca i64, align 8
   %l2 = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 24680 to ptr), i32 16)
+            ptr inttoptr (i64 24680 to ptr), i32 16, i1 false)
          to label %n unwind label %u
 n:
   ; First synchronized(o) region — balanced, never escapes.
@@ -45,7 +45,7 @@ u:
 
 ; CHECK-LABEL: define void @test_proxy_sequential_same_vo
 ; o materialises at the sink; the second live enter is re-emitted there.
-; CHECK: invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 24680 to ptr), i32 16)
+; CHECK: invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 24680 to ptr), i32 16, i1 false)
 ; CHECK: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %[[MAT:[A-Za-z0-9._]+]], ptr %l2)
 ; The matching monitorexit for the second region survives, RAUW'd to %[[MAT]].
 ; CHECK: call hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1) %[[MAT]], ptr %l2)

@@ -18,7 +18,7 @@
 ; built here for genuine per-offset field disagreements, but this scenario
 ; has none.)
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare i32 @__gxx_personality_v0(...)
@@ -30,7 +30,7 @@ entry:
   %lock = alloca i64, align 8
   %pad.lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %branch unwind label %u
 branch:
   br i1 %c, label %left, label %right
@@ -55,7 +55,7 @@ u:
 
 ; CHECK-LABEL: define ptr addrspace(1) @test_merge_cascade_per_pred_phi
 ; Exactly one allocation invoke (the original, retained) for the whole fn.
-; CHECK: invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 12345 to ptr), i32 16)
+; CHECK: invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
 ; CHECK-NOT: invoke hotspotcc{{.*}}@jeandle.new_instance
 ; The single right-arm lock is re-emitted on OrigAlloc %o; no additional
 ; allocation is introduced.

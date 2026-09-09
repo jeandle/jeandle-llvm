@@ -4,3 +4,10 @@ IsObjectKlass 3 = false
 IsSubtype 2 3 = false
 IsSubtype 2 3 = false
 IsInterface 2 = false
+IsObjectKlass 3 = false
+IsSubtype 2 3 = false
+IsSubtype 2 3 = false
+IsInterface 2 = false
+
+GetSecondarySupers 2 = []
+GetSecondarySupers 3 = []

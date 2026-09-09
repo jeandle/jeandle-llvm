@@ -8,7 +8,7 @@
 ; disable scalar replacement of an unrelated unlocked object in the same
 ; function.  Valid invoke and OSR cases remain optimizable.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr)
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr)
 declare void @may_throw()
@@ -21,9 +21,9 @@ define i32 @invalid_conflicting_merge(i1 %take.lock) gc "hotspotgc" {
 entry:
   %lock.slot = alloca i64, align 8
   %lock = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68201 to ptr), i32 16)
+      ptr inttoptr (i64 68201 to ptr), i32 16, i1 false)
   %scalar = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68202 to ptr), i32 16)
+      ptr inttoptr (i64 68202 to ptr), i32 16, i1 false)
   %scalar.slot = getelementptr inbounds i8, ptr addrspace(1) %scalar, i64 8
   store atomic i32 73, ptr addrspace(1) %scalar.slot unordered, align 4
   %value = load atomic i32, ptr addrspace(1) %scalar.slot unordered, align 4
@@ -57,7 +57,7 @@ define i32 @invalid_underflow(ptr addrspace(1) %preheld) gc "hotspotgc" {
 entry:
   %preheld.slot = alloca i64, align 8
   %scalar = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68203 to ptr), i32 16)
+      ptr inttoptr (i64 68203 to ptr), i32 16, i1 false)
   %scalar.slot = getelementptr inbounds i8, ptr addrspace(1) %scalar, i64 8
   store atomic i32 73, ptr addrspace(1) %scalar.slot unordered, align 4
   %value = load atomic i32, ptr addrspace(1) %scalar.slot unordered, align 4
@@ -77,9 +77,9 @@ define i32 @invalid_maythrow_call_monitor() gc "hotspotgc" {
 entry:
   %lock.slot = alloca i64, align 8
   %lock = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68204 to ptr), i32 16)
+      ptr inttoptr (i64 68204 to ptr), i32 16, i1 false)
   %scalar = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68205 to ptr), i32 16)
+      ptr inttoptr (i64 68205 to ptr), i32 16, i1 false)
   %scalar.slot = getelementptr inbounds i8, ptr addrspace(1) %scalar, i64 8
   store atomic i32 73, ptr addrspace(1) %scalar.slot unordered, align 4
   %value = load atomic i32, ptr addrspace(1) %scalar.slot unordered, align 4
@@ -103,7 +103,7 @@ define void @valid_invoke_enter_edges() gc "hotspotgc"
 entry:
   %lock.slot = alloca i64, align 8
   %lock = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68206 to ptr), i32 16)
+      ptr inttoptr (i64 68206 to ptr), i32 16, i1 false)
   invoke hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
       ptr addrspace(1) %lock, ptr %lock.slot)
       to label %normal unwind label %unwind
@@ -128,7 +128,7 @@ define void @valid_invoke_exit_edges() gc "hotspotgc"
 entry:
   %lock.slot = alloca i64, align 8
   %lock = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68207 to ptr), i32 16)
+      ptr inttoptr (i64 68207 to ptr), i32 16, i1 false)
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
       ptr addrspace(1) %lock, ptr %lock.slot) nounwind
   invoke hotspotcc void @jeandle.monitorexit_with_lightweight_lock(
@@ -155,9 +155,9 @@ define i32 @invalid_resume_exit() gc "hotspotgc"
 entry:
   %lock.slot = alloca i64, align 8
   %lock = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68219 to ptr), i32 16)
+      ptr inttoptr (i64 68219 to ptr), i32 16, i1 false)
   %scalar = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68220 to ptr), i32 16)
+      ptr inttoptr (i64 68220 to ptr), i32 16, i1 false)
   %scalar.slot = getelementptr inbounds i8, ptr addrspace(1) %scalar, i64 8
   store atomic i32 73, ptr addrspace(1) %scalar.slot unordered, align 4
   %value = load atomic i32, ptr addrspace(1) %scalar.slot unordered, align 4
@@ -185,9 +185,9 @@ define i32 @invalid_cleanupret_exit() gc "hotspotgc"
 entry:
   %lock.slot = alloca i64, align 8
   %lock = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68208 to ptr), i32 16)
+      ptr inttoptr (i64 68208 to ptr), i32 16, i1 false)
   %scalar = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68209 to ptr), i32 16)
+      ptr inttoptr (i64 68209 to ptr), i32 16, i1 false)
   %scalar.slot = getelementptr inbounds i8, ptr addrspace(1) %scalar, i64 8
   store atomic i32 73, ptr addrspace(1) %scalar.slot unordered, align 4
   %value = load atomic i32, ptr addrspace(1) %scalar.slot unordered, align 4
@@ -215,9 +215,9 @@ define i32 @invalid_catchswitch_exit() gc "hotspotgc"
 entry:
   %lock.slot = alloca i64, align 8
   %lock = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68210 to ptr), i32 16)
+      ptr inttoptr (i64 68210 to ptr), i32 16, i1 false)
   %scalar = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68211 to ptr), i32 16)
+      ptr inttoptr (i64 68211 to ptr), i32 16, i1 false)
   %scalar.slot = getelementptr inbounds i8, ptr addrspace(1) %scalar, i64 8
   store atomic i32 73, ptr addrspace(1) %scalar.slot unordered, align 4
   %value = load atomic i32, ptr addrspace(1) %scalar.slot unordered, align 4
@@ -249,9 +249,9 @@ define i32 @invalid_ordinary_unbalanced_exit() gc "hotspotgc" {
 entry:
   %lock.slot = alloca i64, align 8
   %lock = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68212 to ptr), i32 16)
+      ptr inttoptr (i64 68212 to ptr), i32 16, i1 false)
   %scalar = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68213 to ptr), i32 16)
+      ptr inttoptr (i64 68213 to ptr), i32 16, i1 false)
   %scalar.slot = getelementptr inbounds i8, ptr addrspace(1) %scalar, i64 8
   store atomic i32 73, ptr addrspace(1) %scalar.slot unordered, align 4
   %value = load atomic i32, ptr addrspace(1) %scalar.slot unordered, align 4
@@ -276,7 +276,7 @@ entry:
   call hotspotcc void @jeandle.monitorexit_with_lightweight_lock(
       ptr addrspace(1) %preheld, ptr %preheld.slot) nounwind
   %local = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68214 to ptr), i32 16)
+      ptr inttoptr (i64 68214 to ptr), i32 16, i1 false)
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
       ptr addrspace(1) %local, ptr %local.slot) nounwind
   call hotspotcc void @jeandle.monitorexit_with_lightweight_lock(
@@ -300,11 +300,11 @@ entry:
   %left.slot = alloca i64, align 8
   %right.slot = alloca i64, align 8
   %left = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68215 to ptr), i32 16)
+      ptr inttoptr (i64 68215 to ptr), i32 16, i1 false)
   %right = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68216 to ptr), i32 16)
+      ptr inttoptr (i64 68216 to ptr), i32 16, i1 false)
   %scalar = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68217 to ptr), i32 16)
+      ptr inttoptr (i64 68217 to ptr), i32 16, i1 false)
   %scalar.slot = getelementptr inbounds i8, ptr addrspace(1) %scalar, i64 8
   store atomic i32 73, ptr addrspace(1) %scalar.slot unordered, align 4
   %value = load atomic i32, ptr addrspace(1) %scalar.slot unordered, align 4
@@ -348,7 +348,7 @@ entry:
   call hotspotcc void @jeandle.monitorexit_with_lightweight_lock(
       ptr addrspace(1) %preheld, ptr %preheld.slot) nounwind
   %local = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 68218 to ptr), i32 16)
+      ptr inttoptr (i64 68218 to ptr), i32 16, i1 false)
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
       ptr addrspace(1) %local, ptr %local.slot) nounwind
   call hotspotcc void @jeandle.monitorexit_with_lightweight_lock(

@@ -8,24 +8,33 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This pass recovers !java-klass / !java-klass-exact metadata on oop-typed
-// field loads that was dropped by earlier optimizations (EarlyCSE / InstCombine
-// load CSE only preserve LLVM's built-in metadata kinds; "java-klass" is a
-// custom kind and falls into the `default:` stripping branch of
-// combineMetadata / copyMetadataForLoad).
+// This pass attaches !java-klass / !java-klass-exact metadata to oop-typed
+// loads whose result klass can be proven:
+//   * field loads that lost their metadata in earlier optimizations (EarlyCSE /
+//     InstCombine load CSE only preserve LLVM's built-in metadata kinds;
+//     "java-klass" is a custom kind and falls into the `default:` stripping
+//     branch of combineMetadata / copyMetadataForLoad), and
+//   * array element loads, which the frontend deliberately leaves untyped
+//     (typing them during IR construction would query types of incomplete
+//     PHIs; doing it here also enables context-sensitive precision).
 //
-// For a field load whose pointer is (base + constant offset), the declared
-// field type is recomputed as GetFieldType(baseKlass, offset). baseKlass itself
-// may come from:
-//   * a java-klass attribute on an argument or call return (robust, survives
-//     CSE),
-//   * surviving !java-klass metadata on another load,
-//   * a constant oop handle (GetOopKlass),
-//   * another recovered field load (arbitrary chains).
+// For a load whose base object's klass is known, the result klass is
+// ArrayElementKlass(baseKlass) for an object-array base, or
+// GetFieldType(baseKlass, offset) for an instance base at a constant offset.
+// The base klass comes from two intersected sources:
+//   * a fixpoint over a three-state lattice (Top / Known / Bottom)
+//     seeded from java-klass attributes, surviving metadata and constant oop
+//     handles, which propagates through forwarders (PHI / select / casts) and
+//     already-recovered loads — this resolves arbitrary load chains and
+//     loop-carried self-referential PHIs; and
+//   * a context-sensitive getJavaType query on the base at the load's
+//     position, which additionally exploits sharpening from jeandle
+//     .check_instanceof edge guards (see JavaType.cpp's edge-semantics
+//     engine). The pass mutates no IR until the emit phase, so this query is
+//     constant and is computed once per load.
 //
-// The analysis is a monotone fixpoint over a three-state lattice. See the
-// header for the high-level guarantees; the invariants that make the fixpoint
-// converge are documented inline below.
+// See the header for the high-level guarantees; the invariants that make the
+// fixpoint converge are documented inline below.
 //
 //===----------------------------------------------------------------------===//
 
@@ -35,14 +44,17 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Jeandle/Attributes.h"
+#include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
@@ -50,6 +62,7 @@
 #include "llvm/IR/Operator.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 
 #include <climits>
 #include <optional>
@@ -63,7 +76,7 @@ using llvm::jeandle::getOopHandleId;
 using llvm::jeandle::isJavaOopType;
 using llvm::jeandle::isRootJavaMethodFunction;
 
-STATISTIC(NumRecovered, "Number of field loads with recovered java-klass");
+STATISTIC(NumRecovered, "Number of oop loads with recovered java-klass");
 
 // Hidden test hook: when set (via -XX:JeandleLLVMOptions=--jeandle-disable-
 // recover-type-info), RecoverTypeInfo becomes a no-op, so the
@@ -97,13 +110,18 @@ namespace {
 //             knowledge under meet.
 //
 // The lattice is ordered Top > Known{K} > Known{parent(K)} > ... > Bottom, so
-// every transition during the fixpoint is a descent:
+// almost every transition during the fixpoint is a descent:
 //   * seeds (attributes / surviving metadata / constant oop) are fixed;
 //   * a forwarder descends as its operands descend;
-//   * a field load descends as its base widens (the field may disappear at an
+//   * a typed load descends as its base widens (the field may disappear at an
 //     ancestor klass, taking the load Known -> Bottom);
 //   * Bottom is terminal.
-// Monotone descent over a finite lattice terminates.
+// The one exception is the context-query rescue: a value can ascend once from
+// Top or Bottom to a Known the instanceof-derived facts prove (see
+// transferTypedLoad and the PHI case of transferForwarder). Each value's
+// trajectory is thus a klass-chain-bounded sequence of descents plus such
+// one-shot rescues, so the fixpoint still converges; the round cap is a
+// defensive backstop.
 struct Lattice {
   enum class Kind : uint8_t { Top, Known, Bottom };
   Kind K = Kind::Top;
@@ -170,10 +188,18 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
   const jeandle::VMCallbacks *CB = jeandle::getVMCallbacks();
   assert(CB && CB->GetFieldType && CB->GetOopKlass && CB->IsEffectivelyFinal &&
          CB->IsUnverifiedInterface && CB->GetCommonSuperKlass &&
+         CB->ArrayElementKlass && CB->IsSubtype && CB->IsInterface &&
          "VMCallbacks must be set");
 
   const DataLayout &DL = M->getDataLayout();
   LLVMContext &Ctx = F.getContext();
+
+  // Used by the context-sensitive base-type queries below.
+  DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+  // One LVI snapshot is valid for the whole pass: RecoverTypeInfo mutates no
+  // IR until the metadata-only emit phase, and metadata is invisible to LVI.
+  LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
+  LVINullEdgeOracle IsNullEdge{LVI};
 
   // ---------------------------------------------------------------------------
   // Memoized VM queries. Each distinct (klass, offset) / klass / klass-pair is
@@ -231,6 +257,15 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
       return It->second;
     uintptr_t R = CB->GetCommonSuperKlass(A, B);
     LcaCache[Key] = R;
+    return R;
+  };
+  DenseMap<uintptr_t, uintptr_t> ArrayElemCache;
+  auto arrayElemKlass = [&](uintptr_t Klass) -> uintptr_t {
+    auto It = ArrayElemCache.find(Klass);
+    if (It != ArrayElemCache.end())
+      return It->second;
+    uintptr_t R = CB->ArrayElementKlass(Klass);
+    ArrayElemCache[Klass] = R;
     return R;
   };
 
@@ -309,8 +344,22 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
   // State
   // ---------------------------------------------------------------------------
   DenseMap<Value *, Lattice> States;
-  // Stripped (base, offset) per tracked field load.
-  DenseMap<LoadInst *, std::pair<Value *, int>> FieldLoadBaseOff;
+  // A tracked typed load: an oop-typed load whose result klass can be derived
+  // from the klass of the object being loaded from.
+  struct LoadInfo {
+    // The oop whose klass determines the load result: the stripped base when
+    // the address is (base + constant offset), or the oop reached by peeling
+    // variable-index GEPs when stripping stops at one.
+    Value *QueryBase;
+    // Constant byte offset; nullopt when the address contains variable-index
+    // addressing (so there is no constant offset to consult GetFieldType
+    // with). Whether such a load is really an array element load is NOT
+    // decided here — constant-index aaloads have a constant offset too, and
+    // the array-vs-field distinction is always made from the base klass in
+    // transferTypedLoad.
+    std::optional<int> Offset;
+  };
+  DenseMap<LoadInst *, LoadInfo> LoadInfos;
 
   auto getLattice = [&](Value *V) -> Lattice {
     auto It = States.find(V);
@@ -362,20 +411,38 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
           seed(&I, K ? Lattice::known(K, /*Exact=*/true) : Lattice::bottom());
           continue;
         }
-        // Field load. Recoverable only if its stripped base is a tracked oop
-        // (Instruction/Argument) and the offset is a compile-time constant.
+        // Typed load. Recoverable only if loading from a tracked oop
+        // (Instruction/Argument). If offset stripping stops at a
+        // variable-index GEP, peel such GEPs layer by layer to reach the oop
+        // being addressed into (the frontend emits this shape for array
+        // element addressing: ptradd(array, header) + GEP index, possibly
+        // folded by later passes into variable-index GEPs on the array). The
+        // loop terminates because each peel strictly follows the SSA def
+        // chain towards its root. Note this address shape does not prove an
+        // array element load — that distinction is made from the base klass
+        // in transferTypedLoad.
         auto [Base, OffOpt] = stripBaseOffset(LI->getPointerOperand());
-        bool TrackedBase = (isa<Instruction>(Base) || isa<Argument>(Base)) &&
-                           isJavaOopType(Base->getType()) && OffOpt.has_value();
+        Value *QueryBase = Base;
+        bool HasVariableIndex = false;
+        while (auto *GEP = dyn_cast<GetElementPtrInst>(QueryBase)) {
+          if (GEP->hasAllConstantIndices())
+            break;
+          QueryBase = stripBaseOffset(GEP->getPointerOperand()).first;
+          HasVariableIndex = true;
+        }
+        bool TrackedBase =
+            (isa<Instruction>(QueryBase) || isa<Argument>(QueryBase)) &&
+            isJavaOopType(QueryBase->getType()) &&
+            (HasVariableIndex || OffOpt.has_value());
         if (!TrackedBase) {
-          // Loading from a stack slot / non-Java-heap address, or a
-          // non-constant offset (e.g. array element with variable index): the
-          // loaded klass is unknowable here.
+          // Loading from a stack slot / non-Java-heap address, or not from a
+          // tracked Java object: the loaded klass is unknowable here.
           seed(&I, Lattice::bottom());
           continue;
         }
-        int Off = *OffOpt;
-        FieldLoadBaseOff[LI] = {Base, Off};
+        // For a variable-index address the accumulated constant part (if any)
+        // is not a field offset, so only the constant-offset case keeps it.
+        LoadInfos[LI] = {QueryBase, HasVariableIndex ? std::nullopt : OffOpt};
         States[&I] = Lattice::top(); // resolved during the fixpoint
         continue;
       }
@@ -393,16 +460,104 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
   }
 
   // ---------------------------------------------------------------------------
+  // Context-sensitive type queries, computed lazily and memoized.
+  //
+  // getCtxType queries a tracked load's base with getJavaType in its
+  // context-sensitive form: besides attributes, surviving metadata and
+  // constant oop handles (all of which the lattice also uses), this exploits
+  // sharpening from dominating jeandle.check_instanceof checks that constrain
+  // the base at the load's position. The sharpening is sound here for the
+  // same reason it is in TypeCheckElimination: the base oop is non-null at
+  // the load, matching check_instanceof's non-null contract.
+  //
+  // Both queries' results are constant for the rest of the pass: the pass
+  // mutates no IR until the emit phase, and they only read attributes,
+  // metadata, the CFG and VM callbacks. Computing them lazily on first use is
+  // therefore equivalent to an up-front pre-pass; first uses happen in
+  // program order during the first fixpoint sweep (every tracked load and
+  // forwarder is in Dynamic and its transfer runs unconditionally), which
+  // keeps the issued VM callback set deterministic under record/replay. The
+  // caches are only ever accessed by key — never iterated — so their
+  // pointer-keyed iteration order plays no role.
+  //
+  // Completeness of getCtxType: a tracked load's QueryBase may itself be a
+  // load whose metadata is only attached at the emit phase, so the cached
+  // query cannot see that part of the base's type. That is exactly the part
+  // the lattice carries: its seeds read the same sources the query does and
+  // propagate them through forwarders and recovered loads, so once the
+  // fixpoint settles, getLattice(QueryBase) is at least as strong as what
+  // getBaseJavaType(QueryBase) would return after emit (strictly stronger
+  // when per-incoming edge sharpening applies: getBaseJavaType's whole-PHI
+  // union cannot see edge facts). The transfer intersects that lattice state
+  // with the cached sharpening directly, so nothing is lost by caching.
+  // ---------------------------------------------------------------------------
+  DenseMap<LoadInst *, jeandle::JavaType> CtxCache;
+  auto getCtxType = [&](LoadInst *LI) -> jeandle::JavaType {
+    auto It = CtxCache.find(LI);
+    if (It != CtxCache.end())
+      return It->second;
+    jeandle::JavaType T =
+        jeandle::getJavaType(LoadInfos[LI].QueryBase, &DT, LI, IsNullEdge);
+    return CtxCache.insert({LI, T}).first->second;
+  };
+
+  // Per-incoming edge sharpening for PHIs: the constraints that CFG edge
+  // guards imply for the incoming value flowing along the edge (incoming
+  // block -> PHI's block). This is the part a
+  // whole-PHI context query cannot provide when any incoming's base type is
+  // not yet visible (phiValueType bails on an unknown incoming): edge facts
+  // depend only on the CFG and branch conditions, never on metadata, so they
+  // are constant during the pass and can be intersected with the lattice's
+  // evolving per-incoming states. Keyed by (PHINode*, incoming index) because
+  // the same value may arrive along different edges with different facts.
+  DenseMap<std::pair<PHINode *, unsigned>, jeandle::JavaType> EdgeSharpenCache;
+  auto getEdgeSharpening = [&](PHINode *PN, unsigned Idx) -> jeandle::JavaType {
+    auto Key = std::make_pair(PN, Idx);
+    auto It = EdgeSharpenCache.find(Key);
+    if (It != EdgeSharpenCache.end())
+      return It->second;
+    jeandle::JavaType S = jeandle::sharpen(
+        PN->getIncomingValue(Idx), PN->getIncomingBlock(Idx)->getTerminator(),
+        DT, PN->getParent(), IsNullEdge);
+    return EdgeSharpenCache.insert({Key, S}).first->second;
+  };
+
+  // ---------------------------------------------------------------------------
   // Transfer functions
   // ---------------------------------------------------------------------------
   auto transferForwarder = [&](Instruction &I) -> Lattice {
     if (auto *PN = dyn_cast<PHINode>(&I)) {
-      // Self-referential and mutually-recursive back-edges are handled because
-      // an unresolved PHI incoming is Top (identity); once it descends it only
-      // feeds back a value that has already been accounted for.
+      // Per-incoming: intersect the lattice state with the edge sharpening
+      // (constant during the pass), then meet as usual. The edge sharpening
+      // is what lets an instanceof on an incoming edge constrain the PHI even
+      // while that incoming's lattice type is still unresolved (a Top
+      // incoming with a known edge fact contributes Known(S) immediately)
+      // and even when the incoming recovers to a wider declared type.
+      //
+      // Convergence note: as in transferTypedLoad, the per-incoming intersect
+      // is not strictly monotone in the lattice state (a rescue can ascend
+      // once from Top or Bottom to Known(S)); each value's trajectory is a
+      // klass-chain-bounded sequence of descents plus such one-shot rescues,
+      // sweeps run in deterministic program order, and the round cap is the
+      // definitive backstop. Soundness is unaffected: every contribution is
+      // the intersect of two independently sound facts, and metadata is only
+      // attached after the fixpoint.
       Lattice R = Lattice::top();
-      for (Value *Inc : PN->incoming_values())
-        R = meet(R, getLattice(Inc));
+      for (unsigned Idx = 0, E = PN->getNumIncomingValues(); Idx != E; ++Idx) {
+        Lattice L = getLattice(PN->getIncomingValue(Idx));
+        const jeandle::JavaType S = getEdgeSharpening(PN, Idx);
+        if (L.isTop() && S.isUnknown())
+          continue; // Top is the meet identity.
+        jeandle::JavaType Combined = jeandle::typeIntersect(
+            L.isKnown() ? jeandle::JavaType{L.Klass, L.Exact}
+                        : jeandle::JavaType{},
+            S);
+        if (Combined.isKnown())
+          R = meet(R, Lattice::known(Combined.Klass, Combined.Exact));
+        else if (!L.isTop())
+          R = meet(R, Lattice::bottom()); // contradiction (dead edge), or
+                                          // provably unknowable
+      }
       return R;
     }
     if (auto *SI = dyn_cast<SelectInst>(&I))
@@ -424,14 +579,41 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
     llvm_unreachable("transferForwarder on non-forwarder");
   };
 
-  auto transferFieldLoad = [&](LoadInst *LI) -> Lattice {
-    auto [Base, Off] = FieldLoadBaseOff[LI];
-    Lattice BL = getLattice(Base);
-    if (BL.isTop())
+  auto transferTypedLoad = [&](LoadInst *LI) -> Lattice {
+    const LoadInfo &Info = LoadInfos[LI];
+    Lattice BL = getLattice(Info.QueryBase);
+    const jeandle::JavaType CtxType = getCtxType(LI);
+    if (BL.isTop() && CtxType.isUnknown())
       return Lattice::top(); // base not resolved yet
-    if (BL.isBottom())
-      return Lattice::bottom(); // base is opaque
-    uintptr_t FK = getField(BL.Klass, Off);
+    // Intersect the two views of the base's type: the lattice (declared or
+    // recovered, including chains and loop-carried PHIs, which the query
+    // cannot see because recovered metadata does not exist yet) and the cached
+    // context-sensitive query (which additionally exploits instanceof
+    // sharpening). Intersection takes the narrower of the two; each is
+    // independently sound at the load. As the lattice descends the
+    // intersection only descends (narrower, or Bottom when the two sources
+    // contradict on a dead path), so the fixpoint still converges.
+    jeandle::JavaType Combined = jeandle::typeIntersect(
+        BL.isKnown() ? jeandle::JavaType{BL.Klass, BL.Exact}
+                     : jeandle::JavaType{},
+        CtxType);
+    if (!Combined.isKnown())
+      return BL.isTop() ? Lattice::top() : Lattice::bottom();
+    // Array-ness first: ArrayElementKlass is non-zero exactly for object-array
+    // klasses, while GetFieldType returns 0 for array klasses, so this
+    // dispatch is unambiguous for both address shapes — including
+    // constant-index aaloads, which are structurally identical to field
+    // loads.
+    if (uintptr_t EK = arrayElemKlass(Combined.Klass); EK != 0) {
+      if (isUnvIface(EK))
+        return Lattice::bottom(); // unverified interface element
+      return Lattice::known(EK, isEffFinal(EK));
+    }
+    if (!Info.Offset)
+      return Lattice::bottom(); // variable-index address on a non-array base:
+                                // no element klass and no constant field
+                                // offset to consult
+    uintptr_t FK = getField(Combined.Klass, *Info.Offset);
     if (FK == 0 || isUnvIface(FK))
       return Lattice::bottom(); // no such field, or interface-typed
                                 // (unverifiable)
@@ -439,7 +621,7 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
   };
 
   // ---------------------------------------------------------------------------
-  // Fixpoint over the dynamic values (forwarders and recoverable field loads),
+  // Fixpoint over the dynamic values (forwarders and tracked typed loads),
   // iterated in program order until no lattice changes. Program order is an
   // ordered container — one of the SAFE iteration patterns in VMCallback.h — so
   // it is preserved across the record/replay boundary and the set of VM
@@ -450,12 +632,12 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
   // or pointer addresses.
   //
   // Seeds and opaque values are fixed (set once in the seed pass) and are not
-  // recomputed. Monotone descent over a finite lattice terminates; the cap is
-  // a defensive backstop.
+  // recomputed. Trajectories are descent-bounded (see the lattice comment
+  // above); the cap is a defensive backstop.
   // ---------------------------------------------------------------------------
   SmallVector<Instruction *, 64> Dynamic;
-  // Dynamic values are exactly those seeded Top (forwarders and recoverable
-  // field loads). Collect them in program order — NOT over the pointer-keyed
+  // Dynamic values are exactly those seeded Top (forwarders and tracked typed
+  // loads). Collect them in program order — NOT over the pointer-keyed
   // States DenseMap, whose iteration order is ASLR-dependent and therefore
   // unsafe under the replay model. Sweeping Dynamic in program order is what
   // keeps the in-place fixpoint (and its callback set) deterministic.
@@ -479,8 +661,19 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
     // updated earlier in this sweep only accelerates convergence.
     SweepChanged = false;
     for (Instruction *I : Dynamic) {
-      Lattice New = isForwarder(*I) ? transferForwarder(*I)
-                                    : transferFieldLoad(cast<LoadInst>(I));
+      Lattice New;
+      if (auto *LI = dyn_cast<LoadInst>(I); LI && LoadInfos.count(LI)) {
+        // A tracked typed load.
+        New = transferTypedLoad(LI);
+      } else if (isForwarder(*I)) {
+        // A forwarder (PHI / select / cast / freeze / zero-index GEP).
+        New = transferForwarder(*I);
+      } else {
+        // Dynamic contains exactly the Top-seeded values, which are seeded
+        // only as tracked typed loads or forwarders.
+        llvm_unreachable(
+            "dynamic value is neither a tracked load nor a forwarder");
+      }
       Lattice &Old = States[I];
       if (Old != New) {
         Old = New;
@@ -490,7 +683,7 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
   }
 
   // ---------------------------------------------------------------------------
-  // Emit: attach metadata to resolved field loads that do not already have it.
+  // Emit: attach metadata to resolved typed loads that do not already have it.
   // ---------------------------------------------------------------------------
   bool Changed = false;
   for (BasicBlock &BB : F) {
@@ -500,9 +693,8 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
         continue;
       if (LI->getMetadata(jeandle::Metadata::JavaKlass))
         continue; // already typed (frontend or a prior run) — leave untouched
-      if (!FieldLoadBaseOff.count(LI))
-        continue; // not a tracked field load (seed / opaque / non-constant
-                  // base)
+      if (!LoadInfos.count(LI))
+        continue; // not a tracked typed load (seed / opaque / non-oop base)
       Lattice L = getLattice(LI);
       if (!L.isKnown())
         continue;

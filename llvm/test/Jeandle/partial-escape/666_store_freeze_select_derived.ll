@@ -13,18 +13,18 @@
 ; %inner's base — the offset-losing regression this test guards), and
 ; %outer is eliminated.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @store_freeze_select_derived(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 7780 to ptr), i32 32)
+               ptr inttoptr (i64 7780 to ptr), i32 32, i1 false)
            to label %n1 unwind label %u
 n1:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 7781 to ptr), i32 32)
+               ptr inttoptr (i64 7781 to ptr), i32 32, i1 false)
            to label %n2 unwind label %u
 n2:
   %g1 = getelementptr inbounds i8, ptr addrspace(1) %inner, i64 8

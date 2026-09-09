@@ -8,18 +8,18 @@
 ; inner's base pointer. The store must survive, with both objects
 ; materialized at the store.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @store_derived_value(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 7778 to ptr), i32 32)
+               ptr inttoptr (i64 7778 to ptr), i32 32, i1 false)
            to label %n1 unwind label %u
 n1:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 7779 to ptr), i32 32)
+               ptr inttoptr (i64 7779 to ptr), i32 32, i1 false)
            to label %n2 unwind label %u
 n2:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %inner, i64 8

@@ -10,7 +10,7 @@
 ; Field replay and the interleaved a@0,b@1,a@2 lock replay must execute only on
 ; the edge to %merge.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -25,15 +25,15 @@ entry:
   %a.lock2 = alloca i64, align 8
   %r.lock3 = alloca i64, align 8
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 60101 to ptr), i32 24)
+           ptr inttoptr (i64 60101 to ptr), i32 24, i1 false)
        to label %alloc.b unwind label %unwind
 alloc.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 60102 to ptr), i32 24)
+           ptr inttoptr (i64 60102 to ptr), i32 24, i1 false)
        to label %alloc.c unwind label %unwind
 alloc.c:
   %c = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 60103 to ptr), i32 24)
+           ptr inttoptr (i64 60103 to ptr), i32 24, i1 false)
        to label %locked unwind label %unwind
 locked:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
@@ -101,11 +101,11 @@ define void @mixed_empty_and_nonempty_replay(i1 %choose.left, i1 %early)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 60111 to ptr), i32 24)
+           ptr inttoptr (i64 60111 to ptr), i32 24, i1 false)
        to label %alloc.b.mixed unwind label %unwind.mixed
 alloc.b.mixed:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 60112 to ptr), i32 24)
+           ptr inttoptr (i64 60112 to ptr), i32 24, i1 false)
        to label %choose.mixed unwind label %unwind.mixed
 choose.mixed:
   br i1 %choose.left, label %left.mixed, label %right.mixed
@@ -153,7 +153,7 @@ entry:
   %lock = alloca i64, align 8
   %guard.lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 60201 to ptr), i32 16)
+           ptr inttoptr (i64 60201 to ptr), i32 16, i1 false)
        to label %choose unwind label %unwind.switch
 choose:
   br i1 %from.source, label %source, label %right
@@ -213,11 +213,11 @@ entry:
   %lock.two = alloca i64, align 8
   %lock.three = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 60301 to ptr), i32 16)
+           ptr inttoptr (i64 60301 to ptr), i32 16, i1 false)
        to label %alloc.y unwind label %unwind.alloc
 alloc.y:
   %y = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 60302 to ptr), i32 16)
+           ptr inttoptr (i64 60302 to ptr), i32 16, i1 false)
        to label %choose.eh unwind label %unwind.alloc
 choose.eh:
   switch i2 %path, label %invoke.one [

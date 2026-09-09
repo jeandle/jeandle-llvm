@@ -7,7 +7,7 @@
 ; unwind handler has its own exit. Replay for t->m must not execute on t->h,
 ; where the virtual enter/exit pair is eliminated together.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @foo()
@@ -18,7 +18,7 @@ define void @hazard_folded_exit_dominated(i1 %c) gc "hotspotgc" personality ptr 
 entry:
   %lk = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(

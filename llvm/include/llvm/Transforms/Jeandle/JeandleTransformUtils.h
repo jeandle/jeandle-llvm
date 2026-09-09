@@ -21,8 +21,13 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/Deoptimization.h"
+#include "llvm/IR/Jeandle/InvokeType.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
+#include "llvm/IR/Module.h"
+
+#include <cstdint>
+#include <optional>
 
 namespace llvm {
 
@@ -90,6 +95,36 @@ void appendVirtualObjectDescriptor(SmallVectorImpl<Value *> &Args,
 /// createPreCallDeoptBundle relies on).
 unsigned getDeoptScopeVOInsertPos(const CallBase &CB);
 
+/// Canonical LLVM-side view of a well-formed Java virtual invoke.
+struct JavaVirtualCallSite {
+  Value *Receiver = nullptr;
+  uintptr_t CalleeMethod = 0;
+  uintptr_t DeclaredHolder = 0;
+  uint64_t StatepointID = 0;
+  jeandle::InvokeType InvokeKind = jeandle::ILLEGAL;
+};
+
+/// Recognizes a Java invokevirtual or invokeinterface instruction and decodes
+/// the attributes shared by devirtualization passes.
+std::optional<JavaVirtualCallSite> getJavaVirtualCallSite(InvokeInst &CB);
+
+/// Reads the HotSpot patch size used by optimized virtual calls.
+int getStaticCallPatchSize(const Module &M);
+
+/// Rewrites a virtual invoke's call-site attributes for an optimized virtual
+/// call. \p MarkNoInline prevents the guarded direct call from being considered
+/// by the inliner without removing its monomorphic-target marker.
+void updateStaticOptVirtualCallAttrs(InvokeInst &CB, int PatchSize,
+                                     bool MarkNoInline = false);
+
+/// Replaces the statepoint id carried by a call site.
+void setStatepointID(CallBase &CB, uint64_t StatepointID);
+
+/// Reports a malformed statepoint id with call-site context.
+[[noreturn]] void reportInvalidStatepointID(const CallBase &CB,
+                                            StringRef Component,
+                                            StringRef Reason);
+
 /// Emits an llvm.experimental.deoptimize and terminates the current block.
 ///
 /// \param Builder IR builder positioned where the deopt should be inserted.
@@ -114,8 +149,7 @@ void buildDeoptimize(IRBuilder<> &Builder, Module &M,
 /// \param Prefix Prefix used to name the generated basic blocks.
 /// \param DTU Optional dominator tree updater kept in sync with the new CFG,
 /// could be null.
-/// \returns If insert checkcast success, return the fail block for checkcast,
-/// otherwise return nullptr.
+/// \returns The fail block for the inserted check.
 BasicBlock *insertCheckInstanceOf(Instruction &Inst, Value *Receiver,
                                   uintptr_t Constraint, const StringRef &Prefix,
                                   DomTreeUpdater *DTU = nullptr);
@@ -196,7 +230,8 @@ inline bool getFunctionJavaMethod(const Function &F, uintptr_t &Method) {
   return parseUIntPtr(A.getValueAsString(), Method);
 }
 
-/// Finds or creates the LLVM declaration for a concrete Java method.
+/// Finds or creates the LLVM declaration for a concrete Java method and
+/// applies the Jeandle calling convention and GC strategy.
 ///
 /// Java symbols produced by the VM include ciMethod identity so classes with
 /// the same binary name from different class loaders remain distinct.  Keep
@@ -207,7 +242,13 @@ inline bool getFunctionJavaMethod(const Function &F, uintptr_t &Method) {
 /// or nullptr when \p Name is already owned by another Java method/signature.
 Function *getOrInsertJavaMethodFunction(Module &M, StringRef Name,
                                         FunctionType *Type, uintptr_t Method,
-                                        bool IsAccessor);
+                                        bool IsAccessor = false);
+
+/// Checks whether getOrInsertJavaMethodFunction can use p Name without
+/// mutating the module. This lets multi-target transforms validate every name
+/// before creating any declaration.
+bool canGetOrInsertJavaMethodFunction(const Module &M, StringRef Name,
+                                      FunctionType *Type, uintptr_t Method);
 
 /// Reads a named function attribute from a call and parses it as uintptr_t.
 ///
@@ -272,6 +313,18 @@ inline std::optional<int> getOopHandleLoadId(LoadInst *LI) {
     return std::nullopt;
   return jeandle::getOopHandleId(LI->getPointerOperand());
 }
+
+class LazyValueInfo;
+
+/// A jeandle::IsNullEdgeOracle backed by LazyValueInfo: answers "is V provably
+/// null on edge FromBB -> ToBB?" via LVI's edge-predicate query. The
+/// referenced LVI must stay valid for the queried CFG state — only passes that
+/// do not mutate the CFG may hold and use this (LazyValueInfo caches per-block
+/// state; splitting or erasing blocks behind its back is unsafe).
+struct LVINullEdgeOracle {
+  LazyValueInfo &LVI;
+  bool operator()(Value *V, BasicBlock *FromBB, BasicBlock *ToBB) const;
+};
 
 } // namespace llvm
 

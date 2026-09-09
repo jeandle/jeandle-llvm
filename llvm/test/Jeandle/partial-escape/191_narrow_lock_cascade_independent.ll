@@ -7,7 +7,7 @@
 ; guard that ensures the narrow rule's "iterate LiveLockEnters and check
 ; min < this.max" doesn't accidentally pick up VOs with zero live locks.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -18,11 +18,11 @@ entry:
   %lock_a = alloca i64, align 8
   %lock_b = alloca i64, align 8
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 33333 to ptr), i32 16)
+            ptr inttoptr (i64 33333 to ptr), i32 16, i1 false)
        to label %na unwind label %u
 na:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 44444 to ptr), i32 16)
+            ptr inttoptr (i64 44444 to ptr), i32 16, i1 false)
        to label %nb unwind label %u
 nb:
   ; First sync region: A, fully balanced.
@@ -44,7 +44,7 @@ u:
 
 ; B materializes (escapes); A stays virtual and folds away entirely.
 ; CHECK-LABEL: define void @test_narrow_cascade_independent
-; CHECK: %[[MATB:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 44444 to ptr), i32 16)
+; CHECK: %[[MATB:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 44444 to ptr), i32 16, i1 false)
 ; CHECK: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %[[MATB]],
 ; CHECK: call void @sink(ptr addrspace(1) %[[MATB]])
 ; CHECK: call hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1) %[[MATB]],

@@ -7,7 +7,7 @@
 ; inserted after a cloned landingpad before entering shared handler h. Thus
 ; every path reaching the real exits at zok/h has exactly one real acquire.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @foo(ptr addrspace(1))
@@ -19,13 +19,13 @@ define void @late_handler(i1 %c) gc "hotspotgc" personality ptr @__gxx_personali
 entry:
   %lk = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
               ptr addrspace(1) %o, ptr %lk)
   %p = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
        to label %np unwind label %u.locked
 np:
   br i1 %c, label %t, label %f

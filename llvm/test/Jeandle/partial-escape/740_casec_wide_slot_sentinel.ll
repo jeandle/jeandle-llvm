@@ -3,7 +3,7 @@
 ; RUN:   -passes="require<partial-escape-analysis>,partial-escape-transform" \
 ; RUN:   %s | FileCheck %s
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define i16 @casec_wide_slot_sentinel(i1 %c) gc "hotspotgc"
@@ -12,7 +12,7 @@ entry:
   br i1 %c, label %left, label %right
 left:
   %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74001 to ptr), i32 16)
+      ptr inttoptr (i64 74001 to ptr), i32 16, i1 false)
       to label %ls unwind label %unwind
 ls:
   %lf = getelementptr i8, ptr addrspace(1) %o1, i64 9223372036854775805
@@ -20,7 +20,7 @@ ls:
   br label %merge
 right:
   %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74001 to ptr), i32 16)
+      ptr inttoptr (i64 74001 to ptr), i32 16, i1 false)
       to label %rs unwind label %unwind
 rs:
   %rf = getelementptr i8, ptr addrspace(1) %o2, i64 9223372036854775805

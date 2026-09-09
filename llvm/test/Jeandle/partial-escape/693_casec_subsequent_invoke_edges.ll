@@ -8,7 +8,7 @@
 ; onto the Case-C pointer PHI at the actual escape, on either a normal or an
 ; exceptional merge.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare void @may_throw()
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -19,14 +19,14 @@ entry:
   br i1 %choose, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69301 to ptr), i32 16) [ "deopt"(i32 693011) ]
+      ptr inttoptr (i64 69301 to ptr), i32 16, i1 false) [ "deopt"(i32 693011) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 41, ptr addrspace(1) %af unordered, align 4
   invoke void @may_throw()
       to label %merge unwind label %unwind
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69301 to ptr), i32 16) [ "deopt"(i32 693012) ]
+      ptr inttoptr (i64 69301 to ptr), i32 16, i1 false) [ "deopt"(i32 693012) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 42, ptr addrspace(1) %bf unordered, align 4
   invoke void @may_throw()
@@ -69,7 +69,7 @@ entry:
   br i1 %choose, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69302 to ptr), i32 16) [ "deopt"(i32 693021) ]
+      ptr inttoptr (i64 69302 to ptr), i32 16, i1 false) [ "deopt"(i32 693021) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 51, ptr addrspace(1) %af unordered, align 4
   invoke void @may_throw()
@@ -78,7 +78,7 @@ normal.left:
   ret void
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69302 to ptr), i32 16) [ "deopt"(i32 693022) ]
+      ptr inttoptr (i64 69302 to ptr), i32 16, i1 false) [ "deopt"(i32 693022) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 52, ptr addrspace(1) %bf unordered, align 4
   invoke void @may_throw()

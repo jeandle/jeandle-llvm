@@ -1,0 +1,11 @@
+RequiresStrictLockOrder = 1
+
+# Array element metadata is queried while registering each virtual array.
+ElementBasicTypeOfArrayKlass 7001 = 4
+ElementBasicTypeOfArrayKlass 7002 = 8
+
+# Distinct array Klass values must map to distinct Class mirror oop ids.
+GetJavaMirror 7001 = 10
+GetOopHandleName 10 = "oop_handle_PrimitiveArray_10"
+GetJavaMirror 7002 = 11
+GetOopHandleName 11 = "oop_handle_ObjectArray_11"

@@ -13,7 +13,7 @@
 ; ineligible at the merge and the original allocations + stores would
 ; survive. The CHECK-NOT lines below would catch that regression.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -25,69 +25,69 @@ define void @test_a5_many_parallel(i1 %c,
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 67890 to ptr), i32 16)
+            ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
         to label %e2 unwind label %u
 e2:
   %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 67890 to ptr), i32 16)
+            ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
         to label %e3 unwind label %u
 e3:
   %o3 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 67890 to ptr), i32 16)
+            ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
         to label %e4 unwind label %u
 e4:
   %o4 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 67890 to ptr), i32 16)
+            ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
         to label %e5 unwind label %u
 e5:
   %o5 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 67890 to ptr), i32 16)
+            ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
         to label %e6 unwind label %u
 e6:
   %o6 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 67890 to ptr), i32 16)
+            ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
         to label %e7 unwind label %u
 e7:
   %o7 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 67890 to ptr), i32 16)
+            ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
         to label %e8 unwind label %u
 e8:
   %o8 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 67890 to ptr), i32 16)
+            ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
         to label %n unwind label %u
 n:
   br i1 %c, label %left, label %right
 left:
   %i1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %li2 unwind label %u
 li2:
   %i2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %li3 unwind label %u
 li3:
   %i3 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %li4 unwind label %u
 li4:
   %i4 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %li5 unwind label %u
 li5:
   %i5 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %li6 unwind label %u
 li6:
   %i6 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %li7 unwind label %u
 li7:
   %i7 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %li8 unwind label %u
 li8:
   %i8 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %lstores unwind label %u
 lstores:
   %s1l = getelementptr inbounds i8, ptr addrspace(1) %o1, i64 8

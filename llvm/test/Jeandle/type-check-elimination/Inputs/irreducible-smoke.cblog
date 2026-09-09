@@ -1,0 +1,7 @@
+# Klass 1 is the declared type of %obj; 22 is a subtype of 1. Nothing folds:
+# the only query is in the irreducible cycle and stays conservative.
+IsObjectKlass 22 = false
+IsInterface 1 = false
+GetSecondarySupers 1 = []
+IsSubtype 1 22 = false
+IsSubtype 22 1 = true

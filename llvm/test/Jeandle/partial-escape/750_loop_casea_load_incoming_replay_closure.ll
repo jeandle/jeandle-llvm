@@ -20,7 +20,7 @@
 ; inner kept real: the inner's new_array survives and the field store keeps
 ; referencing that real array — never poison.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
 declare void @escape(ptr addrspace(1))
 declare void @use(i32)
@@ -30,7 +30,7 @@ define void @test_nested_replay_closure(i32 %n, i1 %c, ptr addrspace(1) %real)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 1111 to ptr), i32 24)
+           ptr inttoptr (i64 1111 to ptr), i32 24, i1 false)
        to label %prep unwind label %u
 prep:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(

@@ -19,16 +19,16 @@
 
 @oop = external global ptr addrspace(1)
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare void @safepoint()
 declare void @sink(ptr addrspace(1))
 
 define void @loop_kept_real_nested_ref_retry(i1 %leave) gc "hotspotgc" {
 entry:
   %inner = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 200 to ptr), i32 32)
+      ptr inttoptr (i64 200 to ptr), i32 32, i1 false)
   %outer = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 100 to ptr), i32 32)
+      ptr inttoptr (i64 100 to ptr), i32 32, i1 false)
   br i1 true, label %set, label %unset
 
 set:

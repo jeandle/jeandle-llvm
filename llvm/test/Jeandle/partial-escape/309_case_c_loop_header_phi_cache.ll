@@ -14,7 +14,7 @@
 ; the load resolves to "unknown", materializing the per-pred
 ; allocations.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -24,7 +24,7 @@ entry:
   br i1 %c, label %left, label %right
 left:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
         to label %la unwind label %u
 la:
   %sa = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
@@ -32,7 +32,7 @@ la:
   br label %loop
 right:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
         to label %lb unwind label %u
 lb:
   %sb = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8

@@ -12,14 +12,14 @@
 ; produces the same FieldStates / Virtuals pattern at every loop block →
 ; convergence; the safety net is skipped; the alloc is fully eliminated.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_alloc_before_loop_body_mut(i32 %n) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %prep unwind label %u
 prep:
   %s = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

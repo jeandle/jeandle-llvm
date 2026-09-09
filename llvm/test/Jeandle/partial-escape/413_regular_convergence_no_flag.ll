@@ -15,7 +15,7 @@
 ; never fell back). -stats only prints counters with a non-zero value, so the
 ; escalation line must be ABSENT from the output.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink_i32(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -33,7 +33,7 @@ body:
   ; consume the constant. No use of the pointer survives the iteration, so PEA
   ; virtualizes and eliminates it; the fixpoint converges in Regular mode.
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 1313 to ptr), i32 16)
+            ptr inttoptr (i64 1313 to ptr), i32 16, i1 false)
        to label %b unwind label %u
 b:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

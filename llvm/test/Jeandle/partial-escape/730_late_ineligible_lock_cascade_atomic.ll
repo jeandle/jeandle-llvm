@@ -16,7 +16,7 @@
 ; must roll back: keeping %a's replay after %b's original enter revives would
 ; invert the runtime lock stack.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
     ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(
@@ -32,11 +32,11 @@ entry:
   %la = alloca i64, align 8
   %lb.escape = alloca i64, align 8
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 73001 to ptr), i32 16)
+           ptr inttoptr (i64 73001 to ptr), i32 16, i1 false)
        to label %new.b unwind label %unwind
 new.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 7777 to ptr), i32 16)
+           ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
        to label %dispatch unwind label %unwind
 dispatch:
   ; Reverse postorder visits the second successor (%escape) first.

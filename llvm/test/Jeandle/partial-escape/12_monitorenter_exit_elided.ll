@@ -10,7 +10,7 @@
 ; same block (no slow-path branches) because the analyzer enforces the
 ; single-block confinement rule for monitor folds.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 
@@ -20,7 +20,7 @@ define void @test_sync_simple() gc "hotspotgc" personality ptr @__gxx_personalit
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   call hotspotcc void @jeandle.monitorenter_with_thin_lock(

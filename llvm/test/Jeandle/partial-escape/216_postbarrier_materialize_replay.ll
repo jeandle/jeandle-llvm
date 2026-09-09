@@ -13,7 +13,7 @@
 ; allocations are present (materialized), and a replayed store appears.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.post_barrier(ptr addrspace(1), ptr addrspace(1))
 
 declare void @sink(ptr addrspace(1))
@@ -26,7 +26,7 @@ entry:
          to label %n1 unwind label %u
 n1:
   %v = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5555 to ptr), i32 16)
+            ptr inttoptr (i64 5555 to ptr), i32 16, i1 false)
        to label %n2 unwind label %u
 n2:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i32 16

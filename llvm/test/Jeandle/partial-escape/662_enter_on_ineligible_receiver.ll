@@ -11,7 +11,7 @@
 ; materialize BEFORE the real enter, so its re-emitted lock lands below
 ; %bad's on the runtime lock stack instead of after it (inverted nesting).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -22,14 +22,14 @@ entry:
   %lo = alloca i64, align 8
   %lb = alloca i64, align 8
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-             ptr inttoptr (i64 9101 to ptr), i32 16)
+             ptr inttoptr (i64 9101 to ptr), i32 16, i1 false)
          to label %n1 unwind label %u
 n1:
   ; Elided virtual lock on %obj at depth 0.
   tail call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
                   ptr addrspace(1) %obj, ptr %lo)
   %bad = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-             ptr inttoptr (i64 9102 to ptr), i32 16)
+             ptr inttoptr (i64 9102 to ptr), i32 16, i1 false)
          to label %n2 unwind label %u.locked
 n2:
   ; Derived-pointer escape: keeps %bad real (ineligible but still "virtual"

@@ -11,7 +11,7 @@
 ; zext (spliced before the safepoint) so the stackmap records an int-width
 ; location. Constants stay as-is: stackmap constants are already full-width.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i8, i16, i1)
 declare i32 @__gxx_personality_v0(...)
 
@@ -19,7 +19,7 @@ define void @subint_phi_fields_widened(i8 %a, i8 %b, i16 %c, i16 %d, i1 %cond)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 74801 to ptr), i32 32)
+            ptr inttoptr (i64 74801 to ptr), i32 32, i1 false)
        to label %n unwind label %u
 n:
   br i1 %cond, label %then, label %else
@@ -68,7 +68,7 @@ define void @subint_constants_not_widened()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 74802 to ptr), i32 32)
+            ptr inttoptr (i64 74802 to ptr), i32 32, i1 false)
        to label %n unwind label %u
 n:
   %s1 = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

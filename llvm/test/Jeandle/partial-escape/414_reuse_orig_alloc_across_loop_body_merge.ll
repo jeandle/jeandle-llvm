@@ -12,7 +12,7 @@
 ; is introduced. (The object is still carried across the back-edge by the
 ; header PHI %px, which is unrelated to replay placement.)
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare void @use(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -28,7 +28,7 @@ ohdr:
   br i1 %oc, label %obody, label %oexit
 obody:
   %X = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5555 to ptr), i32 16)
+            ptr inttoptr (i64 5555 to ptr), i32 16, i1 false)
        to label %arm unwind label %u
 arm:
   br i1 %c, label %a1, label %a2

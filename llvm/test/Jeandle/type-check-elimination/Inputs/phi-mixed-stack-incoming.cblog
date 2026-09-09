@@ -1,0 +1,7 @@
+# Klass 22 is a plain non-final class. The query must stay unfolded (the
+# untyped %other arm dominates the outcome).
+IsObjectKlass 22 = false
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+IsEffectivelyFinal 22 = false
+IsSubtype 22 22 = true

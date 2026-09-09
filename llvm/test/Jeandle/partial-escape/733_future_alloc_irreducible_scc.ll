@@ -8,7 +8,7 @@
 ; allocation must stay real because LoopInfo has no Loop containing the SCC;
 ; otherwise the surviving PHI incoming and call would observe poison.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -20,7 +20,7 @@ entry:
 
 cycle.alloc:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-             ptr inttoptr (i64 733 to ptr), i32 16)
+             ptr inttoptr (i64 733 to ptr), i32 16, i1 false)
          to label %cycle.forward unwind label %unwind
 
 cycle.forward:
@@ -48,7 +48,7 @@ entry:
 
 cycle.alloc:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-             ptr inttoptr (i64 734 to ptr), i32 16)
+             ptr inttoptr (i64 734 to ptr), i32 16, i1 false)
          to label %cycle.forward unwind label %unwind
 
 cycle.forward:

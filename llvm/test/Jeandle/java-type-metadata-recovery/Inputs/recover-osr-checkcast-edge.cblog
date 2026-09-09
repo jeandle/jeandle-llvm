@@ -1,0 +1,13 @@
+# Klass 40 is an object-array klass with element klass 41. The naked OSR load
+# gets its type solely from the dissolved checkcast edges; the element load
+# then resolves via ArrayElementKlass. GetFieldType returns 0 for array
+# klasses.
+IsInterface 40 = false
+GetSecondarySupers 40 = []
+IsEffectivelyFinal 40 = false
+ArrayElementKlass 40 = 41
+GetFieldType 40 24 = 0
+IsUnverifiedInterface 41 = false
+IsEffectivelyFinal 41 = false
+IsInterface 41 = false
+GetSecondarySupers 41 = []

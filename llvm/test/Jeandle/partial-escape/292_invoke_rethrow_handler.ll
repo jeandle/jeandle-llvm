@@ -10,14 +10,14 @@
 ; the consumer invoke. The handler block must remain well-formed (landingpad +
 ; resume present, no dangling SSA references).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_292() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %n unwind label %u_a
 n:
   ; This invoke materializes VO_A. The unwind successor is a
@@ -37,7 +37,7 @@ u_a:
 ; VO_A's source allocation is retained as the only allocation and the handler
 ; still terminates with `resume`.
 ; CHECK-LABEL: define void @test_292
-; CHECK: %a = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16)
+; CHECK: %a = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
 ; CHECK-NOT: @jeandle.new_instance
 ; CHECK: invoke void @sink(ptr addrspace(1) %a)
 ; CHECK: resume i64

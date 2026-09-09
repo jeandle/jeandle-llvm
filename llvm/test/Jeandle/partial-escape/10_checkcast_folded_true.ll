@@ -5,7 +5,7 @@
 ; klass=5 and the cast targets klass=4; IsSubtype(5,4)=true (per cblog) so
 ; the call is replaced by `i1 true`.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc i1 @jeandle.checkcast(ptr addrspace(0), ptr addrspace(1))
 
 declare i32 @__gxx_personality_v0(...)
@@ -13,7 +13,7 @@ declare i32 @__gxx_personality_v0(...)
 define i1 @test_checkcast() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5 to ptr), i32 16)
+            ptr inttoptr (i64 5 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %r = call hotspotcc i1 @jeandle.checkcast(

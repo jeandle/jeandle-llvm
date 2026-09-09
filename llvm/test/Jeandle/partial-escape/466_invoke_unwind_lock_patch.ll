@@ -13,7 +13,7 @@
 ; acquire with no matching exit on the unwind path), and each edge releases
 ; the single acquired monitor before its real exit.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @foo(ptr addrspace(1))
@@ -24,7 +24,7 @@ define void @invoke_escape(i1 %c) gc "hotspotgc" personality ptr @__gxx_personal
 entry:
   %lo = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   tail call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(

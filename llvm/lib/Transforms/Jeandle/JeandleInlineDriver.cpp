@@ -40,6 +40,7 @@
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
+#include "llvm/Transforms/Jeandle/ProfileDevirtualization.h"
 #include "llvm/Transforms/Jeandle/RecoverTypeInfo.h"
 #include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
@@ -183,6 +184,7 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
 
   JeandleInliner Inliner(InlineAccessorsOnly);
   CHADevirtualization Devirtualization;
+  ProfileDevirtualization ProfileDevirt;
   SmallVector<JeandleInlineScope, 16> InlineScopes;
   PreservedAnalyses DriverPA = PreservedAnalyses::all();
   Function *RootFunction = getRootJavaMethodFunction(M);
@@ -240,11 +242,16 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
     FunctionAnalysisManager &FAM =
         MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
     PreservedAnalyses DevirtPA = Devirtualization.run(*RootFunction, FAM);
-    bool AddedMonomorphicTargets = !DevirtPA.areAllPreserved();
-    Changed |= AddedMonomorphicTargets;
+    // Invalidate analyses changed by CHA before profile devirtualization.
     FAM.invalidate(*RootFunction, DevirtPA);
+    PreservedAnalyses ProfileDevirtPA = ProfileDevirt.run(*RootFunction, FAM);
+    bool AddedMonomorphicTargets =
+        !DevirtPA.areAllPreserved() || !ProfileDevirtPA.areAllPreserved();
+    Changed |= AddedMonomorphicTargets;
+    FAM.invalidate(*RootFunction, ProfileDevirtPA);
     PreservedAnalyses DevirtModulePA = PreservedAnalyses::all();
     DevirtModulePA.intersect(std::move(DevirtPA));
+    DevirtModulePA.intersect(std::move(ProfileDevirtPA));
     DevirtModulePA.preserveSet<AllAnalysesOn<Function>>();
     DevirtModulePA.preserve<FunctionAnalysisManagerModuleProxy>();
     updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(DevirtModulePA));

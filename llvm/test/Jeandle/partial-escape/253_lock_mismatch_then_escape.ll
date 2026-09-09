@@ -19,7 +19,7 @@
 ; materialized-object PHI is built at the merge. A small owner PHI selects
 ; the balanced monitor exit required by the two source paths.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -30,7 +30,7 @@ entry:
   %lock = alloca i64, align 8
   %pad.lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %branch unwind label %u
 branch:
   br i1 %c, label %then, label %else
@@ -56,7 +56,7 @@ u:
 
 ; CHECK-LABEL: define void @test_lock_mismatch_then_escape
 ; The original allocation invoke is RETAINED as the sole allocation.
-; CHECK: %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 12345 to ptr), i32 16)
+; CHECK: %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
 ; No second materialization invoke is emitted.
 ; CHECK-NOT: pea.mat = invoke
 ; The single surviving monitorenter stays in its original block, receiver

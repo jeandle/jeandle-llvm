@@ -7,7 +7,7 @@
 ; reader receives the derived PHI, not a virtual-object alias, and must observe
 ; 41 rather than the value replayed by the incoming-edge materialization.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @read_i32(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -15,7 +15,7 @@ define i32 @static_single_pred_phi_rebuild()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 67901 to ptr), i32 16)
+           ptr inttoptr (i64 67901 to ptr), i32 16, i1 false)
        to label %pred unwind label %unwind
 
 pred:

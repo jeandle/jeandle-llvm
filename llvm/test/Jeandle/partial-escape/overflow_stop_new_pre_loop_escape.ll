@@ -22,14 +22,14 @@
 ; final effect trace pins replay to the loop preheader, while the IR check
 ; confirms that replay retains the one original allocation.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_overflow_pre_loop_escape(i32 %n) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %pre = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 7777 to ptr), i32 16)
+              ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
           to label %e.cont unwind label %u
 e.cont:
   %f = getelementptr inbounds i8, ptr addrspace(1) %pre, i64 8

@@ -11,6 +11,7 @@
 #include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 #include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
+#include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Jeandle/Deoptimization.h"
 #include "llvm/IR/Jeandle/GCStrategy.h"
@@ -20,9 +21,113 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
+#include <limits>
 #include <string>
 
 namespace llvm {
+
+std::optional<JavaVirtualCallSite> getJavaVirtualCallSite(InvokeInst &CB) {
+  if (CB.arg_empty() || !CB.hasDeoptState())
+    return std::nullopt;
+
+  Attribute BytecodeAttr = CB.getFnAttr(jeandle::Attribute::Bytecode);
+  if (!checkStringAttr(BytecodeAttr))
+    return std::nullopt;
+  StringRef Bytecode = BytecodeAttr.getValueAsString();
+  jeandle::InvokeType InvokeKind = jeandle::getInvokeType(Bytecode);
+  if (InvokeKind != jeandle::InvokeVirtual &&
+      InvokeKind != jeandle::InvokeInterface)
+    return std::nullopt;
+
+  Function *Callee = CB.getCalledFunction();
+  Value *Receiver = CB.getArgOperand(0);
+  if (!Callee || !Receiver->getType()->isPointerTy())
+    return std::nullopt;
+
+  JavaVirtualCallSite CallSite;
+  CallSite.Receiver = Receiver;
+  CallSite.InvokeKind = InvokeKind;
+  if (!getFunctionJavaMethod(*Callee, CallSite.CalleeMethod) ||
+      !getUIntPtrFnAttr(CB, jeandle::Attribute::DeclaredHolder,
+                        CallSite.DeclaredHolder) ||
+      !getUIntFnAttr(CB, jeandle::Attribute::StatepointID,
+                     CallSite.StatepointID) ||
+      CallSite.StatepointID > std::numeric_limits<uint32_t>::max())
+    return std::nullopt;
+  return CallSite;
+}
+
+int getStaticCallPatchSize(const Module &M) {
+  NamedMDNode *NMD = M.getNamedMetadata(jeandle::Metadata::StaticCallPatchSize);
+  assert(NMD && NMD->getNumOperands() == 1 && "expected patch size metadata");
+  MDNode *PatchNode = NMD->getOperand(0);
+  assert(PatchNode && PatchNode->getNumOperands() == 1 &&
+         "expected one patch size operand");
+  return mdconst::extract<ConstantInt>(PatchNode->getOperand(0))
+      ->getSExtValue();
+}
+
+bool canGetOrInsertJavaMethodFunction(const Module &M, StringRef Name,
+                                      FunctionType *Type, uintptr_t Method) {
+  const Function *F = M.getFunction(Name);
+  if (!F)
+    return true;
+  uintptr_t ExistingMethod = 0;
+  return F->getFunctionType() == Type &&
+         getFunctionJavaMethod(*F, ExistingMethod) && ExistingMethod == Method;
+}
+
+Function *getOrInsertJavaMethodFunction(Module &M, StringRef Name,
+                                        FunctionType *Type, uintptr_t Method,
+                                        bool IsAccessor) {
+  if (!canGetOrInsertJavaMethodFunction(M, Name, Type, Method))
+    return nullptr;
+
+  Function *F = M.getFunction(Name);
+  if (!F) {
+    F = Function::Create(Type, GlobalValue::ExternalLinkage, Name, M);
+    F->addFnAttr(Attribute::get(M.getContext(), jeandle::Attribute::JavaMethod,
+                                std::to_string(Method)));
+  }
+  F->setCallingConv(CallingConv::Hotspot_JIT);
+  F->setGC(jeandle::JeandleGC);
+  if (IsAccessor)
+    F->addFnAttr(
+        Attribute::get(M.getContext(), jeandle::Attribute::JavaAccessorMethod));
+  return F;
+}
+
+void updateStaticOptVirtualCallAttrs(InvokeInst &CB, int PatchSize,
+                                     bool MarkNoInline) {
+  CB.addParamAttr(0, Attribute::NoUndef);
+  CB.removeFnAttr(jeandle::Attribute::StatepointNumPatchBytes);
+  CB.addFnAttr(Attribute::get(CB.getContext(),
+                              jeandle::Attribute::StatepointNumPatchBytes,
+                              std::to_string(PatchSize)));
+  CB.addFnAttr(
+      Attribute::get(CB.getContext(), jeandle::Attribute::MonomorphicTarget));
+  if (MarkNoInline)
+    CB.setIsNoInline();
+}
+
+void setStatepointID(CallBase &CB, uint64_t StatepointID) {
+  CB.removeFnAttr(jeandle::Attribute::StatepointID);
+  CB.addFnAttr(Attribute::get(CB.getContext(), jeandle::Attribute::StatepointID,
+                              std::to_string(StatepointID)));
+}
+
+[[noreturn]] void reportInvalidStatepointID(const CallBase &CB,
+                                            StringRef Component,
+                                            StringRef Reason) {
+  std::string Message;
+  raw_string_ostream OS(Message);
+  OS << Component << ": " << Reason;
+  if (const Function *Caller = CB.getCaller())
+    OS << " in " << Caller->getName();
+  OS << ": " << CB;
+  OS.flush();
+  report_fatal_error(StringRef(Message));
+}
 
 namespace {
 
@@ -201,50 +306,38 @@ int getCurrentDeoptBCI(const CallBase &CB) {
   return static_cast<int>(BCI->getSExtValue());
 }
 
-Function *getOrInsertJavaMethodFunction(Module &M, StringRef Name,
-                                        FunctionType *Type, uintptr_t Method,
-                                        bool IsAccessor) {
-  FunctionCallee Callee = M.getOrInsertFunction(Name, Type);
-  Function *Func = cast<Function>(Callee.getCallee());
-
-  Func->setCallingConv(CallingConv::Hotspot_JIT);
-  Func->setGC(jeandle::JeandleGC);
-  Func->addFnAttr(llvm::Attribute::get(M.getContext(),
-                                       llvm::jeandle::Attribute::JavaMethod,
-                                       std::to_string(Method)));
-  if (IsAccessor) {
-    Func->addFnAttr(
-        Attribute::get(M.getContext(), jeandle::Attribute::JavaAccessorMethod));
-  }
-  return Func;
-}
-
 uintptr_t getCurrentDeoptMethod(const CallBase &CB, uintptr_t RootMethod) {
   DeoptScopeInfo Scope = findCurrentDeoptScope(CB);
-  if (Scope.BCIPairStart == 1)
+  // Root scopes either begin with the duplicated BCI pair (legacy IR) or with
+  // an i64 should-reexecute flag followed by that pair.
+  if (Scope.BCIPairStart <= 1)
     return RootMethod;
 
-  if (Scope.BCIPairStart < 3)
-    reportInvalidDeoptBundle(CB, "missing inlinee method before bci");
-
   OperandBundleUse Deopt = *CB.getOperandBundle(LLVMContext::OB_deopt);
-  auto *Encoding =
-      dyn_cast<ConstantInt>(Deopt.Inputs[Scope.BCIPairStart - 3].get());
-  auto *Method =
-      dyn_cast<ConstantInt>(Deopt.Inputs[Scope.BCIPairStart - 2].get());
-  if (!Encoding || !Encoding->getType()->isIntegerTy(64) || !Method ||
-      !Method->getType()->isIntegerTy(64))
-    reportInvalidDeoptBundle(CB, "invalid inlinee method encoding");
+  auto DecodeMethod = [&](unsigned EncodingIndex,
+                          unsigned MethodIndex) -> uintptr_t {
+    auto *Encoding = dyn_cast<ConstantInt>(Deopt.Inputs[EncodingIndex].get());
+    auto *Method = dyn_cast<ConstantInt>(Deopt.Inputs[MethodIndex].get());
+    if (!Encoding || !Encoding->getType()->isIntegerTy(64) || !Method ||
+        !Method->getType()->isIntegerTy(64))
+      return 0;
+    const uint64_t MethodEncoding =
+        jeandle::DeoptValueEncoding(0, jeandle::DeoptValueEncoding::MethodType,
+                                    jeandle::T_METADATA)
+            .encode();
+    if (Encoding->getZExtValue() != MethodEncoding)
+      return 0;
+    return static_cast<uintptr_t>(Method->getZExtValue());
+  };
 
-  jeandle::DeoptValueEncoding DeoptInfo =
-      jeandle::DeoptValueEncoding::decode(Encoding->getZExtValue());
-  if (DeoptInfo.valueType() != jeandle::DeoptValueEncoding::MethodType)
-    reportInvalidDeoptBundle(CB, "missing MethodType marker before bci");
+  // Current inlinee layout: method marker, method, should-reexecute, bci, bci.
+  if (Scope.BCIPairStart >= 3) {
+    if (uintptr_t Method =
+            DecodeMethod(Scope.BCIPairStart - 3, Scope.BCIPairStart - 2))
+      return Method;
+  }
 
-  uintptr_t MethodValue = static_cast<uintptr_t>(Method->getZExtValue());
-  if (MethodValue == 0)
-    reportInvalidDeoptBundle(CB, "null inlinee method");
-  return MethodValue;
+  reportInvalidDeoptBundle(CB, "missing inlinee method before bci");
 }
 
 static std::pair<unsigned, unsigned> computeDeoptStackLayout(CallBase &CB) {
@@ -254,7 +347,7 @@ static std::pair<unsigned, unsigned> computeDeoptStackLayout(CallBase &CB) {
   // Each deopt scope starts with a duplicated BCI pair. Inlined scopes are
   // appended after their callers, so the current Java call site is the final
   // scope. Canonical per-scope order is:
-  // [method], bci, bci, locals, stack, monitors, orig_pc.
+  // [method], should-reexecute, bci, bci, locals, stack, monitors, orig_pc.
   for (; InsertPos < Deopt.Inputs.size();) {
     auto *Encoding = dyn_cast<ConstantInt>(Deopt.Inputs[InsertPos].get());
     assert(Encoding != nullptr && "expected deopt value encoding");
@@ -319,7 +412,9 @@ LoadInst *createConstOopLoad(Module &M, IRBuilder<> &Builder, int OopId) {
   std::string Name = CB->GetOopHandleName(OopId);
   GlobalVariable *GV = cast<GlobalVariable>(M.getOrInsertGlobal(Name, OopTy));
   GV->setDSOLocal(true);
-  return Builder.CreateLoad(OopTy, GV, "folded.oop");
+  LoadInst *LI = Builder.CreateLoad(OopTy, GV, "folded.oop");
+  LI->setMetadata(LLVMContext::MD_nonnull, MDNode::get(Ctx, {}));
+  return LI;
 }
 
 void appendVirtualObjectDescriptor(SmallVectorImpl<Value *> &Args,
@@ -404,6 +499,32 @@ unsigned getDeoptScopeVOInsertPos(const CallBase &CB) {
     reportInvalidDeoptBundle(
         CB, "missing or mismatched adjacent i32 deopt bci pair");
   return *Start + 2;
+}
+
+/// LazyValueInfo-backed null-edge oracle. This fork's getPredicateOnEdge
+/// returns a Constant*: the constant result of the comparison, or nullptr when
+/// unknown. Unknown answers false (the edge is kept) — only positive proof may
+/// skip an edge. V is stripped of pointer casts, aliases and freeze wrappers
+/// (the same canonicalization the engine uses) so a null test on the
+/// underlying oop is still recognized when the query value carries a wrapper
+/// (freeze(x) equals x unless x is poison, and branching on poison is
+/// undefined, so null proofs transfer).
+bool LVINullEdgeOracle::operator()(Value *V, BasicBlock *FromBB,
+                                   BasicBlock *ToBB) const {
+  while (true) {
+    V = V->stripPointerCastsAndAliases();
+    if (auto *FI = dyn_cast<FreezeInst>(V)) {
+      V = FI->getOperand(0);
+      continue;
+    }
+    break;
+  }
+  auto *PT = dyn_cast<PointerType>(V->getType());
+  if (!PT)
+    return false;
+  Constant *C = LVI.getPredicateOnEdge(
+      ICmpInst::ICMP_EQ, V, ConstantPointerNull::get(PT), FromBB, ToBB);
+  return C && C->isOneValue();
 }
 
 } // namespace llvm

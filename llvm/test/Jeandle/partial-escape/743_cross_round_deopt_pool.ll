@@ -11,7 +11,7 @@
 ; pool order: the existing array is wire ID 0 and the current Point is wire
 ; ID 1.  Every descriptor edge and scope root must use those wire IDs.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare void @safepoint()
 
 define void @cross_round_deopt_pool(i1 %choose) gc "hotspotgc" {
@@ -20,7 +20,7 @@ entry:
 
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74301 to ptr), i32 24) [ "deopt"(i32 743011) ]
+      ptr inttoptr (i64 74301 to ptr), i32 24, i1 false) [ "deopt"(i32 743011) ]
   %a8 = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 41, ptr addrspace(1) %a8 unordered, align 4
   %a16 = getelementptr inbounds i8, ptr addrspace(1) %a, i64 16
@@ -29,7 +29,7 @@ left:
 
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74301 to ptr), i32 24) [ "deopt"(i32 743012) ]
+      ptr inttoptr (i64 74301 to ptr), i32 24, i1 false) [ "deopt"(i32 743012) ]
   %b8 = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 42, ptr addrspace(1) %b8 unordered, align 4
   %b16 = getelementptr inbounds i8, ptr addrspace(1) %b, i64 16

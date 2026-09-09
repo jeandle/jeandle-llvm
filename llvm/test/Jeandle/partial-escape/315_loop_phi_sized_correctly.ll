@@ -12,14 +12,14 @@
 ; assert the loop-header field PHI surfaces with two operands and that the
 ; loop-body load folds against it (no surviving load atomic on the field).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_loop_phi_sized(i32 %n) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 66666 to ptr), i32 16)
+            ptr inttoptr (i64 66666 to ptr), i32 16, i1 false)
        to label %prep unwind label %u
 prep:
   %s = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

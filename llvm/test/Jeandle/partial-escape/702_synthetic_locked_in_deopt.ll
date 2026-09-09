@@ -8,7 +8,7 @@
 ; a VORef owner (vo-id), so HotSpot relock_objects re-acquires the lock on the
 ; realloc'd synthetic at deopt. Mirrors 645 for an ordinary locked VO.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare void @safepoint()
@@ -19,13 +19,13 @@ entry:
   br i1 %c, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 70201 to ptr), i32 24) [ "deopt"(i32 702011) ]
+      ptr inttoptr (i64 70201 to ptr), i32 24, i1 false) [ "deopt"(i32 702011) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 41, ptr addrspace(1) %af unordered, align 4
   br label %merge
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 70201 to ptr), i32 24) [ "deopt"(i32 702012) ]
+      ptr inttoptr (i64 70201 to ptr), i32 24, i1 false) [ "deopt"(i32 702012) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 42, ptr addrspace(1) %bf unordered, align 4
   br label %merge

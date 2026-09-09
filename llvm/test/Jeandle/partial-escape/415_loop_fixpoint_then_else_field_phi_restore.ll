@@ -23,7 +23,7 @@
 ; iter 1 rollback fires. A debug assert in restoreLoopSnapshot makes the UAF
 ; deterministic on every variant that builds a non-header in-loop merge PHI.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare void @usep(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -36,7 +36,7 @@ define void @test_scalar_field_merge(i32 %n, i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 24)
+            ptr inttoptr (i64 22222 to ptr), i32 24, i1 false)
        to label %prep unwind label %u
 prep:
   %fp0 = getelementptr inbounds i8, ptr addrspace(1) %o, i64 12
@@ -88,7 +88,7 @@ define void @test_pointer_field_merge(i32 %n, i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 33333 to ptr), i32 32)
+            ptr inttoptr (i64 33333 to ptr), i32 32, i1 false)
        to label %prep unwind label %u
 prep:
   %gp0 = getelementptr inbounds i8, ptr addrspace(1) %o, i64 16
@@ -137,7 +137,7 @@ define void @test_multi_field_merge(i32 %n, i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 44444 to ptr), i32 32)
+            ptr inttoptr (i64 44444 to ptr), i32 32, i1 false)
        to label %prep unwind label %u
 prep:
   %p8a = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -209,7 +209,7 @@ define void @test_nested_loop_inner_merge(i32 %n, i32 %m, i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 55555 to ptr), i32 24)
+            ptr inttoptr (i64 55555 to ptr), i32 24, i1 false)
        to label %oprep unwind label %u
 oprep:
   %ofp0 = getelementptr inbounds i8, ptr addrspace(1) %o, i64 12
@@ -274,7 +274,7 @@ define void @test_no_merge_straight_body(i32 %n)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 66666 to ptr), i32 24)
+            ptr inttoptr (i64 66666 to ptr), i32 24, i1 false)
        to label %prep unwind label %u
 prep:
   %fp0 = getelementptr inbounds i8, ptr addrspace(1) %o, i64 12

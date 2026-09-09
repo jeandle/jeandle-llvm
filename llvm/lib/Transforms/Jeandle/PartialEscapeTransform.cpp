@@ -226,14 +226,32 @@ static bool splitReplayEdges(jeandle::PEAResult &Result) {
     // rewritten by SplitBlockPredecessors itself. Ordinary targets can still
     // own unparented field-value PHIs; keep their recorded incoming blocks
     // synchronized with the normalized CFG. replaceSuccessorWith redirects
-    // every duplicate switch edge from Source, so matching incomings move
-    // together.
+    // every duplicate edge from Source (e.g. switch cases sharing a
+    // destination) onto the single new Edge->CurrentTarget edge, so duplicate
+    // Source slots of such PHIs collapse into one Edge slot. Collapsed slots
+    // carry the same value: they were merged from the same predecessor state.
     auto Found = UnparentedPhisByBlock.find(CurrentTarget);
     if (Found != UnparentedPhisByBlock.end())
-      for (jeandle::CreatePHIEffect *PE : Found->second)
-        for (BasicBlock *&Incoming : PE->PHIIncomingBlocks)
-          if (Incoming == Plan.Source)
-            Incoming = Edge;
+      for (jeandle::CreatePHIEffect *PE : Found->second) {
+        int Kept = -1;
+        for (unsigned I = 0; I < PE->PHIIncomingBlocks.size();) {
+          if (PE->PHIIncomingBlocks[I] != Plan.Source) {
+            ++I;
+            continue;
+          }
+          if (Kept < 0) {
+            PE->PHIIncomingBlocks[I] = Edge;
+            Kept = (int)I++;
+            continue;
+          }
+          Value *KeptV = PE->PHIIncomingValues[Kept];
+          Value *DroppedV = PE->PHIIncomingValues[I];
+          assert(KeptV == DroppedV &&
+                 "duplicate edges from one pred carry the same merged value");
+          PE->PHIIncomingBlocks.erase(PE->PHIIncomingBlocks.begin() + I);
+          PE->PHIIncomingValues.erase(PE->PHIIncomingValues.begin() + I);
+        }
+      }
 
     for (jeandle::MaterializeEffect *ME : Plan.Effects) {
       // Keep ownership in the original source bucket so EffectList references

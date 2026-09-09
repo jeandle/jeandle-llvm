@@ -8,18 +8,18 @@
 ; MaterializedRef(%x's OrigAlloc) when %x is materialized, so the descriptor
 ; carries the same real object the callee receives — one identity.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @foo(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @y_refs_x(i32 %v) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %x = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %n1 unwind label %u
 n1:
   %y = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
        to label %n2 unwind label %u
 n2:
   %yf = getelementptr inbounds i8, ptr addrspace(1) %y, i64 8

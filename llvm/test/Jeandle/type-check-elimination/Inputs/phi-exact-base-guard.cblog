@@ -1,0 +1,11 @@
+# Klass 22 is a plain class; 33 is an interface 22 does not implement. The
+# exact base type on both incoming edges makes the query provably false.
+IsObjectKlass 33 = false
+IsEffectivelyFinal 22 = false
+IsSubtype 22 33 = false
+IsSubtype 33 22 = false
+IsInterface 22 = false
+IsInterface 33 = true
+GetSecondarySupers 22 = []
+IsObjectKlass 22 = false
+IsSubtype 22 22 = true

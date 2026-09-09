@@ -11,7 +11,7 @@
 ; the preheader through the latch. Its first B' differs from the preheader B,
 ; forcing restoreLoopSnapshot before the cached field PHI converges.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
 declare void @sink(ptr addrspace(1))
 declare void @use_i32(i32)
 
@@ -23,7 +23,7 @@ define void @owned_coercion_survives_retry(i1 %choose, i32 %limit)
     gc "hotspotgc" {
 entry:
   %carry = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69600 to ptr), i32 16)
+      ptr inttoptr (i64 69600 to ptr), i32 16, i1 false)
   %carry.field = getelementptr inbounds i8, ptr addrspace(1) %carry, i64 8
   store atomic i32 0, ptr addrspace(1) %carry.field unordered, align 4
   br label %loop
@@ -33,23 +33,23 @@ loop:
   br i1 %choose, label %left, label %right
 left:
   %lt = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69601 to ptr), i32 16)
+      ptr inttoptr (i64 69601 to ptr), i32 16, i1 false)
   %ltf = getelementptr inbounds i8, ptr addrspace(1) %lt, i64 8
   store atomic i32 1065353216, ptr addrspace(1) %ltf unordered, align 4
   %lv = load atomic float, ptr addrspace(1) %ltf unordered, align 4
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69602 to ptr), i32 16) [ "deopt"(i32 696021) ]
+      ptr inttoptr (i64 69602 to ptr), i32 16, i1 false) [ "deopt"(i32 696021) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic float %lv, ptr addrspace(1) %af unordered, align 4
   br label %merge
 right:
   %rt = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69601 to ptr), i32 16)
+      ptr inttoptr (i64 69601 to ptr), i32 16, i1 false)
   %rtf = getelementptr inbounds i8, ptr addrspace(1) %rt, i64 8
   store atomic i32 1073741824, ptr addrspace(1) %rtf unordered, align 4
   %rv = load atomic float, ptr addrspace(1) %rtf unordered, align 4
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69602 to ptr), i32 16) [ "deopt"(i32 696022) ]
+      ptr inttoptr (i64 69602 to ptr), i32 16, i1 false) [ "deopt"(i32 696022) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic float %rv, ptr addrspace(1) %bf unordered, align 4
   br label %merge
@@ -97,7 +97,7 @@ define void @nested_synthetic_replay_survives_retry(
     gc "hotspotgc" {
 entry:
   %carry = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69600 to ptr), i32 16)
+      ptr inttoptr (i64 69600 to ptr), i32 16, i1 false)
   %carry.field = getelementptr inbounds i8, ptr addrspace(1) %carry, i64 8
   store atomic i32 0, ptr addrspace(1) %carry.field unordered, align 4
   br label %loop
@@ -105,7 +105,7 @@ loop:
   %i = phi i32 [ 0, %entry ], [ %next, %latch ]
   store atomic i32 %i, ptr addrspace(1) %carry.field unordered, align 4
   %q = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69603 to ptr), i32 16) [ "deopt"(i32 696031) ]
+      ptr inttoptr (i64 69603 to ptr), i32 16, i1 false) [ "deopt"(i32 696031) ]
   %qf = getelementptr inbounds i8, ptr addrspace(1) %q, i64 8
   br i1 %field.choose, label %qleft, label %qright
 qleft:
@@ -119,14 +119,14 @@ qmerge:
   br i1 %source.choose, label %left, label %right
 left:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69604 to ptr), i32 16) [ "deopt"(i32 696041) ]
+      ptr inttoptr (i64 69604 to ptr), i32 16, i1 false) [ "deopt"(i32 696041) ]
   %af = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic i32 %field, ptr addrspace(1) %af unordered, align 4
   %av = load atomic i32, ptr addrspace(1) %af unordered, align 4
   br label %merge
 right:
   %b = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69604 to ptr), i32 16) [ "deopt"(i32 696042) ]
+      ptr inttoptr (i64 69604 to ptr), i32 16, i1 false) [ "deopt"(i32 696042) ]
   %bf = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
   store atomic i32 %field, ptr addrspace(1) %bf unordered, align 4
   %bv = load atomic i32, ptr addrspace(1) %bf unordered, align 4
@@ -140,7 +140,7 @@ qedge:
   indirectbr ptr %late.target, [label %qmerge.identity, label %bypass]
 redge:
   %r = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 69603 to ptr), i32 16) [ "deopt"(i32 696032) ]
+      ptr inttoptr (i64 69603 to ptr), i32 16, i1 false) [ "deopt"(i32 696032) ]
   br label %qmerge.identity
 qmerge.identity:
   %qp = phi ptr addrspace(1) [ %q, %qedge ], [ %r, %redge ]

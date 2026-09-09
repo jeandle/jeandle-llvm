@@ -10,7 +10,7 @@
 ; processing inner loops from fresh edge states for that round, without
 ; retaining replay effects emitted by the earlier traversal.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.safepoint_poll()
 declare void @use(i32)
 
@@ -19,7 +19,7 @@ define ptr addrspace(1) @loop_seeded_materialization(i1 %first.done,
     gc "hotspotgc" personality ptr null {
 entry:
   %object = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74501 to ptr), i32 0)
+      ptr inttoptr (i64 74501 to ptr), i32 0, i1 false)
   store i8 0, ptr addrspace(1) %object, align 1
   br label %outer.preheader
 
@@ -67,7 +67,7 @@ define void @loop_seeded_field_value(i1 %done)
     gc "hotspotgc" personality ptr null {
 entry:
   %object = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74501 to ptr), i32 16)
+      ptr inttoptr (i64 74501 to ptr), i32 16, i1 false)
   %entry.field = getelementptr i8, ptr addrspace(1) %object, i64 8
   store atomic i32 0, ptr addrspace(1) %entry.field unordered, align 4
   br label %loop.preheader

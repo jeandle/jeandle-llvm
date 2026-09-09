@@ -11,7 +11,7 @@
 ; poison. The commit availability sweep does not fire on this shape: the
 ; derived-pointer escape materializes rather than bails.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare void @sinkp(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -19,7 +19,7 @@ declare i32 @__gxx_personality_v0(...)
 define void @phi_producer_dropped(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %p = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 100 to ptr), i32 16)
+            ptr inttoptr (i64 100 to ptr), i32 16, i1 false)
        to label %np unwind label %u
 np:
   %pg = getelementptr inbounds i8, ptr addrspace(1) %p, i64 8
@@ -34,7 +34,7 @@ m:
   ; p.g is a merge field-PHI here; %lg folds to it.
   %lg = load atomic i32, ptr addrspace(1) %pg unordered, align 4
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 200 to ptr), i32 16)
+            ptr inttoptr (i64 200 to ptr), i32 16, i1 false)
        to label %no unwind label %u
 no:
   %of = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -55,9 +55,9 @@ u:
 ; each escape replays its tracked store onto the OrigAlloc immediately
 ; before the call; no orphan PHI, no poison.
 ; CHECK-LABEL: define void @phi_producer_dropped(
-; CHECK: %p = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 100 to ptr), i32 16)
+; CHECK: %p = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 100 to ptr), i32 16, i1 false)
 ; CHECK: %pea.field.phi = phi i32 [ 2, %f ], [ 1, %t ]
-; CHECK: %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 200 to ptr), i32 16)
+; CHECK: %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 200 to ptr), i32 16, i1 false)
 ; CHECK: %pea.matslot = getelementptr inbounds i8, ptr addrspace(1) %p, i64 8
 ; CHECK: store atomic i32 %pea.field.phi, ptr addrspace(1) %pea.matslot unordered, align 4
 ; CHECK: call void @sinkp(ptr addrspace(1) %gp)

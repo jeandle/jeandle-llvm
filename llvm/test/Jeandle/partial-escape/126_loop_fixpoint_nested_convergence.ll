@@ -5,7 +5,7 @@
 ; recursive B/B' convergence, not StopNewInLoopNest overflow. The allocation
 ; is retained as OrigAlloc and the sink consumes it directly.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -22,7 +22,7 @@ inner:
   br i1 %ic, label %inner.body, label %outer.next
 inner.body:
   %ob = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 6666 to ptr), i32 16)
+              ptr inttoptr (i64 6666 to ptr), i32 16, i1 false)
           to label %ib.cont unwind label %u
 ib.cont:
   call void @sink(ptr addrspace(1) %ob)

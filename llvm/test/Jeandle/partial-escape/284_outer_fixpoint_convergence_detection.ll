@@ -77,7 +77,7 @@
 
 @G_zero = private unnamed_addr constant i32 0
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -87,7 +87,7 @@ define i32 @test_convergence_detection()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %v = load i32, ptr @G_zero, align 4
@@ -110,7 +110,7 @@ define i32 @test_partial_replay_converges(i1 %escape, i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 23456 to ptr), i32 16)
+            ptr inttoptr (i64 23456 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -136,7 +136,7 @@ define void @test_lock_replay_converges(i1 %escape)
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 34567 to ptr), i32 16)
+            ptr inttoptr (i64 34567 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
@@ -165,11 +165,11 @@ entry:
   %lb1 = alloca i64, align 8
   %la2 = alloca i64, align 8
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 40101 to ptr), i32 16)
+            ptr inttoptr (i64 40101 to ptr), i32 16, i1 false)
        to label %na unwind label %u
 na:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 40102 to ptr), i32 16)
+            ptr inttoptr (i64 40102 to ptr), i32 16, i1 false)
        to label %nb unwind label %u
 nb:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
@@ -204,15 +204,15 @@ entry:
   %la2 = alloca i64, align 8
   %lr3 = alloca i64, align 8
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 40201 to ptr), i32 24)
+            ptr inttoptr (i64 40201 to ptr), i32 24, i1 false)
        to label %na unwind label %u
 na:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 40202 to ptr), i32 24)
+            ptr inttoptr (i64 40202 to ptr), i32 24, i1 false)
        to label %nb unwind label %u
 nb:
   %c = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 40203 to ptr), i32 24)
+            ptr inttoptr (i64 40203 to ptr), i32 24, i1 false)
        to label %nc unwind label %u
 nc:
   %a.id = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
@@ -268,7 +268,7 @@ define i32 @test_replay_value_change(i1 %escape, i32 %old, i32 %current)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 45678 to ptr), i32 16)
+            ptr inttoptr (i64 45678 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %old.slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -294,7 +294,7 @@ define i32 @test_volatile_replay_mismatch(i1 %escape, i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 50101 to ptr), i32 16)
+            ptr inttoptr (i64 50101 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -321,7 +321,7 @@ define i32 @test_syncscope_replay_mismatch(i1 %escape, i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 50102 to ptr), i32 16)
+            ptr inttoptr (i64 50102 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -349,7 +349,7 @@ define i32 @test_dead_replay_branch(i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 56789 to ptr), i32 16)
+            ptr inttoptr (i64 56789 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -493,8 +493,8 @@ u:
 ; LOCK-FINAL: }
 
 ; MERGED-LOCK-FINAL-LABEL: define void @test_merged_lock_replay_converges()
-; MERGED-LOCK-FINAL: %[[MERGED_A:[A-Za-z0-9._]+]] = call hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr nonnull inttoptr (i64 40101 to ptr), i32 16)
-; MERGED-LOCK-FINAL: %[[MERGED_B:[A-Za-z0-9._]+]] = call hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr nonnull inttoptr (i64 40102 to ptr), i32 16)
+; MERGED-LOCK-FINAL: %[[MERGED_A:[A-Za-z0-9._]+]] = call hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr nonnull inttoptr (i64 40101 to ptr), i32 16, i1 false)
+; MERGED-LOCK-FINAL: %[[MERGED_B:[A-Za-z0-9._]+]] = call hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr nonnull inttoptr (i64 40102 to ptr), i32 16, i1 false)
 ; MERGED-LOCK-FINAL: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %[[MERGED_A]], ptr nonnull %la0)
 ; MERGED-LOCK-FINAL-NEXT: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %[[MERGED_B]], ptr nonnull %lb1)
 ; MERGED-LOCK-FINAL-NEXT: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %[[MERGED_A]], ptr nonnull %la2)

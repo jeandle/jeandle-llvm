@@ -14,7 +14,7 @@
 ; resolve (because of the incremental aliasing), and that even if it
 ; didn't, the depth bound would prevent any crash or runaway.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -22,7 +22,7 @@ define void @test_depth_bound(i1 %c)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %s1 = select i1 %c, ptr addrspace(1) %o, ptr addrspace(1) %o

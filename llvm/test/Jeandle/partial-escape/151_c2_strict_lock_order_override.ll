@@ -9,7 +9,7 @@
 ; no escape of its own and stays virtual — its monitorenter / monitorexit
 ; calls fold away.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -20,11 +20,11 @@ entry:
   %lock_a = alloca i64, align 8
   %lock_b = alloca i64, align 8
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %na unwind label %u
 na:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 67890 to ptr), i32 16)
+            ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
        to label %nb unwind label %u
 nb:
   ; Acquire outer A.
@@ -49,7 +49,7 @@ u:
 
 ; A must still materialize (sink escapes it).
 ; CHECK-LABEL: define void @test_no_strict_lock_cascade
-; CHECK: %[[MATA:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 12345 to ptr), i32 16)
+; CHECK: %[[MATA:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
 ; A's enter on materialized A, sink on materialized A, A's exit on materialized A.
 ; CHECK: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %[[MATA]],
 ; CHECK: call void @sink(ptr addrspace(1) %[[MATA]])

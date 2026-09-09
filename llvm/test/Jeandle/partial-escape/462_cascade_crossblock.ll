@@ -15,7 +15,7 @@
 ; VirtualRefStoreTargets, so only live VirtualRef definitions participate.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -26,11 +26,11 @@ entry:
          to label %n0 unwind label %u
 n0:
   %inner0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5555 to ptr), i32 24)
+            ptr inttoptr (i64 5555 to ptr), i32 24, i1 false)
            to label %n1 unwind label %u
 n1:
   %innerI = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5556 to ptr), i32 24)
+            ptr inttoptr (i64 5556 to ptr), i32 24, i1 false)
            to label %n2 unwind label %u
 n2:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i32 16
@@ -54,8 +54,8 @@ u:
 ; the real inner pointers; no poison anywhere.
 ; CHECK-LABEL: define void @test_crossblock(
 ; CHECK: invoke hotspotcc ptr addrspace(1) @jeandle.new_array
-; CHECK: invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 5555 to ptr), i32 24)
-; CHECK: invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 5556 to ptr), i32 24)
+; CHECK: invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 5555 to ptr), i32 24, i1 false)
+; CHECK: invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 5556 to ptr), i32 24, i1 false)
 ; CHECK: %pea.matslot = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
 ; CHECK: store atomic ptr addrspace(1) %inner0, ptr addrspace(1) %pea.matslot unordered, align 8
 ; CHECK: store atomic ptr addrspace(1) %innerI, ptr addrspace(1) %slotI unordered, align 4

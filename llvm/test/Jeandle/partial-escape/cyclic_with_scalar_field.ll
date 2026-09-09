@@ -19,15 +19,15 @@
 ; reference stores use OrigAlloc values (the back edge B.g = A resolves through
 ; A's OrigAlloc). Exercises FieldValue::isScalar and isMaterializedRef.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define ptr addrspace(1) @cyclic_with_scalar_field()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16) to label %na unwind label %u1
+  %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false) to label %na unwind label %u1
 na:
-  %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16) to label %nb unwind label %u2
+  %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false) to label %nb unwind label %u2
 nb:
   %sx = getelementptr inbounds i8, ptr addrspace(1) %a, i64 0
   store atomic i64 42, ptr addrspace(1) %sx unordered, align 8

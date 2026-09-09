@@ -9,7 +9,7 @@
 ; in IR and the analyzer does not crash. This is the "alloc whose virtual
 ; would cross the irreducible region" case.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare void @use_after(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -17,7 +17,7 @@ declare i32 @__gxx_personality_v0(...)
 define void @test_irreducible_with_alloc(i1 %p) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %dispatch unwind label %u
 dispatch:
   br i1 %p, label %a, label %b

@@ -12,6 +12,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Jeandle/ArrayCopySpecialization.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
 #include "llvm/Transforms/Jeandle/ExpandNarrowOopCast.h"
 #include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
@@ -22,6 +23,7 @@
 #include "llvm/Transforms/Jeandle/JeandleNarrowOopMarker.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeIterative.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeTransform.h"
+#include "llvm/Transforms/Jeandle/ProfileDevirtualization.h"
 #include "llvm/Transforms/Jeandle/RecoverTypeInfo.h"
 #include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"
 #include "llvm/Transforms/Jeandle/SafepointCoverageVerifier.h"
@@ -145,8 +147,14 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   ModulePassManager PM;
   PM.addPass(JavaOperationLower(0));
   FunctionPassManager PreCHACleanup;
-  PreCHACleanup.addPass(InstSimplifyPass());
+  // RecoverTypeInfo runs first so that oop loads (including array element
+  // loads, which the frontend deliberately leaves untyped) carry !java-klass
+  // metadata before any consumer or metadata-stripping pass. It must run
+  // after JavaOperationLower(0): only then do the inlined instanceof/checkcast
+  // bodies expose the jeandle.check_instanceof calls that its context-sensitive
+  // type queries rely on.
   PreCHACleanup.addPass(RecoverTypeInfo());
+  PreCHACleanup.addPass(InstSimplifyPass());
   PreCHACleanup.addPass(TypeCheckElimination());
   PreCHACleanup.addPass(RepeatedConstantFolding());
   PreCHACleanup.addPass(EarlyCSEPass());
@@ -156,6 +164,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(std::move(PreCHACleanup)));
   PM.addPass(createModuleToFunctionPassAdaptor(RecoverTypeInfo()));
   PM.addPass(createModuleToFunctionPassAdaptor(CHADevirtualization()));
+  PM.addPass(createModuleToFunctionPassAdaptor(ProfileDevirtualization()));
   // JeandleInlineDriver owns the inline-specific loop. Devirtualization
   // refinement between inline rounds should be wired inside the driver so
   // inline-scope state can be preserved across IR rewrites. Stub compilation
@@ -289,6 +298,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(RecoverTypeInfo()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
+  PM.addPass(createModuleToFunctionPassAdaptor(ArrayCopySpecialization()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
 
   const bool StripMiningEnabled = isStripMiningEnabled();

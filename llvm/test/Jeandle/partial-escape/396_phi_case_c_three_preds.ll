@@ -7,7 +7,7 @@
 ; with the known value on its owning arm and default 0 on the other two arms.
 ; All three allocations are eliminated.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -18,7 +18,7 @@ entry:
                                i32 2, label %a2 ]
 a0:
   %o0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 32)
+            ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
         to label %a0s unwind label %u
 a0s:
   %p0 = getelementptr inbounds i8, ptr addrspace(1) %o0, i64 8
@@ -26,7 +26,7 @@ a0s:
   br label %merge
 a1:
   %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 32)
+            ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
         to label %a1s unwind label %u
 a1s:
   %p1 = getelementptr inbounds i8, ptr addrspace(1) %o1, i64 16
@@ -34,7 +34,7 @@ a1s:
   br label %merge
 a2:
   %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 32)
+            ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
         to label %a2s unwind label %u
 a2s:
   %p2 = getelementptr inbounds i8, ptr addrspace(1) %o2, i64 24

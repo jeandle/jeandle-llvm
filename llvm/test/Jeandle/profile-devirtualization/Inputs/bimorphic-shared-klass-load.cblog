@@ -1,0 +1,4 @@
+GetProfileDevirtualizationInfo 100 200 300 7 0 = ((600, 700, 80, "Profiled_target_0"), 100, 30, 1, (601, 701, 15, "Profiled_target_1"))
+GetNewStatepointID 42 = 1
+UpdateToStaticOptVirtualCall 1 = true
+UpdateToStaticOptVirtualCall 42 = true

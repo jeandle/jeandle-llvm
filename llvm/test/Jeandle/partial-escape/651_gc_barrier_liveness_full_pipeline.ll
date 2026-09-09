@@ -12,7 +12,7 @@
 @arrayOopDesc.element_size.object = private constant i32 8
 @satb_log = private global ptr addrspace(1) null
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(
     ptr, i32, i32, i32, i32)
 declare void @observe(i32)
@@ -44,7 +44,7 @@ define void @virtual_holder_and_array_elision(
     personality ptr @__gxx_personality_v0 {
 entry:
   %holder = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 100 to ptr), i32 24)
+      ptr inttoptr (i64 100 to ptr), i32 24, i1 false)
       to label %alloc.array unwind label %unwind
 alloc.array:
   %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
@@ -129,11 +129,11 @@ define void @materialized_sibling_descriptor_liveness(
     personality ptr @__gxx_personality_v0 {
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 100 to ptr), i32 24)
+      ptr inttoptr (i64 100 to ptr), i32 24, i1 false)
       to label %alloc.sibling unwind label %unwind
 alloc.sibling:
   %sibling = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 200 to ptr), i32 16)
+      ptr inttoptr (i64 200 to ptr), i32 16, i1 false)
       to label %body unwind label %unwind
 body:
   %sibling.payload = getelementptr inbounds i8,

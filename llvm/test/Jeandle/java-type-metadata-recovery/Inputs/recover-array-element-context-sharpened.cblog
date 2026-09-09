@@ -1,0 +1,16 @@
+# Declared array klass 20 (Object[]), sharpened to 22 (String[]) by the
+# dominating check_instanceof. 22 is a subtype of 20 (and not vice versa);
+# element klass of 22 is 23 (String).
+IsEffectivelyFinal 22 = false
+IsSubtype 20 22 = false
+IsSubtype 22 20 = true
+ArrayElementKlass 22 = 23
+IsUnverifiedInterface 23 = false
+IsEffectivelyFinal 23 = false
+
+IsInterface 20 = false
+GetSecondarySupers 20 = []
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+IsInterface 23 = false
+GetSecondarySupers 23 = []

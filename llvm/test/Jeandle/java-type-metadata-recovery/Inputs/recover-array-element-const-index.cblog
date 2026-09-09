@@ -1,0 +1,11 @@
+# Klass 20 is an object-array klass with element klass 21. GetFieldType returns
+# 0 for array klasses, so a field-first dispatch would lose the type.
+ArrayElementKlass 20 = 21
+IsUnverifiedInterface 21 = false
+IsEffectivelyFinal 21 = false
+GetFieldType 20 24 = 0
+
+IsInterface 20 = false
+GetSecondarySupers 20 = []
+IsInterface 21 = false
+GetSecondarySupers 21 = []

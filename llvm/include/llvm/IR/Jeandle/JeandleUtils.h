@@ -16,6 +16,8 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/Metadata.h"
+#include "llvm/IR/Jeandle/VMCallback.h"
+#include "llvm/IR/Jeandle/VMConstants.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Debug.h"
@@ -26,6 +28,20 @@
 #include <string>
 
 namespace llvm::jeandle {
+
+/// Return the Java element kind for an array Klass, or Count when the Klass
+/// is null, unknown, non-array, or the VM callback is unavailable.
+inline JBasicType elementTypeForArrayKlass(uintptr_t ArrayKlass) {
+  if (ArrayKlass == 0)
+    return JBasicType::Count;
+  const VMCallbacks *CB = getVMCallbacks();
+  if (!CB || !CB->ElementBasicTypeOfArrayKlass)
+    return JBasicType::Count;
+  int Raw = CB->ElementBasicTypeOfArrayKlass(ArrayKlass);
+  if (Raw < 0 || Raw >= static_cast<int>(JBasicType::Count))
+    return JBasicType::Count;
+  return static_cast<JBasicType>(Raw);
+}
 
 /// Basic types used by HotSpot JVM, mirroring HotSpot's BasicType enum.
 /// The numeric values must match the HotSpot definitions exactly.

@@ -7,7 +7,7 @@
 ; back-edge pred is the header itself, so the per-pred materialization runs
 ; against the header terminator, and the retained %X keeps %sf valid.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -18,7 +18,7 @@ hdr:
   %i = phi i32 [ 0, %entry ], [ %i1, %hdr ]
   %psf = phi ptr addrspace(1) [ null, %entry ], [ %sf, %hdr ]
   %X = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5555 to ptr), i32 16)
+            ptr inttoptr (i64 5555 to ptr), i32 16, i1 false)
   %sf = getelementptr inbounds i8, ptr addrspace(1) %X, i64 8
   store atomic i32 %i, ptr addrspace(1) %sf unordered, align 4
   %i1 = add i32 %i, 1

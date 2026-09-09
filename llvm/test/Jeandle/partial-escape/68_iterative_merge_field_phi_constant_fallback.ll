@@ -9,7 +9,7 @@
 ; the constant 42 (NOT a PHI), and the post-merge load through outer1
 ; folds to the constant.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare void @sinki(i32)
 declare i32 @__gxx_personality_v0(...)
@@ -18,17 +18,17 @@ define void @test_a5_constant_fast_path(i1 %c, ptr addrspace(1) %p)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %outer1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 67890 to ptr), i32 16)
+               ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
             to label %e2 unwind label %u
 e2:
   %outer2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 67891 to ptr), i32 16)
+               ptr inttoptr (i64 67891 to ptr), i32 16, i1 false)
             to label %n unwind label %u
 n:
   br i1 %c, label %left, label %right
 left:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 12345 to ptr), i32 16)
+              ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
            to label %lst unwind label %u
 lst:
   %s1l = getelementptr inbounds i8, ptr addrspace(1) %outer1, i64 8

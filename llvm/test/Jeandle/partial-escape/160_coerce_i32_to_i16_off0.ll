@@ -5,14 +5,14 @@
 ; sub-slot / narrowing loads — the load bails to ineligible and the object
 ; materializes: alloc, store, and load survive intact, no coercion synthesized.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 
 declare i32 @__gxx_personality_v0(...)
 
 define i16 @test_coerce_i32_to_i16_off0() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
          to label %normal unwind label %unwind
 
 normal:

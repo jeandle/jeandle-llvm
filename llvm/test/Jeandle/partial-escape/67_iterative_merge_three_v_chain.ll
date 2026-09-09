@@ -11,7 +11,7 @@
 ; loop iteration; the do-while wrapper detects Changed and re-runs the loop,
 ; which converges (no new materializes) on the second pass.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -19,17 +19,17 @@ define void @test_a5_three_chain(i1 %c, ptr addrspace(1) %p)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 67890 to ptr), i32 16)
+              ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
            to label %n unwind label %u
 n:
   br i1 %c, label %left, label %right
 left:
   %middle = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-               ptr inttoptr (i64 23456 to ptr), i32 16)
+               ptr inttoptr (i64 23456 to ptr), i32 16, i1 false)
             to label %lin unwind label %u
 lin:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 12345 to ptr), i32 16)
+              ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
            to label %lst unwind label %u
 lst:
   %ms = getelementptr inbounds i8, ptr addrspace(1) %middle, i64 8

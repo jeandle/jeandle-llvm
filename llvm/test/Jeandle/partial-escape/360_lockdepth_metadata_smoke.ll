@@ -9,7 +9,7 @@
 ; behaviour exercised by
 ; partial-escape/12_monitorenter_exit_elided.ll.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare i32 @__gxx_personality_v0(...)
@@ -18,7 +18,7 @@ define void @test_lockdepth_metadata_smoke() gc "hotspotgc" personality ptr @__g
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 4242 to ptr), i32 16)
+            ptr inttoptr (i64 4242 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(

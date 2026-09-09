@@ -14,7 +14,7 @@
 ; predecessor, so its real identity becomes available on the invoke's normal
 ; edge, not before the invoke.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink2(ptr addrspace(1), ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -22,7 +22,7 @@ define void @casea_invoke_normal_edge(i1 %same, i32 %left, i32 %right)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 69701 to ptr), i32 24)
+           ptr inttoptr (i64 69701 to ptr), i32 24, i1 false)
        [ "deopt"(i32 1, i32 1) ]
        to label %choose unwind label %unwind
 
@@ -31,7 +31,7 @@ choose:
 
 alloc.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 69701 to ptr), i32 24)
+           ptr inttoptr (i64 69701 to ptr), i32 24, i1 false)
        [ "deopt"(i32 2, i32 2, i64 12, ptr addrspace(1) %a) ]
        to label %merge unwind label %unwind
 

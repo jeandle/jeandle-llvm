@@ -13,14 +13,14 @@
 ; then ONE stack entry: enc(StackType, index=0, T_OBJECT) = (0<<32)|(1<<16)|12
 ; = 65548, followed by the OrigAlloc pointer %o.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32, i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @never_escape_vo_stack_slot(i32 %a, i32 %b) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 24)
+            ptr inttoptr (i64 12345 to ptr), i32 24, i1 false)
        to label %n unwind label %u
 n:
   %s1 = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

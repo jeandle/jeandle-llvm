@@ -4,7 +4,7 @@
 ; carried across the back-edge by its own header PHI (%px, %py), both escaping
 ; at the exit. Each must be independently materialized at the back-edge.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -19,11 +19,11 @@ hdr:
   br i1 %c, label %body, label %exit
 body:
   %X = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5555 to ptr), i32 16)
+            ptr inttoptr (i64 5555 to ptr), i32 16, i1 false)
           to label %xcont unwind label %u
 xcont:
   %Y = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 6666 to ptr), i32 16)
+            ptr inttoptr (i64 6666 to ptr), i32 16, i1 false)
           to label %ycont unwind label %u
 ycont:
   %sfx = getelementptr inbounds i8, ptr addrspace(1) %X, i64 8

@@ -12,7 +12,7 @@
 ;
 ; This exercises the "alloc-in-loop + escape-after-loop" path.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -25,7 +25,7 @@ loop:
   br i1 %c, label %body, label %exit_null
 body:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %st unwind label %u
 st:
   %s = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8

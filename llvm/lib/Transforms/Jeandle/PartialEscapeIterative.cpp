@@ -85,9 +85,29 @@ static cl::list<std::string> JeandleDumpPEAIRFunctions(
 static bool matchesExactDumpFunction(StringRef FunctionName) {
   if (JeandleDumpPEAIRFunctions.empty())
     return true;
-  for (const std::string &Allowed : JeandleDumpPEAIRFunctions)
-    if (FunctionName == StringRef(Allowed))
+  for (const std::string &Allowed : JeandleDumpPEAIRFunctions) {
+    StringRef AllowedName(Allowed);
+    if (FunctionName == AllowedName)
       return true;
+    // Keep dump filtering consistent with the PEA analysis filter for
+    // JDK-generated symbols carrying a numeric ciMethod identity.
+    constexpr StringLiteral RootSuffix = ".root";
+    bool FunctionIsRoot = FunctionName.ends_with(RootSuffix);
+    bool AllowedIsRoot = AllowedName.ends_with(RootSuffix);
+    if (FunctionIsRoot != AllowedIsRoot)
+      continue;
+    StringRef Candidate = FunctionName;
+    StringRef StableName = AllowedName;
+    if (FunctionIsRoot) {
+      Candidate = Candidate.drop_back(RootSuffix.size());
+      StableName = StableName.drop_back(RootSuffix.size());
+    }
+    if (!Candidate.consume_front(StableName) || !Candidate.consume_front(".") ||
+        Candidate.empty() ||
+        !llvm::all_of(Candidate, [](char C) { return C >= '0' && C <= '9'; }))
+      continue;
+    return true;
+  }
   return false;
 }
 

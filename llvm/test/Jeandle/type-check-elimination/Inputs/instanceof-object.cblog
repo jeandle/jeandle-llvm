@@ -1,2 +1,5 @@
 # instanceof Object (klass 1) always folds to true.
 IsObjectKlass 1 = true
+
+IsInterface 1 = false
+GetSecondarySupers 1 = []

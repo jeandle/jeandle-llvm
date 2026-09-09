@@ -10,7 +10,7 @@
 @instanceOopDesc.base_offset_in_bytes = private constant i32 12
 @arrayOopDesc.length_offset_in_bytes = private constant i32 12
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
 declare hotspotcc ptr addrspace(0) @jeandle.load_klass(ptr addrspace(1))
 declare hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) readonly)
@@ -20,7 +20,7 @@ declare i32 @__gxx_personality_v0(...)
 define ptr addrspace(0) @test_load_klass_clean() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %k = call hotspotcc ptr addrspace(0) @jeandle.load_klass(ptr addrspace(1) %o)
@@ -38,7 +38,7 @@ u:
 define i32 @test_field_at_base_offset() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %f = getelementptr inbounds i8, ptr addrspace(1) %o, i64 12

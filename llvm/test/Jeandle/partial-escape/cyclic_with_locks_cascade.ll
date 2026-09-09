@@ -25,7 +25,7 @@
 ; materialize-commit lowering (field writes, then MonitorEnters).
 ; The back edge B.g = A resolves to OrigAlloc %a (no poison).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -35,9 +35,9 @@ define ptr addrspace(1) @cyclic_with_locks_cascade()
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %lk1 = alloca i64, align 8
-  %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16) to label %na unwind label %u
+  %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false) to label %na unwind label %u
 na:
-  %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16) to label %nb unwind label %u
+  %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false) to label %nb unwind label %u
 nb:
   %sa = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
   store atomic ptr addrspace(1) %b, ptr addrspace(1) %sa unordered, align 8
@@ -57,8 +57,8 @@ u:
 ; CHECK-LABEL: define ptr addrspace(1) @cyclic_with_locks_cascade
 ; CHECK: %[[LOCK:[A-Za-z0-9._]+]] = alloca i64, align 8
 ; Both ORIGINAL allocation invokes are RETAINED.
-; CHECK: %[[A:[A-Za-z0-9._]+]] = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16)
-; CHECK: %[[B:[A-Za-z0-9._]+]] = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16)
+; CHECK: %[[A:[A-Za-z0-9._]+]] = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
+; CHECK: %[[B:[A-Za-z0-9._]+]] = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
 ; Materialization emits no new allocation invoke.
 ; CHECK-NOT: pea.mat = invoke
 ; Both cyclic field stores are replayed onto OrigAllocs at the escape point,

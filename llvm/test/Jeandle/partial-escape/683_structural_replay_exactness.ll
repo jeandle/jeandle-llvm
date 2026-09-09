@@ -12,7 +12,7 @@
 ; transform. Semantically similar source instructions are deliberately placed
 ; immediately before the escape so a permissive matcher would retain them.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -24,7 +24,7 @@ define void @store_metadata_is_not_replay(i1 %escape, i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68301 to ptr), i32 16)
+           ptr inttoptr (i64 68301 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   br i1 %escape, label %escape.block, label %done
@@ -52,7 +52,7 @@ define void @split_gep_is_not_replay(i1 %escape, i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68302 to ptr), i32 16)
+           ptr inttoptr (i64 68302 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   br i1 %escape, label %escape.block, label %done
@@ -80,7 +80,7 @@ define void @typed_gep_is_not_replay(i1 %escape, i64 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68303 to ptr), i32 16)
+           ptr inttoptr (i64 68303 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   br i1 %escape, label %escape.block, label %done
@@ -108,7 +108,7 @@ define void @tail_monitorenter_is_not_replay(i1 %escape)
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68304 to ptr), i32 16)
+           ptr inttoptr (i64 68304 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   br i1 %escape, label %escape.block, label %done
@@ -136,7 +136,7 @@ define void @attributed_monitorenter_is_replay(i1 %escape)
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68305 to ptr), i32 16)
+           ptr inttoptr (i64 68305 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   br i1 %escape, label %escape.block, label %done
@@ -169,7 +169,7 @@ define void @multi_user_gep_is_not_replay(i1 %escape, i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68306 to ptr), i32 16)
+           ptr inttoptr (i64 68306 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   br i1 %escape, label %escape.block, label %done
@@ -201,7 +201,7 @@ define void @separated_gep_is_not_replay(i1 %escape, i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68307 to ptr), i32 16)
+           ptr inttoptr (i64 68307 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   br i1 %escape, label %escape.block, label %done
@@ -229,7 +229,7 @@ define void @gep_metadata_is_not_replay(i1 %escape, i32 %value)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68308 to ptr), i32 16)
+           ptr inttoptr (i64 68308 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   br i1 %escape, label %escape.block, label %done
@@ -258,7 +258,7 @@ define void @wrong_cc_monitorenter_is_not_replay(i1 %escape)
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68309 to ptr), i32 16)
+           ptr inttoptr (i64 68309 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   br i1 %escape, label %escape.block, label %done
@@ -290,7 +290,7 @@ define void @bundled_monitorenter_is_not_replay(i1 %escape)
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68310 to ptr), i32 16)
+           ptr inttoptr (i64 68310 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   br i1 %escape, label %escape.block, label %done
@@ -309,7 +309,7 @@ unwind:
 }
 
 ; BUNDLE-LABEL: define void @bundled_monitorenter_is_not_replay(
-; BUNDLE: %[[BUNDLE_O:[A-Za-z0-9._]+]] = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 68310 to ptr), i32 16)
+; BUNDLE: %[[BUNDLE_O:[A-Za-z0-9._]+]] = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 68310 to ptr), i32 16, i1 false)
 ; BUNDLE: escape.block:
 ; BUNDLE-NEXT: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %[[BUNDLE_O]], ptr %lock)
 ; BUNDLE-NEXT: call void @sink(ptr addrspace(1) %[[BUNDLE_O]])
@@ -324,7 +324,7 @@ define void @metadata_monitorenter_is_replay(i1 %escape)
 entry:
   %lock = alloca i64, align 8
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68311 to ptr), i32 16)
+           ptr inttoptr (i64 68311 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   br i1 %escape, label %escape.block, label %done
@@ -358,7 +358,7 @@ define void @overlong_store_suffix_is_not_replay(i1 %escape, i32 %old,
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68312 to ptr), i32 16)
+           ptr inttoptr (i64 68312 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   br i1 %escape, label %escape.block, label %done
@@ -393,11 +393,11 @@ define void @intra_object_field_order_is_not_permutable(
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68314 to ptr), i32 24)
+           ptr inttoptr (i64 68314 to ptr), i32 24, i1 false)
        to label %alloc.b unwind label %unwind
 alloc.b:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 68315 to ptr), i32 16)
+           ptr inttoptr (i64 68315 to ptr), i32 16, i1 false)
        to label %body unwind label %unwind
 body:
   %a.slot0 = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8

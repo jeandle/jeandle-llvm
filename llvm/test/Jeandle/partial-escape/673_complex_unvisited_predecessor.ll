@@ -8,7 +8,7 @@
 ; predecessor state must not let PEA fold the merged load to either arm's
 ; constant.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink_i32(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -17,7 +17,7 @@ define void @irreducible_unvisited_predecessor(i1 %entry_side, i1 %again,
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-           ptr inttoptr (i64 67301 to ptr), i32 32)
+           ptr inttoptr (i64 67301 to ptr), i32 32, i1 false)
        to label %dispatch unwind label %unwind
 
 dispatch:

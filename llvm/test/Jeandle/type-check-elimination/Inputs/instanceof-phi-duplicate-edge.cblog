@@ -1,0 +1,13 @@
+# %a has declared klass 5 (Animal); the check is against 22 (Dog). With no
+# sharpening from the duplicate edge, the phi stays 5: 5 is not a subtype of
+# 22 (no true fold), but they are compatible (no false fold). Deliberately no
+# IsEffectivelyFinal 22 entry: any sharpening attempt would query it and fail
+# loudly.
+IsObjectKlass 22 = false
+IsSubtype 5 22 = false
+IsInterface 5 = false
+IsSubtype 22 5 = true
+
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+GetSecondarySupers 5 = []

@@ -11,7 +11,7 @@
 ; order. (A single shared escape point with interleaved locks would instead
 ; be globally depth-sorted via the merged re-emit — see 427.)
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -22,13 +22,13 @@ entry:
   %la = alloca i64, align 8
   %lb = alloca i64, align 8
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
        to label %n1 unwind label %u
 n1:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(
                   ptr addrspace(1) %a, ptr %la)
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
        to label %n2 unwind label %u.locked
 n2:
   ; Virtual monitorenter on B.
@@ -57,8 +57,8 @@ u:
 ; monitorenter is re-emitted onto its OrigAlloc then the sink consumes OrigAlloc
 ; (per-object grouping, source order A before B).
 ; CHECK-LABEL: define void @pre_cascade
-; CHECK: %a = invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16)
-; CHECK: %b = invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16)
+; CHECK: %a = invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
+; CHECK: %b = invoke hotspotcc{{.*}}@jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
 ; CHECK: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %a,
 ; CHECK: call void @sink(ptr addrspace(1) %a)
 ; CHECK: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %b,

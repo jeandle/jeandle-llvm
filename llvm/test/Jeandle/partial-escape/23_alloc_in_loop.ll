@@ -6,7 +6,7 @@
 ; jeandle.new_instance remains at its source site and executes per iteration;
 ; no replacement allocation is emitted at the escape.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -19,7 +19,7 @@ loop:
   br i1 %c, label %body, label %exit
 body:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %use unwind label %u
 use:
   call void @sink(ptr addrspace(1) %o)

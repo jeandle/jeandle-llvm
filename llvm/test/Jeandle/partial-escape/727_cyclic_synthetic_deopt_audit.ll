@@ -9,7 +9,7 @@
 ; walk must terminate on a visited ObjectID set, find both ordinary loop
 ; allocation leaves, and retry with those sites retained as real objects.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc i1
     @jeandle.check_if_value_based(ptr addrspace(1))
 declare void @safepoint()
@@ -20,12 +20,12 @@ define void @cyclic_synthetic_deopt_audit(i32 %n)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %guard = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %alloc.initial unwind label %unwind
 
 alloc.initial:
   %initial = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %preheader unwind label %unwind
 
 preheader:
@@ -40,7 +40,7 @@ loop:
 
 allocate.replacement:
   %replacement = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 7777 to ptr), i32 16)
+      ptr inttoptr (i64 7777 to ptr), i32 16, i1 false)
       to label %replacement.normal unwind label %unwind
 
 replacement.normal:

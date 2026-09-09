@@ -11,7 +11,7 @@
 ; the barrier itself survives guarding the real store. This mirrors
 ; 406_arraystorecheck_value_leak for the array_store_check analog.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.post_barrier(ptr addrspace(1), ptr addrspace(1))
 
 declare i32 @__gxx_personality_v0(...)
@@ -19,7 +19,7 @@ declare i32 @__gxx_personality_v0(...)
 define void @test_postbarrier_nonvirtual_addr_survives(ptr addrspace(1) %arr) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %v = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5555 to ptr), i32 16)
+            ptr inttoptr (i64 5555 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i32 16

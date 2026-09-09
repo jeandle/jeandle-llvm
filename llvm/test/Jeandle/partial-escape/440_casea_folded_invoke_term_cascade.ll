@@ -15,7 +15,7 @@
 ; preserved.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) readonly)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
@@ -24,7 +24,7 @@ define void @casea_folded_invoke_term_cascade(i1 %c) gc "hotspotgc" personality 
 entry:
   %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 7, i32 44, i32 16, i32 1048576) to label %n1 unwind label %u1
 n1:
-  %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16) to label %n2 unwind label %u2
+  %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false) to label %n2 unwind label %u2
 n2:
   br i1 %c, label %then, label %else
 then:
@@ -58,7 +58,7 @@ u2:
 ; CHECK-NOT: @jeandle.arraylength
 ; Both ORIGINAL allocation invokes are RETAINED (materialization adds none).
 ; CHECK: %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 7, i32 44, i32 16, i32 1048576)
-; CHECK: %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16)
+; CHECK: %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
 ; No additional allocation invoke is emitted.
 ; CHECK-NOT: pea.mat = invoke
 ; The else block is now just a plain br to merge (no continuation blocks).

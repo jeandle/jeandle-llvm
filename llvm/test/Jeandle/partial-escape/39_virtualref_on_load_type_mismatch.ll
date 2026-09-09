@@ -15,7 +15,7 @@
 ; pattern that PEA can't safely virtualize must degrade gracefully, not
 ; crash and not silently produce wrong code.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
 declare void @sink_p0(ptr)
 declare i32 @__gxx_personality_v0(...)
@@ -27,7 +27,7 @@ entry:
            to label %nA unwind label %u1
 nA:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-              ptr inttoptr (i64 67890 to ptr), i32 16)
+              ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
            to label %nB unwind label %u2
 nB:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 8
@@ -53,7 +53,7 @@ u2:
 ; value operand. That's correct conservative behavior: PEA leaves a dead
 ; store for the next DCE pass to remove, instead of silently rewriting the
 ; mismatched load.)
-; CHECK: invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 67890 to ptr), i32 16)
+; CHECK: invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 67890 to ptr), i32 16, i1 false)
 ; CHECK: store atomic ptr addrspace(1) {{.*}}, ptr addrspace(1) %{{.*}} unordered
 ; CHECK: %[[LD:[A-Za-z0-9._]+]] = load atomic ptr, ptr addrspace(1) %{{.*}} unordered
 ; CHECK: call void @sink_p0(ptr %[[LD]])

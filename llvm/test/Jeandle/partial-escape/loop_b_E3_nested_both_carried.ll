@@ -8,14 +8,14 @@
 ; keep the outer loop's B and the inner loop's B distinct (the inner loop's
 ; header captures must not clobber the outer's).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_nested_both_carried(i32 %n, i32 %m) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 40301 to ptr), i32 16)
+            ptr inttoptr (i64 40301 to ptr), i32 16, i1 false)
        to label %prep unwind label %u
 prep:
   %s = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -27,7 +27,7 @@ oloop:
   br i1 %c, label %obody, label %oexit
 obody:
   %q = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 40302 to ptr), i32 16)
+            ptr inttoptr (i64 40302 to ptr), i32 16, i1 false)
        to label %iprep unwind label %u
 iprep:
   %t = getelementptr inbounds i8, ptr addrspace(1) %q, i64 8

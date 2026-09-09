@@ -13,14 +13,14 @@
 ;     pointer is itself an escape (marked hasVirtualInputs -> materializes), so
 ;     the object is conservatively kept real.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare ptr addrspace(1) @llvm.launder.invariant.group.p1.p1(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define i32 @test_launder_offset_preserved() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 32)
+            ptr inttoptr (i64 11111 to ptr), i32 32, i1 false)
        to label %n unwind label %u
 n:
   %g16 = getelementptr i8, ptr addrspace(1) %obj, i64 16
@@ -43,7 +43,7 @@ u:
 define void @test_inttoptr_roundtrip_materializes() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 32)
+            ptr inttoptr (i64 22222 to ptr), i32 32, i1 false)
        to label %n unwind label %u
 n:
   %g16 = getelementptr i8, ptr addrspace(1) %obj, i64 16

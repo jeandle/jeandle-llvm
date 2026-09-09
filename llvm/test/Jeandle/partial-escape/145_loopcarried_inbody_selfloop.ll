@@ -8,7 +8,7 @@
 ; fix: BlockExits[header] is not populated until AFTER processBlock(header),
 ; so only the post-body merge can resolve the carried PHI's back-edge slot.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -19,7 +19,7 @@ hdr:
   %i = phi i32 [ 0, %entry ], [ %i1, %hdr ]
   %px = phi ptr addrspace(1) [ null, %entry ], [ %X, %hdr ]
   %X = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 5555 to ptr), i32 16)
+            ptr inttoptr (i64 5555 to ptr), i32 16, i1 false)
   %sf = getelementptr inbounds i8, ptr addrspace(1) %X, i64 8
   store atomic i32 %i, ptr addrspace(1) %sf unordered, align 4
   %i1 = add i32 %i, 1

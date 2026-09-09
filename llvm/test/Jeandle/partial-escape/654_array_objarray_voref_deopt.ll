@@ -14,7 +14,7 @@
 @arrayOopDesc.element_size.object = private constant i32 8
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32)
 declare i32 @__gxx_personality_v0(...)
 
@@ -27,7 +27,7 @@ entry:
 alloc_point:
   ; point is vo-id 1, transitive (referenced ONLY via arr[0]).
   %point = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 54005 to ptr), i32 16)
+            ptr inttoptr (i64 54005 to ptr), i32 16, i1 false)
          to label %body unwind label %u
 body:
   ; point: offset 8 = int %val.

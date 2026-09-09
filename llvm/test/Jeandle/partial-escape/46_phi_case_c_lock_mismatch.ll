@@ -17,7 +17,7 @@
 ; The right arm holds an external padding monitor, giving both incoming edges
 ; scalar depth one; the merged held owner is released after the sink.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_thin_lock(ptr addrspace(1), ptr) nounwind
 declare void @sink(ptr addrspace(1))
@@ -31,7 +31,7 @@ entry:
   br i1 %c, label %left, label %right
 left:
   %o1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %lcont unwind label %u
 lcont:
   ; Enter monitor on the left arm so left.LockCount == 1 at exit.
@@ -40,7 +40,7 @@ lcont:
   br label %merge
 right:
   %o2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
         to label %rcont unwind label %u
 rcont:
   call hotspotcc void @jeandle.monitorenter_with_thin_lock(

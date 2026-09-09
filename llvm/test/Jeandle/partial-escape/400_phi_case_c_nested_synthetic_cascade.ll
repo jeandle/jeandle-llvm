@@ -21,7 +21,7 @@
 ; once onto %p2; neither synthetic may borrow a source AllocationCall as a
 ; materialization target.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -31,7 +31,7 @@ entry:
   br i1 %c1, label %a, label %b
 a:
   %A = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-          ptr inttoptr (i64 12345 to ptr), i32 32)
+          ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
        [ "deopt"(i32 40001) ]
        to label %as unwind label %u
 as:
@@ -40,7 +40,7 @@ as:
   br label %m1
 b:
   %B = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-          ptr inttoptr (i64 12345 to ptr), i32 32)
+          ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
        [ "deopt"(i32 40002) ]
        to label %bs unwind label %u
 bs:
@@ -54,7 +54,7 @@ m1:
   br i1 %c2, label %c, label %d
 c:
   %C = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-          ptr inttoptr (i64 12345 to ptr), i32 32)
+          ptr inttoptr (i64 12345 to ptr), i32 32, i1 false)
        [ "deopt"(i32 40003) ]
        to label %cs unwind label %u
 cs:

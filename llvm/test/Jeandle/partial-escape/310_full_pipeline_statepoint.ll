@@ -30,7 +30,7 @@
 ; passes — every SSA/dominance/statepoint invariant holds end-to-end,
 ; demonstrating that no anchor hook is needed.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -58,7 +58,7 @@ entry:
 define void @t_mat_plain() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 12345 to ptr), i32 16)
+            ptr inttoptr (i64 12345 to ptr), i32 16, i1 false)
        to label %n unwind label %u
 n:
   %s = getelementptr inbounds i8, ptr addrspace(1) %o, i64 8
@@ -73,7 +73,7 @@ u:
 ; CHECK-LABEL: define void @t_mat_plain
 ; The retained source allocation is wrapped by gc.statepoint.
 ; CHECK: invoke hotspotcc token (i64, i32, ptr, i32, i32, ...) @llvm.experimental.gc.statepoint.p0
-; CHECK-SAME: ptr addrspace(1) (ptr, i32)) @jeandle.new_instance
+; CHECK-SAME: ptr addrspace(1) (ptr, i32, i1)) @jeandle.new_instance, i32 3
 ; CHECK: gc.result
 ; CHECK: call token (i64, i32, ptr, i32, i32, ...) @llvm.experimental.gc.statepoint.p0
 ; CHECK-SAME: void (ptr addrspace(1))) @sink
@@ -91,7 +91,7 @@ u:
 define void @t_mat_mixed(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
          to label %n unwind label %u
 n:
   %slot = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 8
@@ -111,7 +111,7 @@ u:
 
 ; CHECK-LABEL: define void @t_mat_mixed
 ; CHECK: invoke hotspotcc token (i64, i32, ptr, i32, i32, ...) @llvm.experimental.gc.statepoint.p0
-; CHECK-SAME: ptr addrspace(1) (ptr, i32)) @jeandle.new_instance
+; CHECK-SAME: ptr addrspace(1) (ptr, i32, i1)) @jeandle.new_instance, i32 3
 ; CHECK: gc.result
 ; CHECK: call token (i64, i32, ptr, i32, i32, ...) @llvm.experimental.gc.statepoint.p0
 ; CHECK-SAME: void (ptr addrspace(1))) @sink
@@ -128,13 +128,13 @@ entry:
   br i1 %c, label %a, label %b
 a:
   %oa = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 11111 to ptr), i32 16)
+            ptr inttoptr (i64 11111 to ptr), i32 16, i1 false)
         to label %na unwind label %u
 na:
   br label %merge
 b:
   %ob = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16)
+            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
         to label %nb unwind label %u
 nb:
   br label %merge
@@ -151,10 +151,10 @@ u:
 ; Both allocations are wrapped by gc.statepoint on their respective
 ; pred-paths and surfaced via gc.result.
 ; CHECK: invoke hotspotcc token (i64, i32, ptr, i32, i32, ...) @llvm.experimental.gc.statepoint.p0
-; CHECK-SAME: ptr addrspace(1) (ptr, i32)) @jeandle.new_instance
+; CHECK-SAME: ptr addrspace(1) (ptr, i32, i1)) @jeandle.new_instance, i32 3
 ; CHECK: gc.result
 ; CHECK: invoke hotspotcc token (i64, i32, ptr, i32, i32, ...) @llvm.experimental.gc.statepoint.p0
-; CHECK-SAME: ptr addrspace(1) (ptr, i32)) @jeandle.new_instance
+; CHECK-SAME: ptr addrspace(1) (ptr, i32, i1)) @jeandle.new_instance, i32 3
 ; CHECK: gc.result
 ; The PHI merges the two gc.result values and flows into the @sink
 ; statepoint; the merged pointer ends up in the gc-live bundle and is
