@@ -1,0 +1,21 @@
+# Klass 1 is the declared type of %obj; 22 is a subtype of 1; 9 is a subtype of
+# 22 (so LCA(22, 9) = 22). Neither 22 nor 9 is final; no interfaces involved.
+IsObjectKlass 22 = false
+IsObjectKlass 9 = false
+IsInterface 1 = false
+GetSecondarySupers 1 = []
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+IsInterface 9 = false
+GetSecondarySupers 9 = []
+IsEffectivelyFinal 22 = false
+IsEffectivelyFinal 9 = false
+IsSubtype 22 1 = true
+IsSubtype 1 22 = false
+IsSubtype 9 1 = true
+IsSubtype 1 9 = false
+IsSubtype 22 22 = true
+IsSubtype 9 22 = true
+IsSubtype 22 9 = false
+GetCommonSuperKlass 22 9 = 22
+GetCommonSuperKlass 9 22 = 22

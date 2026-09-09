@@ -15,6 +15,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/SimplifyQuery.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
@@ -353,7 +354,8 @@ bool isGetClassCall(CallInst *CI) {
 
 bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
                       const DenseMap<Value *, int> &ConstOops,
-                      DominatorTree &DT, const DataLayout &DL) {
+                      DominatorTree &DT, const DataLayout &DL,
+                      jeandle::IsNullEdgeOracle IsNullEdge) {
   if (!isGetClassCall(CI) || !isJavaOopType(CI->getType()) || !CB.GetJavaMirror)
     return false;
 
@@ -373,7 +375,8 @@ bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
     if (!isKnownNonZero(Receiver, SQ))
       return false;
 
-    jeandle::JavaType ReceiverType = jeandle::getJavaType(Receiver, &DT, CI);
+    jeandle::JavaType ReceiverType =
+        jeandle::getJavaType(Receiver, &DT, CI, IsNullEdge);
     if (!ReceiverType.isKnown() || !ReceiverType.Exact)
       return false;
     MirrorOopId = CB.GetJavaMirror(ReceiverType.Klass);
@@ -393,7 +396,8 @@ bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
 
 bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
                        const DenseMap<Value *, int> &ConstOops,
-                       DominatorTree &DT, const DataLayout &DL) {
+                       DominatorTree &DT, const DataLayout &DL,
+                       jeandle::IsNullEdgeOracle IsNullEdge) {
   if (!isLoadKlassCall(CI))
     return false;
 
@@ -409,7 +413,8 @@ bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
     SimplifyQuery SQ(DL, &DT, nullptr, CI);
     if (!isKnownNonZero(Receiver, SQ))
       return false;
-    jeandle::JavaType ReceiverType = jeandle::getJavaType(Receiver, &DT, CI);
+    jeandle::JavaType ReceiverType =
+        jeandle::getJavaType(Receiver, &DT, CI, IsNullEdge);
     if (!ReceiverType.isKnown() || !ReceiverType.Exact)
       return false;
     if (!CB.GetKlassConstant)
@@ -707,6 +712,15 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     DenseMap<Value *, int> ConstOops = computeConstOops(F);
     ReversePostOrderTraversal<Function *> RPOT(&F);
     DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+    // getResult returns the same cached LVI across rounds within this run;
+    // that is safe because CFF only erases non-terminator instructions and
+    // never splits blocks (LVI's ValueHandles purge erased values, block
+    // state stays valid). Freshness across runs comes from RepeatedConstant
+    // Folding's cleanup passes invalidating LVI between wrapper iterations.
+    // Any fold that touches terminators or blocks would need to drop the
+    // oracle first.
+    LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
+    LVINullEdgeOracle IsNullEdge{LVI};
 
     SmallVector<CallInst *, 16> LoadKlassCalls;
     SmallVector<CallInst *, 16> LoadMirrorKlassCalls;
@@ -738,7 +752,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : LoadKlassCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldLoadKlassCall(CI, *CB, ConstOops, DT, DL)) {
+      if (foldLoadKlassCall(CI, *CB, ConstOops, DT, DL, IsNullEdge)) {
         ++NumKlassesFolded;
         RoundChanged = true;
         Changed = true;
@@ -758,7 +772,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : GetClassCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldGetClassCall(CI, *CB, ConstOops, DT, DL)) {
+      if (foldGetClassCall(CI, *CB, ConstOops, DT, DL, IsNullEdge)) {
         ++NumGetClassesFolded;
         RoundChanged = true;
         Changed = true;

@@ -1,0 +1,7 @@
+# Klass 22 is a plain non-final class; its klass constant is 555. The guard on
+# the A->M edge proves only instanceof(22), which must not demote the exact
+# base type carried by the !java-klass-exact metadata.
+IsEffectivelyFinal 22 = false
+IsInterface 22 = false
+GetSecondarySupers 22 = []
+GetKlassConstant 22 = 555
