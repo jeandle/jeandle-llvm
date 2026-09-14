@@ -26,9 +26,9 @@
 // real identity. For an ordinary VO this is its ORIGINAL allocation
 // (OrigAlloc = VObj.AllocationCall); for a prepared synthetic Case-C VO (one
 // synthetic VO merged from a pointer PHI's distinct but compatible virtual
-// incomings; see PartialEscapeAnalysis.cpp) it is SyntheticPhi. Both dominate
-// their escape points. Ordinary PartiallyEscapes
-// allocations are kept alive, so their original allocation-site deopt bundles
+// incomings; see PartialEscapeAnalysis.cpp) it is SyntheticReplayPhi.
+// Both dominate their escape points. Ordinary PartiallyEscapes allocations
+// are kept alive, so their original allocation-site deopt bundles
 // remain intact. NeverEscapes VOs are eliminated (OrigAlloc erased) and
 // described by a deopt-bundle descriptor (HotSpot reallocs at deopt). The
 // InsertBefore eager-update hook (relocateDependentMaterializes) is retained
@@ -148,7 +148,7 @@ static bool splitReplayEdges(jeandle::PEAResult &Result) {
 
   // Landingpad predecessor splitting clones the landingpad and may synthesize
   // intermediate PHIs for the selected and remaining unwind predecessors.
-  // Insert analysis-owned field PHIs first so LLVM's canonical utility updates
+  // Insert every analysis-owned PHI first so LLVM's canonical utility updates
   // them together with every PHI already present in the IR.
   SmallPtrSet<BasicBlock *, 4> LandingPadTargets;
   for (const EdgePlan &Plan : Plans) {
@@ -173,7 +173,8 @@ static bool splitReplayEdges(jeandle::PEAResult &Result) {
     for (jeandle::CreatePHIEffect *PE : DeferredPhis) {
       PHINode *Phi = PE->PhiInst;
       assert(Phi && !Phi->getParent() &&
-             "deferred field PHI must be unparented before CFG normalization");
+             "deferred analyzer-built PHI must be unparented before CFG "
+             "normalization");
       Phi->insertBefore(PE->Block->getFirstNonPHIIt());
       assert(PE->PHIIncomingValues.size() == PE->PHIIncomingBlocks.size());
       for (unsigned I = 0; I < PE->PHIIncomingValues.size(); ++I)
@@ -224,7 +225,7 @@ static bool splitReplayEdges(jeandle::PEAResult &Result) {
 
     // Landingpad-targeted deferred PHIs were inserted above and therefore were
     // rewritten by SplitBlockPredecessors itself. Ordinary targets can still
-    // own unparented field-value PHIs; keep their recorded incoming blocks
+    // own unparented analyzer-built PHIs; keep their recorded incoming blocks
     // synchronized with the normalized CFG. replaceSuccessorWith redirects
     // every duplicate edge from Source (e.g. switch cases sharing a
     // destination) onto the single new Edge->CurrentTarget edge, so duplicate
@@ -275,6 +276,8 @@ struct ExpectedReplayOperation {
   enum class Kind : uint8_t { Store, Lock } K;
   Value *Receiver = nullptr;
   Value *StoredValue = nullptr;
+  // Physical storage type for compressed references (AS3), if applicable.
+  Type *StorageType = nullptr;
   int64_t Offset = 0;
   Function *LockCallee = nullptr;
   SmallVector<Value *, 4> LockArgs;
@@ -375,6 +378,41 @@ static bool isReplayLikePrefix(Instruction *I,
   return false;
 }
 
+// Compare one expected semantic field value with the physical value in an
+// existing replay store. Primitive fields use exact SSA identity. A compressed
+// reference is equivalent either to its explicit AS1->AS3 storage cast or, if
+// InstCombine folded an encode(decode(narrow)) round trip, to the AS3 operand
+// of the expected AS3->AS1 semantic cast. No provenance/name-based fallback is
+// used: receiver, offset, value, atomic properties, and contiguous placement
+// must all match before a replay is reused.
+static bool replayStoredValueMatches(Value *Actual, Value *ExpectedSemantic,
+                                     Type *ExpectedStorage) {
+  if (Actual == ExpectedSemantic)
+    return true;
+  if (!Actual || !ExpectedSemantic || !ExpectedStorage ||
+      Actual->getType() != ExpectedStorage || !ExpectedStorage->isPointerTy() ||
+      !ExpectedSemantic->getType()->isPointerTy() ||
+      ExpectedStorage->getPointerAddressSpace() !=
+          jeandle::AddrSpace::NarrowOopAddrSpace ||
+      ExpectedSemantic->getType()->getPointerAddressSpace() !=
+          jeandle::AddrSpace::JavaHeapAddrSpace)
+    return false;
+
+  if (isa<ConstantPointerNull>(Actual) &&
+      isa<ConstantPointerNull>(ExpectedSemantic))
+    return true;
+
+  if (auto *Encode = dyn_cast<AddrSpaceCastOperator>(Actual))
+    if (Encode->getOperand(0) == ExpectedSemantic)
+      return true;
+
+  if (auto *Decode = dyn_cast<AddrSpaceCastOperator>(ExpectedSemantic))
+    if (Decode->getOperand(0) == Actual)
+      return true;
+
+  return false;
+}
+
 // A later outer PEA round sees the stores and monitorenters emitted by the
 // preceding round as ordinary virtualizable operations. Replacing an identical
 // replay sequence would mutate the IR forever without making semantic
@@ -433,7 +471,8 @@ static bool matchExistingReplaySuffix(
       ExpectedReplayOperation Op{ExpectedReplayOperation::Kind::Store,
                                  Receiver,
                                  Stored,
-                                 Field.Offset,
+                                 Field.Storage.LLVMType,
+                                 Field.Storage.Offset,
                                  nullptr,
                                  {}};
       Group.Fields.push_back(Op);
@@ -489,16 +528,21 @@ static bool matchExistingReplaySuffix(
         SmallVector<Instruction *, 8> Candidate;
         for (const ExpectedReplayOperation &Op : llvm::reverse(Group.Fields)) {
           auto *Store = dyn_cast_or_null<StoreInst>(At);
-          if (!Store || Store->getValueOperand() != Op.StoredValue ||
-              Store->isVolatile() || !Store->isAtomic() ||
+          if (!Store || Store->isVolatile() || !Store->isAtomic() ||
               Store->getSyncScopeID() != SyncScope::System ||
               Store->getOrdering() != AtomicOrdering::Unordered ||
               Store->hasMetadataOtherThanDebugLoc())
             return false;
+          Value *ActualValue = Store->getValueOperand();
+          Type *ExpectedStorage =
+              Op.StorageType ? Op.StorageType : Op.StoredValue->getType();
+          if (!replayStoredValueMatches(ActualValue, Op.StoredValue,
+                                        ExpectedStorage))
+            return false;
           auto *GEP = dyn_cast<GetElementPtrInst>(Store->getPointerOperand());
           if (!GEP || !isCanonicalReplayGEP(*GEP, Op, *Store))
             return false;
-          TypeSize StoreSize = DL.getTypeStoreSize(Op.StoredValue->getType());
+          TypeSize StoreSize = DL.getTypeStoreSize(ActualValue->getType());
           if (StoreSize.isScalable())
             return false;
           uint64_t FixedStoreSize = StoreSize.getFixedValue();
@@ -509,6 +553,26 @@ static bool matchExistingReplaySuffix(
           Candidate.push_back(Store);
           Candidate.push_back(GEP);
           At = previousNonDebugInstruction(GEP);
+          // A compressed reference replay field has an AS1 -> AS3
+          // conversion helper between its GEP/store pair and the preceding
+          // replay field.  This cast is part of the current field, not a
+          // separate field operation, so consume it while walking backwards.
+          if (Op.StorageType && Op.StoredValue &&
+              Op.StorageType != Op.StoredValue->getType() &&
+              Op.StorageType->isPointerTy() &&
+              Op.StoredValue->getType()->isPointerTy() &&
+              cast<PointerType>(Op.StorageType)->getAddressSpace() ==
+                  jeandle::AddrSpace::NarrowOopAddrSpace &&
+              cast<PointerType>(Op.StoredValue->getType())->getAddressSpace() ==
+                  jeandle::AddrSpace::JavaHeapAddrSpace) {
+            auto *Encode = dyn_cast_or_null<AddrSpaceCastInst>(At);
+            if (Encode && Encode->getType() == Op.StorageType &&
+                Encode->getOperand(0) == Op.StoredValue &&
+                Encode->hasOneUse() && *Encode->user_begin() == Store) {
+              Candidate.push_back(Encode);
+              At = previousNonDebugInstruction(Encode);
+            }
+          }
         }
         Matched.append(Candidate.begin(), Candidate.end());
         Before = At;
@@ -735,8 +799,8 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
   CallBase *OrigAlloc = cast_or_null<CallBase>((Value *)VObj.AllocationCall);
   Value *MatVal = E.Target;
   if (VObj.IsSynthetic)
-    assert(MatVal == VObj.SyntheticPhi &&
-           "synthetic materialization must replay onto SyntheticPhi");
+    assert(MatVal == VObj.SyntheticReplayPhi &&
+           "synthetic materialization must replay onto SyntheticReplayPhi");
   else
     assert((Value *)OrigAlloc == MatVal &&
            "ordinary materialization must replay onto OrigAlloc");
@@ -748,7 +812,7 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
   // applyMaterialize is reached only for PartiallyEscapes VOs (NeverEscapes go
   // to EliminateAllocation; AlwaysEscapes effects were dropped by the
   // analyzer). Ordinary receivers are OrigAlloc; synthetic receivers are the
-  // prepared SyntheticPhi.
+  // prepared SyntheticReplayPhi.
   MaterializedReceiverOf[&E] = MatVal;
 
   Instruction *InsertBefore = dyn_cast_or_null<Instruction>(E.InsertBefore);
@@ -782,8 +846,8 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
   // VirtualRef→MaterializedRef during prerequisite materialization), which also
   // dominates here.
   for (const auto &FE : E.FieldEntries) {
-    assert(jeandle::pea::isLegalMaterializationAtomicType(
-               FE.Value.getDeclaredType(), DL) &&
+    assert(jeandle::pea::isLegalMaterializationAtomicType(FE.Storage.LLVMType,
+                                                          DL) &&
            "materialize replay field must be a legal atomic store type");
     Value *V = nullptr;
     if (FE.Value.isScalar()) {
@@ -805,20 +869,35 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
     // else must already be in IR. Analysis-side scalar-alias normalization +
     // the commit availability sweep make this a defense-in-depth check.
     spliceUnparentedAt(InsertBefore, V);
-    assert((isa<Constant>(V) || isa<Argument>(V) ||
-            cast<Instruction>(V)->getParent() != nullptr) &&
+    Value *StoreV = V;
+    if (FE.Storage.LLVMType && StoreV->getType() != FE.Storage.LLVMType) {
+      if (isa<ConstantPointerNull>(StoreV) &&
+          FE.Storage.LLVMType->isPointerTy()) {
+        StoreV =
+            ConstantPointerNull::get(cast<PointerType>(FE.Storage.LLVMType));
+      } else if (StoreV->getType()->isPointerTy() &&
+                 FE.Storage.LLVMType->isPointerTy()) {
+        StoreV = SB.CreateAddrSpaceCast(StoreV, FE.Storage.LLVMType,
+                                        "pea.encode.oop");
+      } else {
+        // Incompatible primitive slots are already handled conservatively by
+        // the analyzer; retain the original value type for replay.
+      }
+    }
+    assert((isa<Constant>(StoreV) || isa<Argument>(StoreV) ||
+            cast<Instruction>(StoreV)->getParent() != nullptr) &&
            "materialize replay value must be a constant, argument, or "
            "in-IR instruction");
-    Value *Slot =
-        SB.CreateInBoundsGEP(I8, MatVal, SB.getInt64(FE.Offset), "pea.matslot");
+    Value *Slot = SB.CreateInBoundsGEP(
+        I8, MatVal, SB.getInt64(FE.Storage.Offset), "pea.matslot");
     // Natural alignment = the field type's store size rounded up to a power of
     // two (atomic-unordered stores MUST be naturally aligned; ABI align may be
     // smaller than store size, e.g. i64 under the default datalayout). Derived
     // from the DataLayout so it stays correct under a future compressed-oop /
     // 32-bit heap model, and matches the frontend's natural-aligned emission.
-    uint64_t StoreSz = DL.getTypeStoreSize(V->getType()).getFixedValue();
+    uint64_t StoreSz = DL.getTypeStoreSize(StoreV->getType()).getFixedValue();
     Align NaturalAlign(llvm::PowerOf2Ceil(StoreSz ? StoreSz : 1));
-    StoreInst *S = SB.CreateAlignedStore(V, Slot, NaturalAlign);
+    StoreInst *S = SB.CreateAlignedStore(StoreV, Slot, NaturalAlign);
     S->setAtomic(AtomicOrdering::Unordered); // Java heap stores are unordered
     Emitted = true;
   }
@@ -888,9 +967,9 @@ struct jeandle::TransformContext {
   jeandle::PEAResult &Result;
   bool &Changed;
 
-  // effect -> real replay receiver (OrigAlloc or SyntheticPhi). Filled as each
-  // Materialize applies; consumed by the tail effect at a multi-object escape
-  // point to resolve each MergedLock's receiver.
+  // effect -> real replay receiver (OrigAlloc or SyntheticReplayPhi). Filled as
+  // each Materialize applies; consumed by the tail effect at a multi-object
+  // escape point to resolve each MergedLock's receiver.
   DenseMap<const jeandle::MaterializeEffect *, Value *> &MaterializedReceiverOf;
 
   // Reverse index: live InsertBefore -> Materialize effects keyed on it. A
@@ -921,8 +1000,9 @@ struct jeandle::TransformContext {
       &SkippedDeoptPoolEffects;
 };
 
-// Replace the load with its analyzer-computed replacement and erase it. An
-// unparented analyzer-built replacement is spliced into the IR first.
+// Replace the load with its analyzer-computed replacement and erase it.
+// Analyzer-built non-PHI instructions are parented independently by their
+// PlaceInstruction effects before this effect runs.
 //
 // The erased load's metadata (!nonnull, !dereferenceable, !align, ...) is NOT
 // transferred onto the replacement: those facts only held at the erased
@@ -939,13 +1019,13 @@ void jeandle::ReplaceLoadEffect::apply(jeandle::TransformContext &Ctx) {
   // so the instruction is still alive.
   Instruction *Target = cast<Instruction>((Value *)this->Target);
   Value *Repl = Replacement;
-  // The analyzer may have synthesized an unparented coercion instruction as the
-  // replacement (a same-bit-width `bitcast` reinterpretation). Splice it, and
-  // any still-unparented operand, in postorder so each operand is parented
-  // before its user; all land immediately before Target. A PHINode replacement
-  // is owned by a CreatePHI effect that runs LATER in SeqNo order, so it is
-  // treated as a leaf here (splicing it mid-block is illegal).
-  spliceUnparentedAt(Target, Repl);
+  // A non-PHI instruction replacement must already have been placed by its
+  // independent PlaceInstruction effect. PHI shells are the sole exception:
+  // CreatePHIEffect inserts and wires them later in SeqNo order, after this
+  // effect has redirected the load's uses to the shell.
+  assert((!isa<Instruction>(Repl) || isa<PHINode>(Repl) ||
+          cast<Instruction>(Repl)->getParent()) &&
+         "non-PHI ReplaceLoad replacement must already be parented");
   if (!Target->use_empty())
     Target->replaceAllUsesWith(Repl);
   // Eager-update: re-aim any Materialize keyed on `Target` to its next
@@ -1029,6 +1109,17 @@ void jeandle::EliminateStoreEffect::apply(jeandle::TransformContext &Ctx) {
   Ctx.Changed = true;
 }
 
+void jeandle::PlaceInstructionEffect::apply(jeandle::TransformContext &Ctx) {
+  Instruction *I =
+      dyn_cast_or_null<Instruction>(static_cast<Value *>(InstructionToPlace));
+  Instruction *TargetI =
+      dyn_cast_or_null<Instruction>(static_cast<Value *>(Target));
+  if (!I || I->getParent() || !TargetI || !TargetI->getParent())
+    return;
+  spliceUnparentedAt(TargetI, I);
+  Ctx.Changed = true;
+}
+
 void jeandle::EliminateAllocationEffect::apply(jeandle::TransformContext &Ctx) {
   // A PartiallyEscapes VO keeps its OrigAlloc (it is the single sound SSA value
   // for surviving uses and carries the allocation-site deopt bundle). Only
@@ -1070,13 +1161,11 @@ void jeandle::MaterializeEffect::apply(jeandle::TransformContext &Ctx) {
 }
 
 void jeandle::CreatePHIEffect::apply(jeandle::TransformContext &Ctx) {
-  // Field-value PHI: merges a per-offset field VALUE (scalar or
-  // materialized-ref pointer) across preds / around a loop. Emitted by
-  // mergeFieldStates and synthesizeCaseC. This is NOT a materialized-object
-  // PHI — it tracks a real field value that must be merged. The analyzer's
-  // recorded (PHIIncomingValues[I], PHIIncomingBlocks[I]) are valid as-is:
-  // each incoming is a dominating field value, and a materialized-ref
-  // incoming is the peer VO's OrigAlloc, which is kept alive.
+  // FieldValue merges one per-offset scalar/materialized-reference value.
+  // SyntheticReplayIdentity instead merges the real AS1 source identities of
+  // an AS3 Case-C carrier. Both forms need exactly the same insertion and CFG
+  // edge-normalization discipline: every recorded incoming is valid on its
+  // recorded predecessor edge before this PHI becomes visible to replay.
   PHINode *Phi = PhiInst;
   assert(Phi && "CreatePHI effect requires a PhiInst");
   if (Phi->getParent()) {

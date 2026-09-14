@@ -81,17 +81,14 @@ int VirtualObject::getOrCreateFieldIndex(int64_t Offset, Type *Ty,
     // current 64-bit target, but derived from the DataLayout so a 32-bit or
     // compressed-oop heap model stays correct rather than hardcoding 8.
     //
-    // TODO(compressed-oop): narrow-oop (addrspace 3) reference fields are NOT
-    // supported — bail conservatively (-1) instead of asserting (debug) or
-    // modelling the slot at the wrong width (release: getPointerSize(1)=8
-    // where the real slot is 4 bytes -> corrupt field model). Callers treat
-    // -1 as keep-everything-real. PEA as a whole is also gated against
-    // narrow-oop modules in PartialEscapeAnalysis::run; this is the
-    // per-access defense for hand-written / mixed IR.
-    if (Ty->getPointerAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace)
+    // Reference fields may use the semantic Java heap pointer (AS1) or the
+    // physical narrow-oop pointer (AS3). Keep the descriptor's type so
+    // materialization can replay the value at its actual in-memory width.
+    unsigned PointerAS = Ty->getPointerAddressSpace();
+    if (PointerAS != jeandle::AddrSpace::JavaHeapAddrSpace &&
+        PointerAS != jeandle::AddrSpace::NarrowOopAddrSpace)
       return -1;
-    uint64_t PointerByteSize =
-        DL.getPointerSize(jeandle::AddrSpace::JavaHeapAddrSpace);
+    uint64_t PointerByteSize = DL.getPointerSize(PointerAS);
     if (PointerByteSize == 0 ||
         PointerByteSize > std::numeric_limits<uint8_t>::max())
       return -1;
@@ -149,6 +146,15 @@ int VirtualObject::getOrCreateFieldIndex(int64_t Offset, Type *Ty,
   FieldDesc New{Offset, Ty, ByteSize, IsReference};
   auto NewIt = Fields.insert(It, New);
   return static_cast<int>(NewIt - Fields.begin());
+}
+
+const VirtualObject::FieldDesc *VirtualObject::findField(int64_t Offset) const {
+  auto It = std::lower_bound(
+      Fields.begin(), Fields.end(), Offset,
+      [](const FieldDesc &F, int64_t Off) { return F.Offset < Off; });
+  if (It == Fields.end() || It->Offset != Offset)
+    return nullptr;
+  return &*It;
 }
 
 // Strip identity-preserving wrappers (freeze, bitcast, zext, sext) from an
@@ -341,10 +347,11 @@ std::unique_ptr<VirtualObject> VirtualObject::duplicate() const {
   Clone->copyStructuralFieldsFrom(*this);
   // Synthetic-state fields are NOT copied — duplicate() is shared by the
   // generic VirtualObject clone path AND the Case C synthesis path; the
-  // latter sets IsSynthetic/SyntheticSourceIDs/SyntheticPhi explicitly after
-  // calling duplicate.
+  // latter sets IsSynthetic/SyntheticSourceIDs/SyntheticPhi/SyntheticReplayPhi
+  // explicitly after calling duplicate.
   Clone->IsSynthetic = false;
   Clone->SyntheticPhi = nullptr;
+  Clone->SyntheticReplayPhi = nullptr;
   return Clone;
 }
 
@@ -386,9 +393,11 @@ FieldValue FieldValue::materializedRef(Value *Ptr) {
 Constant *FieldValue::defaultFor(Type *FieldType) {
   assert(FieldType);
   if (FieldType->isPointerTy()) {
-    assert(FieldType->getPointerAddressSpace() ==
-               jeandle::AddrSpace::JavaHeapAddrSpace &&
-           "reference default must be in JavaHeapAddrSpace");
+    assert((FieldType->getPointerAddressSpace() ==
+                jeandle::AddrSpace::JavaHeapAddrSpace ||
+            FieldType->getPointerAddressSpace() ==
+                jeandle::AddrSpace::NarrowOopAddrSpace) &&
+           "reference default must be a Java oop pointer");
     return ConstantPointerNull::get(cast<PointerType>(FieldType));
   }
   return Constant::getNullValue(FieldType);
@@ -408,10 +417,6 @@ bool FieldValue::shallowEquals(const FieldValue &O) const {
   }
   return false;
 }
-
-// ===========================================================================
-// ObjectState
-// ===========================================================================
 
 // ===========================================================================
 // PEABlockState
@@ -494,8 +499,12 @@ ObjectState &PEABlockState::getObjectStateForModification(ObjectID ID) {
 
 void AliasMap::addVirtualAlias(Value *V, ObjectID ID, bool IsWholeObject) {
   assert(V && ID != InvalidObjectID);
-  assert(!VirtualAliases.count(V) && "value already aliased");
-  VirtualAliases[V] = ID;
+  auto It = VirtualAliases.find(V);
+  if (It != VirtualAliases.end()) {
+    assert(It->second == ID && "value already aliased to a different object");
+  } else {
+    VirtualAliases[V] = ID;
+  }
   if (IsWholeObject)
     WholeObjectVirtualAliases.insert(V);
   for (User *U : V->users()) {
@@ -716,7 +725,8 @@ void PEAResult::computeEscapePointLocks() {
 
 static void destroyUnparentedOwnedInstructions(
     ArrayRef<WeakTrackingVH> Phis, ArrayRef<WeakTrackingVH> Insts,
-    ArrayRef<WeakTrackingVH> LoopFieldPhis = {}) {
+    ArrayRef<WeakTrackingVH> LoopFieldPhis = {},
+    ArrayRef<WeakTrackingVH> SyntheticReplayPhis = {}) {
   SmallPtrSet<Instruction *, 16> Seen;
   SmallVector<Instruction *, 16> ToDelete;
   auto Collect = [&](ArrayRef<WeakTrackingVH> Values) {
@@ -727,6 +737,7 @@ static void destroyUnparentedOwnedInstructions(
   };
 
   Collect(LoopFieldPhis);
+  Collect(SyntheticReplayPhis);
   Collect(Phis);
   Collect(Insts);
 
@@ -743,7 +754,8 @@ PEAResult::~PEAResult() {
   // Once an analyzer-owned instruction has been inserted into a BasicBlock,
   // that block's ilist owns it. WeakTrackingVH also auto-nulls when an
   // unrelated cleanup path has already deleted the value.
-  destroyUnparentedOwnedInstructions(OwnedPhis, OwnedInsts, OwnedLoopFieldPhis);
+  destroyUnparentedOwnedInstructions(OwnedPhis, OwnedInsts, OwnedLoopFieldPhis,
+                                     OwnedSyntheticReplayPhis);
 }
 
 void PEAResult::truncateOwnedTo(size_t PhisMark, size_t InstsMark) {
@@ -770,7 +782,7 @@ ObjectID PEAResult::createVirtualObject(std::unique_ptr<VirtualObject> VO) {
 
 void PEAResult::addBlockEffect(std::unique_ptr<Effect> E) {
   assert(E && E->hasValidMutationOwner() &&
-         "only an atomic deopt-pool effect may be ownerless");
+         "only deopt-pool or placement effects may be ownerless");
   assert(E->Block);
   BasicBlock *BB = E->Block;
   BlockEffects[BB].add(std::move(E));
@@ -807,8 +819,7 @@ bool PEAResult::hasLegalMaterializationAtomicTypes(const DataLayout &DL) const {
     for (const Effect &E : KV.second)
       if (const auto *ME = dyn_cast<MaterializeEffect>(&E))
         for (const MaterializeEffect::FieldEntry &FE : ME->FieldEntries)
-          if (!pea::isLegalMaterializationAtomicType(FE.Value.getDeclaredType(),
-                                                     DL))
+          if (!pea::isLegalMaterializationAtomicType(FE.Storage.LLVMType, DL))
             return false;
   return true;
 }
@@ -824,6 +835,9 @@ void Effect::dump(raw_ostream &OS) const {
     break;
   case Kind::EliminateStore:
     OS << "EliminateStore";
+    break;
+  case Kind::PlaceInstruction:
+    OS << "PlaceInstruction";
     break;
   case Kind::EliminateAllocation:
     OS << "EliminateAllocation";
@@ -846,8 +860,12 @@ void Effect::dump(raw_ostream &OS) const {
     OS << " [VO=" << static_cast<unsigned>(getMutationOwner()) << "]";
   if (Block && Block->hasName())
     OS << " block=%" << Block->getName();
-  if (const auto *PE = dyn_cast<CreatePHIEffect>(this))
-    OS << " offset=" << PE->FieldOffset;
+  if (const auto *PE = dyn_cast<CreatePHIEffect>(this)) {
+    if (PE->PhiRole == CreatePHIEffect::Role::FieldValue)
+      OS << " offset=" << PE->FieldOffset;
+    else
+      OS << " role=SyntheticReplayIdentity";
+  }
   if (const auto *PE = dyn_cast<RewriteDeoptPoolEffect>(this))
     OS << " nodes=" << PE->getPlan().graph().nodes().size()
        << " current=" << PE->getPlan().graph().currentMembers().size()

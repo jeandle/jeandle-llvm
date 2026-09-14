@@ -6,15 +6,14 @@
 ; An outer object allocated before a loop holds a reference field pointing at
 ; a virtual inner array. Inside the loop a pointer PHI merges the folded
 ; field load (a whole-object alias of the inner) with a real pointer, so the
-; Case-A fallback materializes the inner at that predecessor — and the
-; latch-carry validation then marks the inner ineligible because the incoming
-; is a load that does not structurally strip to the allocation. A subsequent
-; loop-fixpoint rollback restores the inner's eligibility, so without the
-; commit-time replay-closure audit the inner ends NeverEscapes while the
-; outer's preheader materialization still replays the inner's OrigAlloc into
-; the field. The cfg-kill phase would RAUW the eliminated OrigAlloc to
-; poison, turning the field replay into a poison store that canonicalization
-; deletes; the runtime object then reads a null/default field.
+; Case-A fallback materializes the inner on that predecessor. The whole-object
+; alias is a valid object carry even though the load does not structurally
+; strip to the allocation. Independently, a later loop-fixpoint decision must
+; not leave the inner NeverEscapes while the outer's preheader materialization
+; still replays the inner's OrigAlloc into its field. The cfg-kill phase would
+; RAUW an eliminated OrigAlloc to poison, turning that replay into a poison
+; store that canonicalization deletes; the runtime object then reads a
+; null/default field.
 ;
 ; The audit must detect the dangling replay reference and rebuild with the
 ; inner kept real: the inner's new_array survives and the field store keeps

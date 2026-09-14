@@ -307,6 +307,7 @@ Value *stripPointerCastsAndOffsets(Value *Ptr, const DataLayout &DL,
 
   int64_t Offset = 0;
   Value *V = Ptr;
+  bool CrossedNarrowOopBoundary = false;
   // Bound the walk defensively; Jeandle IR typically has < 5 layers.
   for (unsigned Depth = 0; Depth < 32; ++Depth) {
     if (auto *GEP = dyn_cast<GEPOperator>(V)) {
@@ -319,8 +320,21 @@ Value *stripPointerCastsAndOffsets(Value *Ptr, const DataLayout &DL,
         return V;
       }
       std::optional<int64_t> GEPDelta = Acc.trySExtValue();
-      std::optional<int64_t> NewOffset =
-          GEPDelta ? checkedOffsetAdd(Offset, *GEPDelta) : std::nullopt;
+      if (!GEPDelta) {
+        if (Unresolved)
+          *Unresolved = true;
+        return V;
+      }
+      // Offset accumulated before the first AS1<->AS3 boundary belongs to
+      // the outer representation and remains valid. A GEP found after that
+      // boundary belongs to an inner representation; its byte delta cannot
+      // be added to the outer offset without the compressed-oop base/shift.
+      if (CrossedNarrowOopBoundary && *GEPDelta != 0) {
+        if (Unresolved)
+          *Unresolved = true;
+        return V;
+      }
+      std::optional<int64_t> NewOffset = checkedOffsetAdd(Offset, *GEPDelta);
       if (!NewOffset) {
         if (Unresolved)
           *Unresolved = true;
@@ -338,7 +352,12 @@ Value *stripPointerCastsAndOffsets(Value *Ptr, const DataLayout &DL,
       continue;
     }
     if (auto *ASC = dyn_cast<AddrSpaceCastOperator>(V)) {
-      // Only chase through casts that stay in JavaHeapAddrSpace.
+      // Chase AS1-preserving casts. AS1<->AS3 compressed-oop casts preserve
+      // whole-oop identity, but their numeric representations use different
+      // byte coordinates: encode/decode applies the VM heap base and shift.
+      // Preserve an already accumulated outer AS1 offset, but reject a
+      // non-zero outer AS3 offset or any non-zero GEP subsequently found on
+      // the inner side of the first representation boundary.
       auto *DstPT = dyn_cast<PointerType>(ASC->getType());
       auto *SrcPT = dyn_cast<PointerType>(ASC->getOperand(0)->getType());
       if (!DstPT || !SrcPT) {
@@ -346,8 +365,29 @@ Value *stripPointerCastsAndOffsets(Value *Ptr, const DataLayout &DL,
           *OutOffset = Offset;
         return V;
       }
-      if (DstPT->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace ||
-          SrcPT->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace) {
+      unsigned DstAS = DstPT->getAddressSpace();
+      unsigned SrcAS = SrcPT->getAddressSpace();
+      bool SameWideAS = DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                        SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace;
+      bool WideNarrowPair = (DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                             SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
+                            (DstAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
+                             SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace);
+      if (WideNarrowPair) {
+        // Before the first boundary Offset is expressed in the cast result's
+        // representation. Only AS1 has the Java-heap byte coordinates that
+        // resolveFieldOffset promises; an AS3 delta would need scaling.
+        if (!CrossedNarrowOopBoundary &&
+            DstAS == jeandle::AddrSpace::NarrowOopAddrSpace && Offset != 0) {
+          if (Unresolved)
+            *Unresolved = true;
+          return V;
+        }
+        CrossedNarrowOopBoundary = true;
+        V = ASC->getOperand(0);
+        continue;
+      }
+      if (!SameWideAS) {
         if (OutOffset)
           *OutOffset = Offset;
         return V;
@@ -433,9 +473,10 @@ struct StackGuard {
 // Values such as loads and already-processed PHIs, which have no structural
 // relationship with their allocation site), then constants (poison is a
 // refinement wildcard; null, undef, globals, and numeric constants are never
-// a virtual object), then carrier peeling (GEP, addrspacecast within
-// JavaHeapAddrSpace, bitcast, freeze, same-width inttoptr(ptrtoint(x))
-// round-trips), and finally PHI/select merge resolution, where the merge
+// a virtual object), then carrier peeling (GEP, AS1-preserving and AS1↔AS3
+// representation addrspacecasts, bitcast, freeze, same-width
+// inttoptr(ptrtoint(x)) round-trips), and finally PHI/select merge resolution,
+// where the merge
 // denotes a virtual object only when every defined alternative resolves to
 // the same ObjectID, with poison refining to that identity. WholeObject mode
 // additionally requires offset zero on every path. Recursion is depth-capped
@@ -500,14 +541,24 @@ resolveVirtualIdentityImpl(Value *V, const PEABlockState &State,
                                       DL, Mode, Visited, Depth + 1);
   }
 
-  // (4) AddrSpaceCast — only chase within JavaHeapAddrSpace.
+  // (4) AddrSpaceCast — chase wide Java references and the AS1<->AS3
+  // compressed-oop representation conversion. Other address spaces are not
+  // Java object identities and must remain opaque.
   if (auto *ASC = dyn_cast<AddrSpaceCastOperator>(V)) {
-    if (auto *DstPT = dyn_cast<PointerType>(ASC->getType()))
-      if (DstPT->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace)
-        return VirtualIdentityResult::unknown();
-    if (auto *SrcPT = dyn_cast<PointerType>(ASC->getOperand(0)->getType()))
-      if (SrcPT->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace)
-        return VirtualIdentityResult::unknown();
+    auto *DstPT = dyn_cast<PointerType>(ASC->getType());
+    auto *SrcPT = dyn_cast<PointerType>(ASC->getOperand(0)->getType());
+    if (!DstPT || !SrcPT)
+      return VirtualIdentityResult::unknown();
+    unsigned DstAS = DstPT->getAddressSpace();
+    unsigned SrcAS = SrcPT->getAddressSpace();
+    bool SameWideAS = DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                      SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace;
+    bool WideNarrowPair = (DstAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                           SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
+                          (DstAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
+                           SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace);
+    if (!SameWideAS && !WideNarrowPair)
+      return VirtualIdentityResult::unknown();
     return resolveVirtualIdentityImpl(ASC->getOperand(0), State, Aliases, DL,
                                       Mode, Visited, Depth + 1);
   }
@@ -712,9 +763,17 @@ static bool isProvablyDistinctFromVirtualImpl(
   if (auto *ASC = dyn_cast<AddrSpaceCastOperator>(V)) {
     auto *SrcPT = dyn_cast<PointerType>(ASC->getOperand(0)->getType());
     auto *DstPT = dyn_cast<PointerType>(ASC->getType());
-    if (!SrcPT || !DstPT ||
-        SrcPT->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace ||
-        DstPT->getAddressSpace() != jeandle::AddrSpace::JavaHeapAddrSpace)
+    if (!SrcPT || !DstPT)
+      return false;
+    unsigned SrcAS = SrcPT->getAddressSpace();
+    unsigned DstAS = DstPT->getAddressSpace();
+    bool SameWideAS = SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                      DstAS == jeandle::AddrSpace::JavaHeapAddrSpace;
+    bool WideNarrowPair = (SrcAS == jeandle::AddrSpace::JavaHeapAddrSpace &&
+                           DstAS == jeandle::AddrSpace::NarrowOopAddrSpace) ||
+                          (SrcAS == jeandle::AddrSpace::NarrowOopAddrSpace &&
+                           DstAS == jeandle::AddrSpace::JavaHeapAddrSpace);
+    if (!SameWideAS && !WideNarrowPair)
       return false;
     return isProvablyDistinctFromVirtualImpl(ASC->getOperand(0), TargetID,
                                              State, Aliases, DL, Visited,

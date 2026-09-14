@@ -1,8 +1,8 @@
 ; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-vm-callback-log=%S/Inputs/207_array_ref_load_store.cblog %s | FileCheck %s
 
 ; Object[] virtual — typed-element GEPs at constant indices, storing /
-; reloading a reference. This fixture models uncompressed oops explicitly, so
-; the VM element scale matches LLVM's 8-byte pointer stride.
+; reloading a wide reference. The fixture deliberately uses an 8-byte
+; element scale so the VM layout matches the addrspace(1) pointer stride.
 
 @arrayOopDesc.element_size.object = private constant i32 8
 

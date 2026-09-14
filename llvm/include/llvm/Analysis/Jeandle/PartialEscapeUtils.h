@@ -388,16 +388,21 @@ bool isUsableFieldOffset(int64_t Offset);
 std::optional<bool> checkedRangesOverlap(int64_t AStart, uint64_t ASize,
                                          int64_t BStart, uint64_t BSize);
 
-// Strip pointer-identity-preserving operations (bitcast, addrspacecast
-// within addrspace(1), freeze, launder/strip.invariant.group, ptr.annotation,
-// and a pre-existing same-width inttoptr(ptrtoint(x)) round-trip) and
-// constant-offset GEPs, accumulating the constant offset into *OutOffset.
-// Returns the root pointer. Sets *Unresolved = true if a non-constant GEP
-// index, a non-representable APInt, or an overflowing accumulated offset was
-// encountered (then the accumulated offset is invalid). Instruction dispatch
-// treats PtrToIntInst as an identity observation regardless; structural
-// round-trip peeling does not keep a virtual object alive across it. Shared
-// structural helper used by resolveVirtualRef and resolveFieldOffset.
+// Strip pointer-identity-preserving operations (bitcast, AS1 addrspacecast,
+// zero-offset AS1<->AS3 representation traversal, freeze,
+// launder/strip.invariant.group, ptr.annotation, and a pre-existing same-width
+// inttoptr(ptrtoint(x)) round-trip) and constant-offset GEPs, accumulating the
+// constant outer offset into *OutOffset. An outer AS1 offset may remain valid
+// across a whole-oop representation cast. A non-zero AS3 outer offset, or a
+// non-zero GEP found after crossing the first AS1<->AS3 boundary, is unresolved
+// because compressed-oop base/shift conversion does not preserve byte deltas.
+// Returns the root pointer. Sets *Unresolved = true if such a representation
+// mismatch, a non-constant GEP index, a non-representable APInt, or an
+// overflowing accumulated offset was encountered (then the accumulated offset
+// is invalid). Instruction dispatch treats PtrToIntInst as an identity
+// observation regardless; structural round-trip peeling does not keep a
+// virtual object alive across it. Shared structural helper used by
+// resolveVirtualRef and resolveFieldOffset.
 Value *stripPointerCastsAndOffsets(Value *Ptr, const DataLayout &DL,
                                    int64_t *OutOffset, bool *Unresolved);
 
