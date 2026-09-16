@@ -1839,9 +1839,10 @@ private:
   // processArrayCopy (System.arraycopy → llvm.memcpy/memmove), processMemSet
   // (Arrays.fill → llvm.memset). Until then these shapes fall through to
   // conservative materialization.
-  // Dispatch one jeandle JavaOp call to its fold handler below. Returns true
-  // iff the op was folded; an unrecognized op returns false so the caller
-  // takes the generic escape path.
+  // Dispatch one jeandle JavaOp call to its PEA-specific handler below.
+  // Returns true once every virtual operand was folded, accepted as
+  // non-escaping, or intentionally materialized; an unrecognized op returns
+  // false so the caller takes the generic escape path.
   bool processJavaOp(CallBase *CB);
   // Known non-escaping LLVM intrinsics (assume, lifetime/invariant
   // markers, debug, annotations, branch hints, ...) are no-ops for PEA;
@@ -5404,8 +5405,9 @@ void Analyzer::processInstruction(Instruction *I) {
     // card_table_barrier, check_if_value_based, check_inflated,
     // check_instanceof, check_klass_subtype, check_klass_subtype_slow_path,
     // checkcast, clear_oop_in_lock_stack_top, current_thread,
-    // decrement_lock_count, g1_pre_barrier_loaded, get_class,
-    // get_stack_pointer, idiv, increment_lock_count, instanceof, irem, ldiv,
+    // decrement_lock_count, ensure_materialized_for_stack_walk,
+    // g1_pre_barrier_loaded, get_class, get_stack_pointer, idiv,
+    // increment_lock_count, instanceof, irem, ldiv,
     // load_klass, lrem, monitorenter_with_lightweight_lock,
     // monitorenter_with_monitor_lock, monitorenter_with_thin_lock,
     // monitorexit_with_lightweight_lock, monitorexit_with_monitor_lock,
@@ -5416,8 +5418,9 @@ void Analyzer::processInstruction(Instruction *I) {
     // processJavaOp — see the isJeandle* predicates in
     // PartialEscapeUtils.{h,cpp} for which the analyzer actually recognizes.)
     //
-    // When the frontend grows a new JavaOp, wire its fold in processJavaOp
-    // and add the isJeandle* predicate in PartialEscapeUtils.{h,cpp}.
+    // When the frontend grows a new JavaOp, wire its PEA semantics in
+    // processJavaOp and add the isJeandle* predicate in
+    // PartialEscapeUtils.{h,cpp}.
     //
     // Equality compare against a virtual pointer folds (virtuals are never
     // null; identity comparison). Non-equality ICmp on virtual heap pointers
@@ -5427,19 +5430,21 @@ void Analyzer::processInstruction(Instruction *I) {
       if (foldICmpEquality(ICmp))
         return;
     }
-    // Recognise JavaOps that read/inspect a virtual receiver and try to
-    // constant-fold them. processJavaOp returns true if the JavaOp was
-    // handled (whether by folding to a constant or by being a known-safe
-    // non-escaping shape that needs no transform).
+    // Recognise JavaOps with PEA-specific semantics. Most read/inspect a
+    // virtual receiver and can be folded; ensure_materialized_for_stack_walk
+    // deliberately does the opposite and turns its virtual argument into a
+    // real object at this program point. processJavaOp returns true once all
+    // virtual operands have been accounted for.
     if (auto *CB = dyn_cast<CallBase>(I)) {
       if (processJavaOp(CB)) {
-        // The call was folded / is a known-safe shape. It may still SURVIVE
-        // with a deopt bundle (the fold effect can be dropped at commit when
-        // the VO becomes ineligible), so its bundle operands must be
-        // recorded: VOs describable here stay virtual; the rest are handled
-        // by the generic escape path when their effects survive. When the
-        // fold survives, the rewrite no-ops at apply (the bundle died with
-        // the call). No foldable JavaOp carries a deopt bundle, so this path
+        // The JavaOp-specific handler accounted for its ordinary virtual
+        // operands. The call may still SURVIVE with a deopt bundle (a fold
+        // effect can be dropped at commit when the VO becomes ineligible), so
+        // its bundle operands must be recorded: describable VOs stay virtual;
+        // the rest are handled by the generic escape path when their effects
+        // survive. When a fold survives, the rewrite no-ops at apply because
+        // the bundle died with the call. Current foldable JavaOps and the
+        // explicit materialization marker carry no deopt bundle, so this path
         // is latent.
         recordDeoptBundleMappings(CB);
         return;
@@ -7249,12 +7254,23 @@ bool Analyzer::foldICmpEquality(ICmpInst *ICmp) {
   return true;
 }
 
-// Dispatch a recognized JavaOp on a virtual receiver to its fold. Returns
-// true iff the call was handled — folded to a constant / deleted, or a
-// known-safe non-escaping shape needing no transform; false routes the call
-// to the generic escape path.
+// Dispatch a recognized JavaOp on a virtual receiver to its PEA semantics.
+// Returns true iff every virtual operand was accounted for — folded to a
+// constant / deleted, accepted as non-escaping, or intentionally materialized;
+// false routes the call to the generic escape path.
 bool Analyzer::processJavaOp(CallBase *CB) {
   using namespace jeandle::pea;
+  if (isJeandleEnsureMaterializedForStackWalk(CB)) {
+    // This is a compiler barrier, not a runtime operation. Match C2's escape
+    // edge by materializing the ordinary argument here; the phase-1 JavaOp
+    // body is inlined only after PEA and contributes no machine instruction.
+    // Keeping this explicit avoids relying on the fallback policy for unknown
+    // calls, which could become more precise independently of this contract.
+    assert(CB->arg_size() == 1 &&
+           "ensure_materialized_for_stack_walk expects one oop argument");
+    materializeVirtualCallArgs(CB);
+    return true;
+  }
   if (isJeandleArrayLength(CB))
     return foldArrayLength(CB);
   if (isJeandleLoadKlass(CB))
