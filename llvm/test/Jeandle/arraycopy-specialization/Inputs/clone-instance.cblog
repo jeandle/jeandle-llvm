@@ -1,0 +1,14 @@
+# Exact klass 42 has int, long, and oop instance fields. Field types use the
+# JBasicType encoding (Int=4, Long=5, Object=8).
+IsInterface 42 = false
+GetSecondarySupers 42 = []
+GetCloneInstanceInfo 42 true = (4, 3, [(12, 4), (16, 5), (24, 8)])
+# Non-exact klass 43 already has a subclass, so scalarization is not applicable.
+IsInterface 43 = false
+GetSecondarySupers 43 = []
+GetCloneInstanceInfo 43 false = (1, -1, [])
+# Klass 44 passed admission, but class loading raced with the transform-time
+# recheck. Preserve the pseudo call instead of scalarizing it.
+IsInterface 44 = false
+GetSecondarySupers 44 = []
+GetCloneInstanceInfo 44 false = (2, 3, [])

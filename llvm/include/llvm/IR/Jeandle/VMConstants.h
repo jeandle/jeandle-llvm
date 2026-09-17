@@ -59,8 +59,8 @@ class Type;
 
 namespace jeandle {
 
-// BasicType IDs mirroring HotSpot's enum BasicType in oops/typeArrayKlass.hpp.
-// Used as index into per-element-type tables below.
+// Dense element-type IDs used as indices into the tables below.
+// Numeric values differ from HotSpot BasicType; VM callbacks must convert them.
 enum class JBasicType : uint8_t {
   Boolean = 0,
   Byte = 1,
@@ -105,6 +105,7 @@ struct VMConstants {
 
   bool UseCompressedClassPointers = true;
   bool UseCompressedOops = true;
+  bool ReduceBulkZeroing = true;
 
   // Arraycopy optimization thresholds supplied by HotSpot VM flags.
   int64_t ArrayOperationPartialInlineSize = 0;
@@ -122,6 +123,7 @@ struct VMConstants {
   int64_t arrayCopyLoadStoreMaxElem() const {
     return ArrayCopyLoadStoreMaxElem;
   }
+  bool reduceBulkZeroing() const { return ReduceBulkZeroing; }
 
   // Returns the array base offset for an element type. Returns -1 if Ty is not
   // a recognised Jeandle element type.

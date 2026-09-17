@@ -1,0 +1,3 @@
+# int[] layout: primitive tag, header 16, T_INT (10), element shift 2.
+GetOopKlass 0 = 123456
+GetKlassLayoutHelper 123456 = -1072690686

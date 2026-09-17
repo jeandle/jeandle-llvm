@@ -1,0 +1,10 @@
+# Scalar clone stores must be declined when a bulk post-barrier is required.
+IsInterface 42 = false
+GetSecondarySupers 42 = []
+GetCloneInstanceInfo 42 true = (3, 3, [])
+IsInterface 43 = false
+GetSecondarySupers 43 = []
+GetCloneInstanceInfo 43 false = (1, -1, [])
+IsInterface 44 = false
+GetSecondarySupers 44 = []
+GetCloneInstanceInfo 44 false = (2, 3, [])

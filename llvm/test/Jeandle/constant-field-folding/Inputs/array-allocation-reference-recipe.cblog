@@ -1,0 +1,4 @@
+# A reference-array runtime klass, not necessarily Object[]. This fixture
+# models uncompressed klass/oop headers (24 bytes) and 8-byte elements.
+GetOopKlass 0 = 234567
+GetKlassLayoutHelper 234567 = -2145907709
