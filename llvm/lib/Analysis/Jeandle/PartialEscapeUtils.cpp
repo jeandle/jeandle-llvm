@@ -120,6 +120,10 @@ bool isJeandleRegisterFinalizerIfNeeded(const CallBase *CB) {
   return isJeandleCallNamed(CB, "jeandle.register_finalizer_if_needed");
 }
 
+bool isJeandleEnsureMaterializedForStackWalk(const CallBase *CB) {
+  return isJeandleCallNamed(CB, "jeandle.ensure_materialized_for_stack_walk");
+}
+
 bool isPEAHandledNonEscapingIntrinsic(const IntrinsicInst *II) {
   if (!II)
     return false;
