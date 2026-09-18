@@ -34,6 +34,8 @@ public:
 
   static constexpr const char *InlineScopeID = "inline-scope-id";
 
+  static constexpr const char *LateInline = "late-inline";
+
   // Set by inclusive loop versioning on the latch of the slow-path clone so the
   // later strip-mining pass skips it instead of trying to version it again.
   static constexpr const char *InclusiveSlowPath = "jeandle.inclusive.slow";

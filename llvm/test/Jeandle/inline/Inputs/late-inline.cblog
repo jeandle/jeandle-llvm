@@ -1,0 +1,9 @@
+GetInlineDecision -1 7 104 false = 2
+GetInlineDecision -1 7 104 true = 1
+GetInlineDecision 0 11 105 false = 2
+GetInlineDecision 0 11 105 true = 1
+GetInlineCalleeIR 104 = true
+GetInlineCalleeIR 105 = true
+RecordInlineResult -1 7 104 0 = true
+RecordInlineResult 0 11 105 0 = true
+RecordInliningComplete = true
