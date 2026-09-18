@@ -28,7 +28,7 @@ enum class PipelineMode {
 class Pipeline {
 public:
   Pipeline(OptimizationLevel Level, LLVMContext &Ctx,
-           PipelineMode Mode = PipelineMode::MethodCompilation);
+           PipelineMode Mode = PipelineMode::MethodCompilation, TargetMachine *TM = nullptr);
 
   LLVM_ABI static ModulePassManager
   buildJeandlePipeline(PassBuilder &PB, OptimizationLevel Level,

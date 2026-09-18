@@ -1,5 +1,5 @@
 ; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>' -S < %s | FileCheck %s
-; RUN: opt -passes='function(loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>),java-operation-lower<phase=1>,rewrite-statepoints-for-gc,verify' \
+; RUN: opt -passes='function(loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>),java-operation-lower<phase=2>,rewrite-statepoints-for-gc,verify' \
 ; RUN:   -S < %s | FileCheck %s --check-prefix=STATEPOINT \
 ; RUN:   --implicit-check-not='call hotspotcc void @jeandle.safepoint_poll'
 
@@ -47,7 +47,7 @@ exit:
 
 !java-method-compilation = !{}
 
-attributes #0 = { "lower-phase"="1" "noinline" }
+attributes #0 = { "lower-phase"="2" "noinline" }
 
 ; Inner body poll-free; poll relocates to the outer latch with invariants passed
 ; through and .next operands remapped (%s.next -> %s.outer.next,

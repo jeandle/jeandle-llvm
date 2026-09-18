@@ -9,7 +9,7 @@
 ; RUN:   -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-poll-elimination<early>,loop-mssa(loop-rotate,licm),safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>)' \
 ; RUN:   -jeandle-loop-strip-mining-iter=1000 \
 ; RUN:   -jeandle-verify-safepoint-coverage=fatal -disable-output < %s
-; RUN: opt -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-poll-elimination<early>,loop-mssa(loop-rotate,licm,simple-loop-unswitch<trivial>,licm,simple-loop-unswitch<nontrivial;trivial>),guard-widening,loop-mssa(licm),loop-mssa(loop-predication,licm,simple-loop-unswitch<nontrivial;trivial>,guard-widening),lower-widenable-condition,lower-guard-intrinsic,simplifycfg,irce,instcombine,simplifycfg,loop-simplify,lcssa,loop-mssa(loop-rotate,licm),safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>)' \
+; RUN: opt -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-poll-elimination<early>,loop-mssa(loop-rotate,licm,simple-loop-unswitch<trivial>,licm,simple-loop-unswitch<nontrivial;trivial>),constraint-elimination,irce,instcombine,simplifycfg,loop-simplify,lcssa,loop-mssa(loop-rotate,licm),safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>)' \
 ; RUN:   -jeandle-loop-strip-mining-iter=1000 \
 ; RUN:   -jeandle-verify-safepoint-coverage=fatal -S < %s \
 ; RUN:   | FileCheck %s --check-prefix=PIPELINE

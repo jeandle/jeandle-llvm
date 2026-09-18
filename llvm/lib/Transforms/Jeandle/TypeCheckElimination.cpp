@@ -8,10 +8,13 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This pass eliminates redundant jeandle.check_instanceof calls by using
-// compile-time Java type information. It replaces calls with constant true
-// (when the object's type is provably a subtype) or constant false (when the
-// object's exact type is provably not a subtype).
+// This pass eliminates redundant Java type checks by using compile-time Java
+// type information. It folds jeandle.check_instanceof and
+// jeandle.check_klass_subtype calls, and also folds
+// jeandle.array_store_check to true when an exact destination-array type makes
+// the store provably compatible. Array-store checks are never folded to false
+// without a separate non-null proof for the stored value, because JavaType does
+// not model nullability and null is assignable to every reference array.
 //
 //===----------------------------------------------------------------------===//
 
@@ -58,13 +61,15 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
 
   const jeandle::VMCallbacks *CB = jeandle::getVMCallbacks();
   assert(CB && CB->IsSubtype && CB->IsInterface && CB->IsObjectKlass &&
+         CB->ArrayElementKlass &&
          "VMCallbacks must be set");
   if (!CB)
     return PreservedAnalyses::all();
 
   Function *CheckFn = M->getFunction("jeandle.check_instanceof");
   Function *SubtypeFn = M->getFunction("jeandle.check_klass_subtype");
-  if (!CheckFn && !SubtypeFn)
+  Function *ArrayStoreCheckFn = M->getFunction("jeandle.array_store_check");
+  if (!CheckFn && !SubtypeFn && !ArrayStoreCheckFn)
     return PreservedAnalyses::all();
 
   DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
@@ -76,12 +81,12 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
   LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
   LVINullEdgeOracle IsNullEdge{LVI};
 
-  // Collect check_instanceof and check_klass_subtype calls. CallInst only:
-  // the check helpers are never emitted as invokes, and an invoke must not be
-  // erased like a call (it is a terminator) — an invoke-form check simply
-  // stays unfolded.
+  // Collect type-check calls. CallInst only: the check helpers are never
+  // emitted as invokes, and an invoke must not be erased like a call (it is a
+  // terminator) — an invoke-form check simply stays unfolded.
   SmallVector<CallInst *, 16> Checks;
   SmallVector<CallInst *, 16> SubtypeChecks;
+  SmallVector<CallInst *, 16> ArrayStoreChecks;
   for (auto &I : instructions(F)) {
     auto *Check = dyn_cast<CallInst>(&I);
     if (!Check)
@@ -90,6 +95,8 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
       Checks.push_back(Check);
     if (SubtypeFn && Check->getCalledFunction() == SubtypeFn)
       SubtypeChecks.push_back(Check);
+    if (ArrayStoreCheckFn && Check->getCalledFunction() == ArrayStoreCheckFn)
+      ArrayStoreChecks.push_back(Check);
   }
 
   // All fold decisions are made against the original IR first and applied
@@ -171,6 +178,62 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
 
     if (FoldToFalse)
       Folds.push_back({CheckCB, ConstantInt::getFalse(CheckCB->getType())});
+  }
+
+  // --- Decide: fold provably-compatible array stores ---
+  //
+  // Java arrays are covariant: a value whose declared type is Object[] may
+  // refer to a String[] at runtime. Therefore the destination's JavaType must
+  // be exact before its element klass can be used to remove a store check.
+  // The frontend marks newarray/anewarray results with java-klass-exact, and
+  // getJavaType also preserves exactness through supported PHI/select shapes.
+  for (CallInst *StoreCB : ArrayStoreChecks) {
+    if (StoreCB->arg_size() < 2)
+      continue;
+
+    Value *StoredValue = StoreCB->getArgOperand(0);
+    Value *Array = StoreCB->getArgOperand(1);
+
+    // null is assignable to every reference array. This proof is independent
+    // of the destination's exact klass.
+    if (isa<ConstantPointerNull>(StoredValue)) {
+      Folds.push_back(
+          {StoreCB, ConstantInt::getTrue(StoreCB->getType())});
+      continue;
+    }
+
+    jeandle::JavaType ArrayType =
+        jeandle::getJavaType(Array, &DT, StoreCB, IsNullEdge);
+    if (!ArrayType.isKnown() || !ArrayType.Exact)
+      continue;
+
+    // ArrayElementKlass returns zero for primitive arrays, non-arrays, and
+    // unavailable element metadata. aastore should only produce reference
+    // arrays, but retain the check conservatively for malformed or unknown IR.
+    uintptr_t ElementKlass = CB->ArrayElementKlass(ArrayType.Klass);
+    if (ElementKlass == 0)
+      continue;
+
+    // An exact Object[] accepts every reference value, so no information
+    // about StoredValue is required.
+    if (CB->IsObjectKlass(ElementKlass)) {
+      Folds.push_back(
+          {StoreCB, ConstantInt::getTrue(StoreCB->getType())});
+      continue;
+    }
+
+    jeandle::JavaType ValueType =
+        jeandle::getJavaType(StoredValue, &DT, StoreCB, IsNullEdge);
+    if (ValueType.isKnown() &&
+        (CB->IsSubtype(ValueType.Klass, ElementKlass) ||
+         ValueType.Interfaces.contains(ElementKlass))) {
+      Folds.push_back(
+          {StoreCB, ConstantInt::getTrue(StoreCB->getType())});
+    }
+
+    // Deliberately do not fold an incompatible value to false. JavaType does
+    // not model nullability, so an apparently incompatible value may still be
+    // null at runtime, in which case the array store check must succeed.
   }
 
   // --- Apply all folds ---

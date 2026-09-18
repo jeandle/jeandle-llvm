@@ -175,6 +175,6 @@ unwind:
 ; CHECK-NEXT: call coldcc ptr addrspace(1) @llvm.experimental.gc.relocate.p1(token %[[OBSERVE_TOKEN]], i32 0, i32 0)
 ; CHECK-NEXT: call coldcc ptr addrspace(1) @llvm.experimental.gc.relocate.p1(token %[[OBSERVE_TOKEN]], i32 1, i32 1)
 
-attributes #0 = { noinline "lower-phase"="1" }
+attributes #0 = { noinline "lower-phase"="2" }
 
 !java-method-compilation = !{}

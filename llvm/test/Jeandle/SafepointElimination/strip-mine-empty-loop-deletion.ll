@@ -4,7 +4,7 @@
 ; RUN:   -S < %s \
 ; RUN:   | FileCheck %s --check-prefix=ATOMIC
 ; RUN: opt -verify-each \
-; RUN:   -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-poll-elimination<loop-deletion-prep>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>,safepoint-poll-elimination<loop-deletion-prep>),java-operation-lower<phase=1>,default<O3>,rewrite-statepoints-for-gc,verify' \
+; RUN:   -passes='function(early-cse,instcombine,loop-simplify,lcssa,safepoint-poll-elimination<loop-deletion-prep>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>,safepoint-poll-elimination<loop-deletion-prep>),java-operation-lower<phase=2>,default<O3>,rewrite-statepoints-for-gc,verify' \
 ; RUN:   -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -S < %s | FileCheck %s --check-prefix=O3
 ; RUN: opt -verify-each \

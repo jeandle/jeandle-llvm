@@ -1,7 +1,7 @@
 ; RUN: opt -passes='loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>,verify<jeandle-safepoint-coverage>' \
 ; RUN:   -jeandle-verify-safepoint-coverage=fatal \
 ; RUN:   -S < %s | FileCheck %s
-; RUN: opt -passes='function(loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>),java-operation-lower<phase=1>,rewrite-statepoints-for-gc,verify' \
+; RUN: opt -passes='function(loop-simplify,lcssa,loop-rotate,safepoint-poll-elimination<early>,safepoint-strip-mining<strip-mining>,safepoint-poll-elimination<after-strip-mining>),java-operation-lower<phase=2>,rewrite-statepoints-for-gc,verify' \
 ; RUN:   -S < %s | FileCheck %s --check-prefix=STATEPOINT
 
 ; A frontend can represent an unchanged local such as `this` with a header phi
@@ -42,7 +42,7 @@ exit:
 
 !java-method-compilation = !{}
 
-attributes #0 = { "lower-phase"="1" "noinline" }
+attributes #0 = { "lower-phase"="2" "noinline" }
 
 ; CHECK-LABEL: @invariant_self_phi(
 ; CHECK:       body:
