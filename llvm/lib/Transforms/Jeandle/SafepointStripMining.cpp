@@ -288,8 +288,13 @@ std::optional<StripMineShape> checkStripMineShape(Loop *L, const IVInfo &IV,
 
   const SCEV *Start = IV.AR->getStart();
   const SCEV *Limit = SE.getSCEV(ExitCmp->getOperand(LimitIdx));
+  // Widening an inclusive int loop can produce a != zext(limit + 1)
+  // exit. Refine the expression using its dominating guards as well as
+  // querying direct implication, without assuming the != exit is reachable.
   bool FirstIterationGuaranteed =
-      SE.isLoopEntryGuardedByCond(L, ContinuePred, Start, Limit);
+      SE.isLoopEntryGuardedByCond(L, ContinuePred, Start, Limit) ||
+      SE.isKnownPredicate(ContinuePred, SE.applyLoopGuards(Start, L),
+                          SE.applyLoopGuards(Limit, L));
   // NE is equivalent to the normalized relational predicate only when the
   // entry order and unit step prove that the IV reaches the limit without
   // passing it. A post-tested skeleton preserves the mandatory first
@@ -384,15 +389,37 @@ struct DeoptBoundaryValue {
   // Outermost-to-innermost casts from Original down to OriginalRoot. Applying
   // the plan walks this list in reverse and memoizes each rebuilt cast.
   SmallVector<CastInst *, 2> Casts;
+  // An entry poll is relocated to the next batch's entry, using this exact
+  // recurrence's outer phi (not a recurrence with the same latch operand).
+  PHINode *EntryPhi = nullptr;
 };
+
+// Splitting a conditional backedge through a poll block can make LoopRotate
+// choose that block as the header. Its poll then observes entry state rather
+// than latch state. Restrict this case to a poll preceded only by phis and
+// casts: a poll after an increment or other body instruction can mix current
+// and next state and must continue to use the conservative latch-state gate.
+bool isHeaderEntryPoll(CallInst *P, BasicBlock *Header) {
+  if (P->getParent() != Header)
+    return false;
+  for (Instruction &I : *Header) {
+    if (&I == P)
+      return true;
+    if (!isa<PHINode, CastInst>(I) && !I.isDebugOrPseudoInst())
+      return false;
+  }
+  return false;
+}
 
 // The relocated poll represents the next iteration at a batch boundary. A raw
 // header phi is normally current-iteration state, even when it also happens to
-// be the latch input of another copy/swap recurrence. The one safe exception is
-// an invariant self recurrence. Other operands must either be loop-invariant,
-// a latch-carried next value, or a pure cast chain rooted at such a next value.
-// The returned plans are consumed verbatim during relocation, keeping the
-// eligibility proof and materialization behavior in sync.
+// be the latch input of another copy/swap recurrence. An invariant self
+// recurrence is safe; a header-entry poll is also supported by relocating it
+// to the batch entry rather than its latch. Other operands must be
+// loop-invariant, a latch-carried next value, or a pure cast chain rooted at
+// such a next value. The returned plans are consumed verbatim during
+// relocation, keeping the eligibility proof and materialization behavior in
+// sync.
 std::optional<SmallVector<DeoptBoundaryValue, 8>>
 analyzeDeoptBoundaryValues(CallInst *P, Loop *L, BasicBlock *Header,
                            BasicBlock *Latch) {
@@ -400,6 +427,7 @@ analyzeDeoptBoundaryValues(CallInst *P, Loop *L, BasicBlock *Header,
   auto OB = P->getOperandBundle(LLVMContext::OB_deopt);
   if (!OB)
     return Plans;
+  bool EntryPoll = isHeaderEntryPoll(P, Header);
   for (const Use &U : OB->Inputs) {
     Value *V = U.get();
     if (L->isLoopInvariant(V)) {
@@ -410,6 +438,11 @@ analyzeDeoptBoundaryValues(CallInst *P, Loop *L, BasicBlock *Header,
       if (Value *Initial =
               getLoopInvariantSelfRecurrenceInitial(Phi, L, Header, Latch)) {
         Plans.push_back({V, V, Initial, nullptr, {}});
+        continue;
+      }
+      if (EntryPoll) {
+        Plans.push_back(
+            {V, V, Phi, Phi->getIncomingValueForBlock(Latch), {}, Phi});
         continue;
       }
       return std::nullopt;
@@ -430,6 +463,11 @@ analyzeDeoptBoundaryValues(CallInst *P, Loop *L, BasicBlock *Header,
       if (Value *Initial =
               getLoopInvariantSelfRecurrenceInitial(Phi, L, Header, Latch)) {
         Plans.push_back({V, Root, Initial, nullptr, std::move(Casts)});
+        continue;
+      }
+      if (EntryPoll) {
+        Plans.push_back({V, Root, Phi, Phi->getIncomingValueForBlock(Latch),
+                         std::move(Casts), Phi});
         continue;
       }
       return std::nullopt;
@@ -555,6 +593,7 @@ struct StripMinePlan {
   uint64_t ChunkIters;
   Value *InitVal;
   Value *Limit;
+  bool PollAtEntry;
 
   /// Pre-condition re-check queued before applying: this plan still matches the
   /// IR (loop/header/latch/exiting/exit identity, exit-branch wiring, poll
@@ -801,6 +840,10 @@ buildStripMinePlanWithIV(Loop *L, const IVInfo &IV, ICmpInst *ExitCmp,
     HeaderPhis.push_back({&Phi, Phi.getIncomingValueForBlock(Shape.Preheader),
                           Phi.getIncomingValueForBlock(Shape.Latch)});
 
+  bool PollAtEntry =
+      llvm::any_of(*DeoptBoundaryValues, [](const DeoptBoundaryValue &V) {
+        return V.EntryPhi != nullptr;
+      });
   return StripMinePlan{L,
                        Shape,
                        IV.Phi,
@@ -816,7 +859,8 @@ buildStripMinePlanWithIV(Loop *L, const IVInfo &IV, ICmpInst *ExitCmp,
                        IsSigned,
                        N,
                        InitVal,
-                       Limit};
+                       Limit,
+                       PollAtEntry};
 }
 
 std::optional<StripMinePlan>
@@ -917,7 +961,8 @@ bool StripMinePlan::stillStructurallyValid(LoopInfo &LI,
     return false;
   if (!jeandle::isSafepointPoll(*PollToMove) || !PollToMove->getParent() ||
       LI.getLoopFor(PollToMove->getParent()) != L ||
-      !DT.dominates(PollToMove->getParent(), Shape.Latch))
+      !DT.dominates(PollToMove->getParent(), Shape.Latch) ||
+      (PollAtEntry && !isHeaderEntryPoll(PollToMove, Shape.Header)))
     return false;
   if (ExitCmp->getParent() != Shape.ExitingBB || !ExitCmp->hasOneUse() ||
       ExitCmp->getOperand(Shape.LimitOperandIdx) != Limit ||
@@ -968,7 +1013,7 @@ bool StripMinePlan::stillStructurallyValid(LoopInfo &LI,
         return false;
       const DeoptBoundaryValue &Boundary = DeoptBoundaryValues[I];
       if (!Boundary.OriginalRoot) {
-        if (Boundary.BoundaryBase || Boundary.LatchValue ||
+        if (Boundary.BoundaryBase || Boundary.LatchValue || Boundary.EntryPhi ||
             !Boundary.Casts.empty())
           return false;
         continue;
@@ -981,6 +1026,15 @@ bool StripMinePlan::stillStructurallyValid(LoopInfo &LI,
       }
       if (Root != Boundary.OriginalRoot)
         return false;
+      if (Boundary.EntryPhi) {
+        if (!isHeaderEntryPoll(PollToMove, Shape.Header) ||
+            Root != Boundary.EntryPhi || Root != Boundary.BoundaryBase ||
+            Boundary.EntryPhi->getParent() != Shape.Header ||
+            Boundary.EntryPhi->getIncomingValueForBlock(Shape.Latch) !=
+                Boundary.LatchValue)
+          return false;
+        continue;
+      }
       if (Boundary.LatchValue) {
         if (Boundary.BoundaryBase != Boundary.LatchValue ||
             Root != Boundary.LatchValue ||
@@ -1231,36 +1285,41 @@ static Loop *reparentAsOuterLoop(Loop *L, BasicBlock *OuterPH,
   return OuterL;
 }
 
-// Relocate the planned back-edge poll onto the outer back-edge, immediately
+// Relocate the poll to the matching outer iteration boundary, immediately
 // before OuterBr: clone it with the deopt operands remapped to the outer
-// recurrences, and tag the clone as the strip-mined poll. Latch-carried next
-// values are remapped to the outer PHIs; optimizer-introduced cast chains are
-// rebuilt from those outer values and cached in Remap. A loop-invariant latch
-// value (e.g. a phi whose latch operand is a constant) is skipped: it needs no
-// remap, and keying Remap on it would spuriously rewrite an unrelated but equal
-// constant elsewhere in the deopt bundle. The bci/frame layout in the deopt
-// bundle is carried over verbatim — no LLVM pass may synthesize a poll, only
-// relocate one. The strip-mined-poll attribute is the contract the coverage
-// verifier trusts without re-deriving the bound, and the marker the
+// recurrences, and tag the clone as the strip-mined poll. Entry-state phis
+// map by identity to the current outer phis at the batch entry. Latch-carried
+// next values are remapped to the outer PHIs; optimizer-introduced cast chains
+// are rebuilt from those outer values and cached in Remap. A loop-invariant
+// latch value (e.g. a phi whose latch operand is a constant) is skipped: it
+// needs no remap, and keying Remap on it would spuriously rewrite an unrelated
+// but equal constant elsewhere in the deopt bundle. The bci/frame layout in the
+// deopt bundle is carried over verbatim — no LLVM pass may synthesize a poll,
+// only relocate one. The strip-mined-poll attribute is the contract the
+// coverage verifier trusts without re-deriving the bound, and the marker the
 // after-strip-mining poll elimination keys on; marking the poll itself means
 // the marker cannot outlive the coverage it certifies.
-static void relocatePollToOuterLatch(StripMinePlan &Plan, Value *OuterIVNext,
-                                     ArrayRef<PHINode *> OuterReducNext,
-                                     BranchInst *OuterBr) {
+static void relocatePollToOuterBoundary(StripMinePlan &Plan, Value *OuterIV,
+                                        ArrayRef<PHINode *> OuterReducs,
+                                        BranchInst *OuterBr) {
   Loop *L = Plan.L;
   const StripMineShape &Shape = Plan.Shape;
   CallInst *PollToMove = Plan.PollToMove;
   ArrayRef<PHINode *> LiftedHeaderPhis = Plan.LiftedHeaderPhis;
 
   DenseMap<Value *, Value *> Remap;
+  DenseMap<PHINode *, Value *> EntryRemap;
+  EntryRemap[Plan.IVPhi] = OuterIV;
   auto addRemap = [&](Value *LatchVal, Value *Outer) {
     if (!L->isLoopInvariant(LatchVal))
       Remap[LatchVal] = Outer;
   };
-  addRemap(Plan.IVPhi->getIncomingValueForBlock(Shape.Latch), OuterIVNext);
-  for (size_t I = 0; I < LiftedHeaderPhis.size(); ++I)
+  addRemap(Plan.IVPhi->getIncomingValueForBlock(Shape.Latch), OuterIV);
+  for (size_t I = 0; I < LiftedHeaderPhis.size(); ++I) {
     addRemap(LiftedHeaderPhis[I]->getIncomingValueForBlock(Shape.Latch),
-             OuterReducNext[I]);
+             OuterReducs[I]);
+    EntryRemap[LiftedHeaderPhis[I]] = OuterReducs[I];
+  }
   SmallVector<OperandBundleDef, 1> Bundles;
   if (auto OB = PollToMove->getOperandBundle(LLVMContext::OB_deopt)) {
     assert(OB->Inputs.size() == Plan.DeoptBoundaryValues.size() &&
@@ -1273,7 +1332,10 @@ static void relocatePollToOuterLatch(StripMinePlan &Plan, Value *OuterIVNext,
       }
 
       Value *Remapped = Boundary.BoundaryBase;
-      if (auto It = Remap.find(Boundary.BoundaryBase); It != Remap.end())
+      if (Boundary.EntryPhi) {
+        Remapped = EntryRemap.lookup(Boundary.EntryPhi);
+        assert(Remapped && "entry recurrence has no outer value");
+      } else if (auto It = Remap.find(Boundary.BoundaryBase); It != Remap.end())
         Remapped = It->second;
       else
         assert(L->isLoopInvariant(Boundary.BoundaryBase) &&
@@ -1521,11 +1583,17 @@ void applyStripMinePlan(StripMinePlan &Plan, LoopInfo &LI, DominatorTree &DT,
   rewireInnerHeaderForBatch(Plan, Frame);
   buildOuterLatch(Plan, Ty, Limit, Frame);
 
-  // Relocate the back-edge poll onto the outer back-edge (cloned, with its
-  // deopt state remapped to the outer recurrences and tagged as the
-  // strip-mined poll that certifies the inner loop's bounded coverage).
-  relocatePollToOuterLatch(Plan, Frame.OuterIVNext, Frame.OuterReducNext,
-                           Frame.OuterBr);
+  // Preserve the poll's iteration boundary. An entry poll must stay after the
+  // outer entry test: moving it to the outer latch could deopt into an extra
+  // iteration on the final exit. Its raw header phis map to the outer current
+  // recurrences, while a latch poll continues to use the outer next values.
+  if (Plan.PollAtEntry)
+    relocatePollToOuterBoundary(
+        Plan, Frame.OuterIV, Frame.OuterReducPhis,
+        cast<BranchInst>(Frame.InnerEntry->getTerminator()));
+  else
+    relocatePollToOuterBoundary(Plan, Frame.OuterIVNext, Frame.OuterReducNext,
+                                Frame.OuterBr);
 
   // Rewrite the primary-exit LCSSA PHI incomings to the outer skeleton's exit
   // boundary, using the recurrence role recorded by the plan.
