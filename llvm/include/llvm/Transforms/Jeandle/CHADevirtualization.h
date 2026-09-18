@@ -34,7 +34,7 @@ namespace jeandle {
 //     Bit 2: target->can_be_statically_bound()
 //     Bits 3..31: target->signature()->count()
 //
-// Regular Java invoke opt and MethodHandle _invokebasic intrinsic:
+// Regular Java invoke opt result:
 //   ConstraintOrHolder: receiver constraint Klass* required by the optimized
 //     target.
 //   Method: optimized target method, ciMethod*.
