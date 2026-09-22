@@ -1,5 +1,5 @@
 ; RUN: opt -S -passes="function(arraycopy-specialization),java-operation-lower<phase=1>" -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog %s 2>&1 | FileCheck %s
-; RUN: opt -S -passes="function(arraycopy-specialization),java-operation-lower<phase=1>" -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog %s 2>&1 | llc -mtriple=aarch64-linux-gnu -O2 -o - | FileCheck %s --check-prefix=AARCH64
+; RUN: %if aarch64-registered-target %{ opt -S -passes="function(arraycopy-specialization),java-operation-lower<phase=1>" -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog %s 2>&1 | llc -mtriple=aarch64-linux-gnu -O2 -o - | FileCheck %s --check-prefix=AARCH64 %}
 
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-p3:32:32:32-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"
 target triple = "aarch64-unknown-linux-gnu"
