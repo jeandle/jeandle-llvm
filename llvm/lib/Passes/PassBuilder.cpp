@@ -279,6 +279,7 @@
 #include "llvm/Transforms/Jeandle/JeandleNarrowOopMarker.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeIterative.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeTransform.h"
+#include "llvm/Transforms/Jeandle/PostPEACleanup.h"
 #include "llvm/Transforms/Jeandle/ProfileDevirtualization.h"
 #include "llvm/Transforms/Jeandle/RecoverTypeInfo.h"
 #include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"

@@ -23,6 +23,7 @@
 #include "llvm/Transforms/Jeandle/JeandleNarrowOopMarker.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeIterative.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeTransform.h"
+#include "llvm/Transforms/Jeandle/PostPEACleanup.h"
 #include "llvm/Transforms/Jeandle/ProfileDevirtualization.h"
 #include "llvm/Transforms/Jeandle/RecoverTypeInfo.h"
 #include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"
@@ -289,6 +290,9 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     //       rounds.
     PM.addPass(createModuleToFunctionPassAdaptor(PartialEscapeIterative()));
   }
+  // Keep frontend materialization markers through every PEA round. Remove them
+  // here even if PEA is disabled or its iteration count is zero.
+  PM.addPass(createModuleToFunctionPassAdaptor(PostPEACleanup()));
   // Post-inline type recovery + TCE — unconditional. Runs for both PEA-on
   // (cleans up PEA's materializations) and PEA-off (the default config) so
   // RecoverTypeInfo re-attaches !java-klass metadata stripped by the inline

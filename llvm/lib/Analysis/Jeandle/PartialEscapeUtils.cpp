@@ -134,7 +134,6 @@ bool isPEAHandledNonEscapingIntrinsic(const IntrinsicInst *II) {
   case Intrinsic::dbg_value:
   case Intrinsic::dbg_label:
   case Intrinsic::donothing:
-  case Intrinsic::sideeffect:
   case Intrinsic::var_annotation:
   case Intrinsic::is_constant:
   case Intrinsic::expect:
@@ -145,6 +144,9 @@ bool isPEAHandledNonEscapingIntrinsic(const IntrinsicInst *II) {
   case Intrinsic::strip_invariant_group:
   case Intrinsic::ptr_annotation:
     return true;
+  case Intrinsic::sideeffect:
+    // Materialization markers use the existing generic virtual-operand path.
+    return !II->getOperandBundle("jeandle.pea.materialize").has_value();
   default:
     return false;
   }
