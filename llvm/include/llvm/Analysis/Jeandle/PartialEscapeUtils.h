@@ -354,6 +354,7 @@ bool isJeandlePostBarrier(const CallBase *CB);
 bool isJeandleMonitorEnter(const CallBase *CB);
 bool isJeandleMonitorExit(const CallBase *CB);
 bool isJeandleRegisterFinalizerIfNeeded(const CallBase *CB);
+bool isJeandleArrayCopyPseudoCall(const CallBase *CB);
 
 // Whether processIntrinsic treats II's ordinary operands and non-deopt operand
 // bundles as non-escaping. Deopt bundles remain executable frame state and

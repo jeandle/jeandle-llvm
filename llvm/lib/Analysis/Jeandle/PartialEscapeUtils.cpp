@@ -27,6 +27,7 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Operator.h"
@@ -66,6 +67,19 @@ bool isJeandleNewArray(const CallBase *CB) {
 
 bool isJeandleAllocation(const CallBase *CB) {
   return isJeandleNewInstance(CB) || isJeandleNewArray(CB);
+}
+
+bool isJeandleArrayCopyPseudoCall(const CallBase *CB) {
+  if (!isJeandleCallNamed(CB, "jeandle.arraycopy"))
+    return false;
+  // The callee is shared by the copyOf / copyOfRange / clone pseudo calls,
+  // which encode byte offsets and payload sizes in the same nine-argument
+  // layout. Only the plain "arraycopy" kind carries element-index semantics;
+  // every other kind must not be decoded as (src, srcPos, dest, destPos,
+  // length).
+  llvm::Attribute KindAttr = CB->getFnAttr(jeandle::Attribute::ArrayCopyKind);
+  return KindAttr.isValid() && KindAttr.getValueAsString() ==
+                                   jeandle::Attribute::ArrayCopyKindArrayCopy;
 }
 
 bool isJeandleArrayLength(const CallBase *CB) {
