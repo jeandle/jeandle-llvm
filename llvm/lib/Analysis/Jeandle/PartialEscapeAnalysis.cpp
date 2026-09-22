@@ -68,6 +68,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
@@ -1835,10 +1836,18 @@ private:
   void checkRawHeaderAccess(const Instruction *I, Value *Ptr,
                             jeandle::ObjectID BaseID);
   // TODO(unsafe-inliner): processAtomicRMW / processCmpXchg (re-add with the
-  // jeandle-jdk frontend inliner for Unsafe atomic intrinsics),
-  // processArrayCopy (System.arraycopy → llvm.memcpy/memmove), processMemSet
+  // jeandle-jdk frontend inliner for Unsafe atomic intrinsics), processMemSet
   // (Arrays.fill → llvm.memset). Until then these shapes fall through to
   // conservative materialization.
+  // Handle the jeandle.arraycopy pseudo call (kind="arraycopy"). Folds a
+  // validated, provably in-bounds copy between two virtual arrays into
+  // FieldStates updates and deletes the call (ReplaceCallEffect owned by the
+  // destination object); otherwise explicitly materializes the two array
+  // operands at the call — the runtime never captures either array, but a
+  // surviving copy needs real memory on both sides. Always accounts for every
+  // ordinary virtual operand; the caller follows up with the deopt-bundle
+  // pass (record + materialize-unhandled), mirroring the intrinsic path.
+  void processArrayCopy(CallBase *CB);
   // Dispatch one jeandle JavaOp call to its fold handler below. Returns true
   // iff the op was folded; an unrecognized op returns false so the caller
   // takes the generic escape path.
@@ -5372,8 +5381,10 @@ void Analyzer::processInstruction(Instruction *I) {
     }
     // TODO(deferred-virtualizers): deferred virtualization handlers — NOT WIRED
     // yet:
-    //   - TODO: processArrayCopy / processMemSet — llvm.memcpy/memmove
-    //     (System.arraycopy) and llvm.memset (Arrays.fill). The only
+    //   - processArrayCopy: IMPLEMENTED — the jeandle.arraycopy pseudo call
+    //     (kind="arraycopy") reaches PEA BEFORE ArrayCopySpecialization and is
+    //     dispatched below, ahead of the JavaOp fold.
+    //   - TODO: processMemSet — llvm.memset (Arrays.fill). The only
     //     llvm.memset producer today is jeandle.new_instance's lower-phase=1
     //     template, inlined AFTER PEA, so neither shape reaches PEA yet.
     //   - TODO: llvm.reachability_fence — upstream LLVM this fork tracks
@@ -5427,21 +5438,41 @@ void Analyzer::processInstruction(Instruction *I) {
       if (foldICmpEquality(ICmp))
         return;
     }
-    // Recognise JavaOps that read/inspect a virtual receiver and try to
-    // constant-fold them. processJavaOp returns true if the JavaOp was
-    // handled (whether by folding to a constant or by being a known-safe
-    // non-escaping shape that needs no transform).
+    // The System.arraycopy pseudo call is NOT a JavaOp (no lower-phase
+    // attribute; ArrayCopySpecialization expands it after PEA), so it gets
+    // its own dispatch ahead of processJavaOp. Unlike a foldable JavaOp, the
+    // pseudo call is an invoke that CARRIES a deopt bundle (its callsite
+    // attributes request an exception edge and GC state), so the bundle pass
+    // must both describe AND materialize-unhandled — the same sequence the
+    // handled-intrinsic path runs — rather than the JavaOp path's record-only
+    // sequence (which is latent precisely because no foldable JavaOp carries
+    // a bundle). processArrayCopy always accounts for every ordinary virtual
+    // operand: it folds the call (deleting it together with its bundle) or
+    // materializes the two array operands inside the handler.
     if (auto *CB = dyn_cast<CallBase>(I)) {
+      if (jeandle::pea::isJeandleArrayCopyPseudoCall(CB)) {
+        processArrayCopy(CB);
+        recordDeoptBundleMappings(CB);
+        materializeUnhandledDeoptBundleOperands(CB);
+        return;
+      }
+      // Recognise JavaOps with PEA-specific semantics. Most read/inspect a
+      // virtual receiver and can be folded; ensure_materialized_for_stack_walk
+      // deliberately does the opposite and turns its virtual argument into a
+      // real object at this program point. processJavaOp returns true once all
+      // virtual operands have been accounted for.
       if (processJavaOp(CB)) {
         // The call was folded / is a known-safe shape. It may still SURVIVE
         // with a deopt bundle (the fold effect can be dropped at commit when
-        // the VO becomes ineligible), so its bundle operands must be
-        // recorded: VOs describable here stay virtual; the rest are handled
-        // by the generic escape path when their effects survive. When the
-        // fold survives, the rewrite no-ops at apply (the bundle died with
-        // the call). No foldable JavaOp carries a deopt bundle, so this path
-        // is latent.
+        // the VO becomes ineligible), so its bundle operands must be handled
+        // independently: describable VOs stay virtual, while operands not
+        // covered by the deopt-pool plan are materialized at this call. Do this
+        // explicitly because this branch returns before the generic escape
+        // path. If the fold survives, the rewrite effect no-ops at apply
+        // because the call/bundle is deleted; if it does not, the surviving
+        // call has a valid deopt state.
         recordDeoptBundleMappings(CB);
+        materializeUnhandledDeoptBundleOperands(CB);
         return;
       }
       // Order: materialize the call's REAL virtual inputs BEFORE recording
@@ -7280,6 +7311,234 @@ bool Analyzer::processJavaOp(CallBase *CB) {
   if (isJeandleRegisterFinalizerIfNeeded(CB))
     return foldRegisterFinalizerIfNeeded(CB);
   return false;
+}
+
+// Whether a tracked source cell's FieldValue is a whole-element value for an
+// array whose LLVM element type is ElemTy at Scale bytes per element. A
+// narrower or wider scalar (e.g. an i8 store that landed exactly at a long[]
+// element offset) must not be forwarded as the whole element, and a reference
+// value may only be forwarded for a pointer element type. Semantic oop
+// scalars are recorded as AS1 values even when the physical slot is a narrow
+// (AS3) oop, so pointer-ness — not address-space equality — is the test.
+static bool isWholeElementFieldValue(const jeandle::FieldValue &FV,
+                                     Type *ElemTy, uint32_t Scale,
+                                     const DataLayout &DL) {
+  if (FV.isVirtualRef())
+    return ElemTy->isPointerTy();
+  if (FV.isMaterializedRef())
+    return ElemTy->isPointerTy() &&
+           jeandle::isJavaOopType(FV.getMaterialized()->getType());
+  if (!FV.isScalar())
+    return false;
+  Type *Ty = FV.getScalar()->getType();
+  if (ElemTy->isPointerTy())
+    return jeandle::isJavaOopType(Ty);
+  return !Ty->isPointerTy() && DL.getTypeStoreSize(Ty) == Scale;
+}
+
+static bool hasOverlappingField(const jeandle::VirtualObject &VO,
+                                int64_t Offset, uint32_t Size) {
+  for (const jeandle::VirtualObject::FieldDesc &Field : VO.Fields) {
+    std::optional<bool> Overlap = jeandle::pea::checkedRangesOverlap(
+        Field.Offset, Field.ByteSize, Offset, Size);
+    if (!Overlap || *Overlap)
+      return true;
+  }
+  return false;
+}
+
+void Analyzer::processArrayCopy(CallBase *CB) {
+  using namespace jeandle::pea;
+
+  // Resolve the two array operands. The klass arguments are C-heap pointers
+  // (the frontend reuses the allocation's klass operand or emits
+  // jeandle.load_klass, which PEA folds earlier) and the length arguments are
+  // integers, so only args 0 and 2 can denote virtual objects.
+  auto SrcID =
+      resolveVirtualRef(CB->getArgOperand(0), CurrentState, Aliases, DL);
+  auto DestID =
+      resolveVirtualRef(CB->getArgOperand(2), CurrentState, Aliases, DL);
+
+  // ---- Fold admission ------------------------------------------------------
+  // (a) Only the VALIDATED shape folds: the lowering emitted null / array /
+  //     negative-offset / bounds guards plus the oop-subtype guard ahead of
+  //     the call, so on this path the copy cannot throw and reference
+  //     elements are assignable. An unvalidated call may still trap and must
+  //     stay real for ArrayCopySpecialization.
+  bool CanFold = CB->hasFnAttr(jeandle::Attribute::ValidatedArrayCopy) &&
+                 SrcID && DestID && Eligible.lookup(*SrcID) &&
+                 Eligible.lookup(*DestID);
+  // (b) Constant element offsets and length.
+  const ConstantInt *SrcPos = nullptr;
+  const ConstantInt *DestPos = nullptr;
+  const ConstantInt *Length = nullptr;
+  if (CanFold) {
+    SrcPos = dyn_cast<ConstantInt>(CB->getArgOperand(1));
+    DestPos = dyn_cast<ConstantInt>(CB->getArgOperand(3));
+    Length = dyn_cast<ConstantInt>(CB->getArgOperand(4));
+    CanFold = SrcPos && DestPos && Length;
+  }
+  const jeandle::VirtualObject *SrcVO = nullptr;
+  const jeandle::VirtualObject *DestVO = nullptr;
+  int64_t SrcPosV = 0, DestPosV = 0, LenV = 0;
+  if (CanFold) {
+    SrcVO = Result.VirtualObjects[*SrcID].get();
+    DestVO = Result.VirtualObjects[*DestID].get();
+    // (c) Both operands are virtual arrays with identical element layouts.
+    //     Identical LLVM element types reject width and primitive/oop
+    //     mismatches up front (int[]→long[], int[]→Object[], ...);
+    //     same-typed reference arrays (String[]→Object[]) share the pointer
+    //     element type and are admitted — the validated subtype guard covers
+    //     their assignability.
+    CanFold = SrcVO->isArray() && DestVO->isArray() &&
+              SrcVO->ArrayElementType == DestVO->ArrayElementType &&
+              SrcVO->ArrayIndexScale == DestVO->ArrayIndexScale &&
+              SrcVO->ArrayIndexScale > 0;
+  }
+  if (CanFold) {
+    SrcPosV = SrcPos->getSExtValue();
+    DestPosV = DestPos->getSExtValue();
+    LenV = Length->getSExtValue();
+    const int64_t MaxElem = VMConsts.arrayCopyLoadStoreMaxElem();
+    // (d) Bounds are re-verified here rather than trusted from the lowering
+    //     guards: a non-negative constant length against the two virtual
+    //     arrays' known constant lengths proves this copy cannot throw,
+    //     which is what licenses deleting the call together with its
+    //     exception edge. ArrayLength is uint32_t, so every term stays well
+    //     inside int64_t.
+    CanFold = LenV >= 0 && LenV <= MaxElem && SrcPosV >= 0 && DestPosV >= 0 &&
+              SrcPosV <= static_cast<int64_t>(SrcVO->ArrayLength) &&
+              DestPosV <= static_cast<int64_t>(DestVO->ArrayLength) &&
+              LenV <= static_cast<int64_t>(SrcVO->ArrayLength) - SrcPosV &&
+              LenV <= static_cast<int64_t>(DestVO->ArrayLength) - DestPosV;
+  }
+
+  if (CanFold) {
+    jeandle::VirtualObject &DestObj = *Result.VirtualObjects[*DestID];
+    Type *ElemTy = DestObj.ArrayElementType;
+    const uint32_t Scale = DestObj.ArrayIndexScale;
+    // Untracked source elements hold the Java default (zero / null) — a
+    // virtual array is zero-initialized and any store that could not be
+    // tracked forced materialization. Reference defaults use the semantic
+    // AS1 null (processStore's normalization); the physical narrow-oop slot
+    // re-encodes at materialization replay.
+    Constant *DefaultVal;
+    if (ElemTy->isPointerTy())
+      DefaultVal = ConstantPointerNull::get(PointerType::get(
+          F.getContext(), jeandle::AddrSpace::JavaHeapAddrSpace));
+    else
+      DefaultVal = Constant::getNullValue(ElemTy);
+
+    // ---- Pass 1: snapshot the source cells and validate every destination
+    // slot. Snapshotting BEFORE any destination write gives memmove
+    // semantics for a src==dest copy (overlapping or identical ranges), as
+    // System.arraycopy specifies. Values are copied by value: with
+    // src==dest the destination writes mutate the source's own maps, so a
+    // pointer into FieldDefinitions would dangle. Nothing here is visible
+    // downstream unless every cell passes: FieldStates is only written in
+    // pass 2, and FieldDesc slots created by getOrCreateFieldIndex are
+    // inert on a bail because the conservative path materializes the
+    // destination at this call.
+    SmallVector<jeandle::FieldValue, 8> Values;
+    SmallVector<FieldDefinitionSet, 8> Defs;
+    SmallVector<int64_t, 8> DestOffsets;
+    Values.reserve(LenV);
+    Defs.reserve(LenV);
+    DestOffsets.reserve(LenV);
+    for (int64_t Idx = 0; Idx < LenV && CanFold; ++Idx) {
+      // srcPosV + Idx <= ArrayLength < 2^32: no overflow.
+      std::optional<int64_t> SrcOff = checkedArrayElementOffset(
+          SrcVO->ArrayBaseOffset, SrcPosV + Idx, Scale);
+      std::optional<int64_t> DestOff = checkedArrayElementOffset(
+          DestObj.ArrayBaseOffset, DestPosV + Idx, Scale);
+      if (!SrcOff || !DestOff || !isUsableFieldOffset(*SrcOff) ||
+          !isUsableFieldOffset(*DestOff)) {
+        CanFold = false;
+        break;
+      }
+      // Create / validate the destination's physical element slot. -1
+      // (overlap conflict, non-atomic type, unrepresentable offset) bails
+      // the whole fold. Every tracked FieldStates offset must carry a
+      // FieldDesc — the materialization snapshot asserts one per cell.
+      if (DestObj.getOrCreateFieldIndex(*DestOff, ElemTy, DL) < 0) {
+        CanFold = false;
+        break;
+      }
+      DestOffsets.push_back(*DestOff);
+      auto FSIt = FieldStates.find(*SrcID);
+      if (FSIt != FieldStates.end()) {
+        auto It = FSIt->second.find(*SrcOff);
+        if (It != FSIt->second.end()) {
+          if (!isWholeElementFieldValue(It->second, ElemTy, Scale, DL)) {
+            CanFold = false;
+            break;
+          }
+          Values.push_back(It->second);
+          Defs.emplace_back();
+          if (auto DIt = FieldDefinitions.find(*SrcID);
+              DIt != FieldDefinitions.end()) {
+            auto OIt = DIt->second.find(*SrcOff);
+            if (OIt != DIt->second.end())
+              Defs.back().insert(OIt->second.begin(), OIt->second.end());
+          }
+          continue;
+        }
+        // A source field can overlap the element without being keyed at the
+        // element start (for example, a raw i8 store into a long element).
+        // Such a partial/wider representation cannot be forwarded as the
+        // complete element; keep the call and materialize conservatively.
+        if (hasOverlappingField(*SrcVO, *SrcOff, Scale)) {
+          CanFold = false;
+          break;
+        }
+      }
+      // Untracked source cell: the Java default value, no reaching store.
+      Values.push_back(jeandle::FieldValue::scalar(DefaultVal));
+      Defs.emplace_back();
+    }
+
+    if (CanFold) {
+      // ---- Pass 2: write the destination cells. A later load of a copied
+      // element folds through FieldStates; a later materialization of the
+      // destination replays these entries as real stores; a deopt snapshot
+      // describes them from the same state. The reaching definitions of the
+      // copied values are the SOURCE's stores (mirroring what a sequence of
+      // element stores would record), so observation-based store liveness
+      // keeps them alive where needed.
+      for (int64_t Idx = 0; Idx < LenV; ++Idx) {
+        FieldStates[*DestID][DestOffsets[Idx]] = Values[Idx];
+        if (Defs[Idx].empty()) {
+          FieldDefinitions[*DestID].erase(DestOffsets[Idx]);
+        } else {
+          FieldDefinitionSet &DstDefs =
+              FieldDefinitions[*DestID][DestOffsets[Idx]];
+          DstDefs.clear();
+          DstDefs.insert(Defs[Idx].begin(), Defs[Idx].end());
+        }
+      }
+      // Delete the call. The effect is owned by the DESTINATION: if dest
+      // later goes ineligible, the effect is dropped, the real call
+      // survives, and the commit-time surviving-use audit keeps src real as
+      // well (an ineligible owner's ReplaceCall target is not a removed
+      // use), so the runtime copy sees fully initialized memory on both
+      // sides. When the fold stands, neither array escapes through the
+      // copy — the C2 semantic of a validated ArrayCopyNode whose
+      // arguments stay NoEscape.
+      LLVM_DEBUG(dbgs() << "PEA: fold arraycopy VO(src)=" << *SrcID
+                        << " VO(dest)=" << *DestID << " len=" << LenV << " at "
+                        << *CB << "\n");
+      emitReplaceCall(CB, nullptr, *DestID);
+      return;
+    }
+  }
+
+  // ---- Conservative path: keep the call, materialize the arrays ----------
+  // The runtime never captures either array, but a surviving copy reads src
+  // and writes dest memory, so both need real addresses at this program
+  // point. This is exactly the pre-arraycopy-aware behavior of the generic
+  // escape stage (materialize every virtual argument), now made explicit;
+  // ArrayCopySpecialization expands the surviving call after PEA.
+  materializeVirtualCallArgs(CB);
 }
 
 void Analyzer::propagatePointerAlias(Instruction *I) {
