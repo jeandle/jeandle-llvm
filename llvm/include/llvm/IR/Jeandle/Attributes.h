@@ -82,7 +82,12 @@ public:
   static constexpr const char *ArrayCopyNegativeLengthGuard =
       "jeandle.arraycopy.negative-length-guard";
 
+  static constexpr const char *ArrayCopyTightlyCoupledAllocation =
+      "jeandle.arraycopy.tightly-coupled-allocation";
+
   static constexpr const char *ArrayCopyKindArrayCopy = "arraycopy";
+  static constexpr const char *ArrayCopyKindCopyOf = "copyof";
+  static constexpr const char *ArrayCopyKindCopyOfRange = "copyof-range";
   static constexpr const char *ArrayCopyKindCloneInst = "clone-inst";
   static constexpr const char *ArrayCopyKindCloneArray = "clone-array";
   static constexpr const char *ArrayCopyKindCloneOopArray = "clone-oop-array";

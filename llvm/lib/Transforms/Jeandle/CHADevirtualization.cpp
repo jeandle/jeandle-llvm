@@ -507,7 +507,13 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
                               ReceiverType.Exact, InvokeKind, /*OopId=*/-1);
   jeandle::CHAOptInfo OptInfo{ConstraintOrHolder, Method,
                               DeoptReasonOrTargetInfo, std::move(MethodName)};
-  if (OptInfo.constraint() == 0 ||
+  // _invokeBasic returns the MethodHandle encoding (a tagged target holder),
+  // while ordinary invokes return an untagged receiver constraint. Validate
+  // the encoding before accessing the corresponding view of CHAOptInfo.
+  bool HasExpectedEncoding =
+      IsInvokeBasic ? OptInfo.isMethodHandle()
+                    : !OptInfo.isMethodHandle() && OptInfo.constraint() != 0;
+  if (!HasExpectedEncoding ||
       !canGetOrInsertJavaMethodFunction(*M, OptInfo.MethodName,
                                         CB.getFunctionType(), OptInfo.Method)) {
     return false;

@@ -58,6 +58,26 @@ using ProfileDevirtualizationResult =
     std::tuple<ProfileDevirtualizationTargetResult, int64_t, uintptr_t, bool,
                ProfileDevirtualizationTargetResult>;
 
+/// Clone-instance scalarization has more than a boolean outcome. Keep the
+/// numeric values stable because callback logs record the status as an int.
+enum class CloneInstanceInfoStatus : int {
+  NotInstance = 0,
+  NotApplicable = 1,
+  TransformFailed = 2,
+  RequiresGCBarriers = 3,
+  Ready = 4,
+};
+
+/// Byte offset and JBasicType encoding for one non-static instance field.
+/// The type is not a HotSpot BasicType numeric value.
+using CloneInstanceFieldInfo = std::tuple<int, int>;
+
+/// Clone-instance status, C2 clone-instance field count, and all fields needed
+/// by scalarization. The count is kept separately because declined transforms
+/// do not need to materialize the field descriptions.
+using CloneInstanceInfoResult =
+    std::tuple<int, int, std::vector<CloneInstanceFieldInfo>>;
+
 /// GetMirrorKlass result used when the oop is not a constant Class mirror or
 /// its represented type is unavailable. Zero remains available to encode the
 /// known-null Klass field of a primitive Class mirror.
@@ -266,7 +286,10 @@ enum class JeandleInlineReason : int {
       (VMCallbackValueType::Long), 1)                                            \
   def(GetSecondarySupers, std::vector<uintptr_t>, Array,                         \
       (uintptr_t a1), (a1),                                                      \
-      (VMCallbackValueType::Uintptr), 1)
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetCloneInstanceInfo, CloneInstanceInfoResult, Tuple,                      \
+      (uintptr_t a1, bool a2), (a1, a2),                                         \
+      (VMCallbackValueType::Uintptr, VMCallbackValueType::Bool), 2)
 // clang-format on
 
 // =============================================================================
@@ -472,6 +495,14 @@ enum class JeandleInlineReason : int {
 ///   GetSecondarySupers
 ///                       — Returns the secondary super klass pointers of the
 ///                       input klass
+///   GetCloneInstanceInfo
+///                       — Returns one replayable observation containing the
+///                         clone-instance status, field count, and every
+///                         non-static field's byte offset and layout BasicType.
+///                         It also rechecks concurrent subclass loading,
+///                         records C2's leaf-type dependency, and reports
+///                         whether collector barriers require the bulk clone
+///                         expansion.
 
 struct VMCallbacks {
   ALL_JEANDLE_VM_CALLBACKS(DEF_VM_CALLBACK_FIELD)
