@@ -1,0 +1,6 @@
+RequiresStrictLockOrder = 1
+HasFinalizer 33333 = false
+CanVirtualize 33333 = true
+IsBoxed 33333 = 9
+ElementBasicTypeOfArrayKlass 22222 = 8
+ElementBasicTypeOfArrayKlass 22223 = 8
