@@ -24,7 +24,7 @@ namespace jeandle {
 //
 // This struct has two encodings, distinguished by ConstraintOrHolder bit 0.
 //
-// MethodHandle intrinsic invoke opt result:
+// MethodHandle intrinsic invoke opt result, including _invokeBasic:
 //   ConstraintOrHolder: target method holder with bit 0 set for validation.
 //     Clear bit 0 before using it as a Klass pointer.
 //   Method: optimized target method, ciMethod*.
@@ -34,7 +34,7 @@ namespace jeandle {
 //     Bit 2: target->can_be_statically_bound()
 //     Bits 3..31: target->signature()->count()
 //
-// Regular Java invoke opt and MethodHandle _invokebasic intrinsic:
+// Regular Java invoke opt result:
 //   ConstraintOrHolder: receiver constraint Klass* required by the optimized
 //     target.
 //   Method: optimized target method, ciMethod*.
@@ -58,6 +58,8 @@ struct CHAOptInfo {
   }
 
   bool isAccessor() const { return DeoptReasonOrTargetInfo & 2; }
+
+  bool isMethodHandle() const { return ConstraintOrHolder & 1; }
 
   uintptr_t constraint() const {
     assert(!isMethodHandle() && "should be regular invoke");
@@ -92,9 +94,6 @@ struct CHAOptInfo {
                                        Deoptimization::DeoptReason Reason) {
     return IsStatic | (IsAccessor << 1) | (Reason << 2);
   }
-
-private:
-  bool isMethodHandle() const { return ConstraintOrHolder & 1; }
 };
 
 } // namespace jeandle

@@ -1,0 +1,5 @@
+GetOopKlass 5 = 350
+IsInterface 350 = false
+GetSecondarySupers 350 = []
+GetCHAOptInfo 100 200 300 350 true 5 5 = (401, 500, 21, "Target_invoke(Ljava/lang/invoke/MethodHandle;Ljava/lang/Object;)Ljava/lang/Object;")
+UpdateCallSite 18 0 true 500 = true
