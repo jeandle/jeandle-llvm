@@ -47,6 +47,10 @@ STATISTIC(NumFieldsFolded, "Number of constant field loads folded");
 STATISTIC(NumKlassesFolded, "Number of jeandle.load_klass calls folded");
 STATISTIC(NumMirrorKlassesFolded,
           "Number of jeandle.load_mirror_klass calls folded");
+STATISTIC(NumClassIsArrayFolded,
+          "Number of jeandle.class_is_array calls folded");
+STATISTIC(NumClassIsInterfaceFolded,
+          "Number of jeandle.class_is_interface calls folded");
 STATISTIC(NumGetClassesFolded, "Number of jeandle.get_class calls folded");
 STATISTIC(NumKlassLayoutHelpersFolded,
           "Number of jeandle.layout_helper calls folded");
@@ -339,6 +343,18 @@ bool isLoadMirrorKlassCall(CallInst *CI) {
          CI->arg_size() == 1;
 }
 
+bool isClassIsArrayCall(CallInst *CI) {
+  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+  return Callee && Callee->getName() == "jeandle.class_is_array" &&
+         CI->arg_size() == 1;
+}
+
+bool isClassIsInterfaceCall(CallInst *CI) {
+  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+  return Callee && Callee->getName() == "jeandle.class_is_interface" &&
+         CI->arg_size() == 1;
+}
+
 bool isLayoutHelperCall(CallInst *CI) {
   Function *Callee = CI ? CI->getCalledFunction() : nullptr;
   return Callee && Callee->getName() == "jeandle.layout_helper" &&
@@ -460,6 +476,75 @@ bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
     return false;
 
   CI->replaceAllUsesWith(KlassConstant);
+  CI->eraseFromParent();
+  return true;
+}
+
+// Evaluate a Class query over a bounded set of constant mirrors. The existing
+// ConstOop lattice intentionally loses identity when different constants merge;
+// a query can still fold when all incoming classes share the queried property.
+enum class ClassQueryKind { IsArray, IsInterface };
+
+std::optional<bool> classQueryForMirror(Value *Mirror, ClassQueryKind Kind,
+                                        const jeandle::VMCallbacks &CB,
+                                        const DenseMap<Value *, int> &ConstOops,
+                                        SmallPtrSetImpl<Value *> &Active) {
+  if (std::optional<int> OopId = lookupConstOop(Mirror, ConstOops)) {
+    uintptr_t Klass = CB.GetMirrorKlass(*OopId);
+    if (Klass == jeandle::MirrorKlassUnavailable)
+      return std::nullopt;
+    if (Klass == 0)
+      return false;
+    if (Kind == ClassQueryKind::IsInterface)
+      return CB.IsInterface(Klass);
+    int LayoutHelper = CB.GetKlassLayoutHelper(Klass);
+    if (LayoutHelper == 0)
+      return std::nullopt;
+    return LayoutHelper < 0;
+  }
+
+  if (Active.size() >= 32 || !Active.insert(Mirror).second)
+    return std::nullopt;
+
+  std::optional<bool> Result;
+  if (auto *SI = dyn_cast<SelectInst>(Mirror)) {
+    std::optional<bool> True =
+        classQueryForMirror(SI->getTrueValue(), Kind, CB, ConstOops, Active);
+    std::optional<bool> False =
+        classQueryForMirror(SI->getFalseValue(), Kind, CB, ConstOops, Active);
+    if (True && False && *True == *False)
+      Result = *True;
+  } else if (auto *PN = dyn_cast<PHINode>(Mirror)) {
+    for (Value *Incoming : PN->incoming_values()) {
+      std::optional<bool> Next =
+          classQueryForMirror(Incoming, Kind, CB, ConstOops, Active);
+      if (!Next || (Result && *Result != *Next)) {
+        Result = std::nullopt;
+        break;
+      }
+      Result = *Next;
+    }
+  }
+
+  Active.erase(Mirror);
+  return Result;
+}
+
+bool foldClassQueryCall(CallInst *CI, ClassQueryKind Kind,
+                        const jeandle::VMCallbacks &CB,
+                        const DenseMap<Value *, int> &ConstOops) {
+  if (!CI->getType()->isIntegerTy(32) || !CB.GetMirrorKlass ||
+      (Kind == ClassQueryKind::IsArray && !CB.GetKlassLayoutHelper) ||
+      (Kind == ClassQueryKind::IsInterface && !CB.IsInterface))
+    return false;
+
+  SmallPtrSet<Value *, 16> Active;
+  std::optional<bool> Result =
+      classQueryForMirror(CI->getArgOperand(0), Kind, CB, ConstOops, Active);
+  if (!Result)
+    return false;
+
+  CI->replaceAllUsesWith(ConstantInt::get(CI->getType(), *Result ? 1 : 0));
   CI->eraseFromParent();
   return true;
 }
@@ -729,6 +814,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
 
     SmallVector<CallInst *, 16> LoadKlassCalls;
     SmallVector<CallInst *, 16> LoadMirrorKlassCalls;
+    SmallVector<CallInst *, 16> ClassQueryCalls;
     SmallVector<CallInst *, 16> GetClassCalls;
     SmallVector<CallInst *, 16> LayoutHelperCalls;
     SmallVector<CallInst *, 16> KlassInitializedCalls;
@@ -740,6 +826,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
             LoadKlassCalls.push_back(CI);
           if (isLoadMirrorKlassCall(CI))
             LoadMirrorKlassCalls.push_back(CI);
+          if (isClassIsArrayCall(CI) || isClassIsInterfaceCall(CI))
+            ClassQueryCalls.push_back(CI);
           if (isGetClassCall(CI))
             GetClassCalls.push_back(CI);
           if (isLayoutHelperCall(CI))
@@ -769,6 +857,22 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
         continue;
       if (foldLoadMirrorKlassCall(CI, *CB, ConstOops)) {
         ++NumMirrorKlassesFolded;
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
+    for (CallInst *CI : ClassQueryCalls) {
+      if (CI->getParent() == nullptr)
+        continue;
+      ClassQueryKind Kind = isClassIsArrayCall(CI)
+                                ? ClassQueryKind::IsArray
+                                : ClassQueryKind::IsInterface;
+      if (foldClassQueryCall(CI, Kind, *CB, ConstOops)) {
+        if (Kind == ClassQueryKind::IsArray)
+          ++NumClassIsArrayFolded;
+        else
+          ++NumClassIsInterfaceFolded;
         RoundChanged = true;
         Changed = true;
       }
