@@ -12,9 +12,9 @@
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/PostOrderIterator.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/SimplifyQuery.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -38,6 +38,7 @@
 #include <climits>
 #include <cstring>
 #include <optional>
+#include <utility>
 
 #define DEBUG_TYPE "constant-field-folding"
 
@@ -47,10 +48,6 @@ STATISTIC(NumFieldsFolded, "Number of constant field loads folded");
 STATISTIC(NumKlassesFolded, "Number of jeandle.load_klass calls folded");
 STATISTIC(NumMirrorKlassesFolded,
           "Number of jeandle.load_mirror_klass calls folded");
-STATISTIC(NumClassIsArrayFolded,
-          "Number of jeandle.class_is_array calls folded");
-STATISTIC(NumClassIsInterfaceFolded,
-          "Number of jeandle.class_is_interface calls folded");
 STATISTIC(NumGetClassesFolded, "Number of jeandle.get_class calls folded");
 STATISTIC(NumKlassLayoutHelpersFolded,
           "Number of jeandle.layout_helper calls folded");
@@ -288,6 +285,84 @@ std::optional<int> lookupConstOop(Value *V,
   return It->second;
 }
 
+// A PHI/select may merge different constant mirrors even though every path
+// gives the same equality result. Ask the VM about object identity rather than
+// assuming that distinct oop-handle IDs denote distinct Java objects.
+using MirrorPair = std::pair<Value *, Value *>;
+using MirrorEqualityResults = DenseMap<MirrorPair, std::optional<int>>;
+
+std::optional<int> classMirrorEquality(Value *Left, Value *Right,
+                                       const jeandle::VMCallbacks &CB,
+                                       const DenseMap<Value *, int> &ConstOops,
+                                       MirrorEqualityResults &Results,
+                                       unsigned &Budget, unsigned Depth = 0) {
+  if (Budget == 0)
+    return std::nullopt;
+  --Budget;
+  MirrorPair Pair{Left, Right};
+  auto It = Results.find(Pair);
+  if (It != Results.end())
+    return It->second;
+  if (Depth >= 32)
+    return std::nullopt;
+
+  // Cache unknown results too; the initial entry conservatively breaks cycles.
+  Results.try_emplace(Pair, std::nullopt);
+  std::optional<int> Result;
+  std::optional<int> LeftId = lookupConstOop(Left, ConstOops);
+  std::optional<int> RightId = lookupConstOop(Right, ConstOops);
+  if (LeftId && RightId) {
+    int Same = CB.AreSameClassMirrors(*LeftId, *RightId);
+    if (Same >= 0)
+      Result = Same;
+  } else {
+    Value *Merged = LeftId ? Right : Left;
+    auto Evaluate = [&](Value *Incoming) {
+      return LeftId ? classMirrorEquality(Left, Incoming, CB, ConstOops,
+                                          Results, Budget, Depth + 1)
+                    : classMirrorEquality(Incoming, Right, CB, ConstOops,
+                                          Results, Budget, Depth + 1);
+    };
+    if (auto *SI = dyn_cast<SelectInst>(Merged)) {
+      std::optional<int> True = Evaluate(SI->getTrueValue());
+      if (True) {
+        std::optional<int> False = Evaluate(SI->getFalseValue());
+        if (False && *True == *False)
+          Result = *True;
+      }
+    } else if (auto *PN = dyn_cast<PHINode>(Merged)) {
+      for (Value *Incoming : PN->incoming_values()) {
+        std::optional<int> Next = Evaluate(Incoming);
+        if (!Next || (Result && *Result != *Next)) {
+          Result = std::nullopt;
+          break;
+        }
+        Result = *Next;
+      }
+    }
+  }
+  Results[Pair] = Result;
+  return Result;
+}
+
+bool foldClassMirrorComparison(ICmpInst *Cmp, const jeandle::VMCallbacks &CB,
+                               const DenseMap<Value *, int> &ConstOops) {
+  if (!CB.AreSameClassMirrors || !Cmp->isEquality() ||
+      !isJavaOopType(Cmp->getOperand(0)->getType()))
+    return false;
+  MirrorEqualityResults Results;
+  // Count cache hits too, so wide PHIs have bounded traversal cost.
+  unsigned Budget = 64;
+  std::optional<int> Same = classMirrorEquality(
+      Cmp->getOperand(0), Cmp->getOperand(1), CB, ConstOops, Results, Budget);
+  if (!Same)
+    return false;
+  bool Result = Cmp->getPredicate() == CmpInst::ICMP_EQ ? *Same : !*Same;
+  Cmp->replaceAllUsesWith(ConstantInt::get(Cmp->getType(), Result));
+  Cmp->eraseFromParent();
+  return true;
+}
+
 // Match a load whose pointer resolves, through any chain of constant-
 // offset GEPs and pointer-preserving casts, to a known ConstOop.
 //
@@ -343,16 +418,27 @@ bool isLoadMirrorKlassCall(CallInst *CI) {
          CI->arg_size() == 1;
 }
 
-bool isClassIsArrayCall(CallInst *CI) {
-  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
-  return Callee && Callee->getName() == "jeandle.class_is_array" &&
-         CI->arg_size() == 1;
-}
+enum class ClassQueryKind {
+  IsArray,
+  IsInterface,
+  IsPrimitive,
+  IsHidden,
+  GetModifiers,
+  GetAccessFlags
+};
 
-bool isClassIsInterfaceCall(CallInst *CI) {
+std::optional<ClassQueryKind> classQueryKind(CallInst *CI) {
   Function *Callee = CI ? CI->getCalledFunction() : nullptr;
-  return Callee && Callee->getName() == "jeandle.class_is_interface" &&
-         CI->arg_size() == 1;
+  if (!Callee || CI->arg_size() != 1)
+    return std::nullopt;
+  return StringSwitch<std::optional<ClassQueryKind>>(Callee->getName())
+      .Case("jeandle.class_is_array", ClassQueryKind::IsArray)
+      .Case("jeandle.class_is_interface", ClassQueryKind::IsInterface)
+      .Case("jeandle.class_is_primitive", ClassQueryKind::IsPrimitive)
+      .Case("jeandle.class_is_hidden", ClassQueryKind::IsHidden)
+      .Case("jeandle.class_get_modifiers", ClassQueryKind::GetModifiers)
+      .Case("jeandle.class_get_access_flags", ClassQueryKind::GetAccessFlags)
+      .Default(std::nullopt);
 }
 
 bool isLayoutHelperCall(CallInst *CI) {
@@ -480,44 +566,79 @@ bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
   return true;
 }
 
-// Evaluate a Class query over a bounded set of constant mirrors. The existing
-// ConstOop lattice intentionally loses identity when different constants merge;
-// a query can still fold when all incoming classes share the queried property.
-enum class ClassQueryKind { IsArray, IsInterface };
-
-std::optional<bool> classQueryForMirror(Value *Mirror, ClassQueryKind Kind,
-                                        const jeandle::VMCallbacks &CB,
-                                        const DenseMap<Value *, int> &ConstOops,
-                                        SmallPtrSetImpl<Value *> &Active) {
-  if (std::optional<int> OopId = lookupConstOop(Mirror, ConstOops)) {
-    uintptr_t Klass = CB.GetMirrorKlass(*OopId);
-    if (Klass == jeandle::MirrorKlassUnavailable)
-      return std::nullopt;
-    if (Klass == 0)
-      return false;
-    if (Kind == ClassQueryKind::IsInterface)
-      return CB.IsInterface(Klass);
+std::optional<int> classQueryForConstantMirror(int OopId, ClassQueryKind Kind,
+                                               const jeandle::VMCallbacks &CB) {
+  uintptr_t Klass = CB.GetMirrorKlass(OopId);
+  if (Klass == jeandle::MirrorKlassUnavailable)
+    return std::nullopt;
+  if (Klass == 0) {
+    if (Kind == ClassQueryKind::IsPrimitive)
+      return 1;
+    if (Kind == ClassQueryKind::GetModifiers ||
+        Kind == ClassQueryKind::GetAccessFlags)
+      return 1041; // JVM_ACC_PUBLIC | JVM_ACC_FINAL | JVM_ACC_ABSTRACT.
+    return 0;
+  }
+  switch (Kind) {
+  case ClassQueryKind::IsArray: {
     int LayoutHelper = CB.GetKlassLayoutHelper(Klass);
     if (LayoutHelper == 0)
       return std::nullopt;
-    return LayoutHelper < 0;
+    return LayoutHelper < 0 ? 1 : 0;
   }
+  case ClassQueryKind::IsInterface:
+    return CB.IsInterface(Klass) ? 1 : 0;
+  case ClassQueryKind::IsPrimitive:
+    return 0;
+  case ClassQueryKind::IsHidden:
+    return CB.IsHiddenKlass(Klass) ? 1 : 0;
+  case ClassQueryKind::GetModifiers:
+    return CB.GetKlassModifierFlags(Klass);
+  case ClassQueryKind::GetAccessFlags:
+    return CB.GetKlassAccessFlags(Klass);
+  }
+  llvm_unreachable("unknown Class query kind");
+}
 
-  if (Active.size() >= 32 || !Active.insert(Mirror).second)
+// Different constant mirrors can have the same queried property even when the
+// ConstOop lattice cannot retain a single identity. Cache both known and
+// unknown results per query. An empty entry also breaks cycles conservatively.
+// Count every operand visit, including cache hits, so wide PHIs have a bounded
+// cost.
+std::optional<int>
+classQueryForMirror(Value *Mirror, ClassQueryKind Kind,
+                    const jeandle::VMCallbacks &CB,
+                    const DenseMap<Value *, int> &ConstOops,
+                    DenseMap<Value *, std::optional<int>> &Results,
+                    unsigned &RemainingVisits, unsigned Depth = 0) {
+  if (RemainingVisits == 0)
+    return std::nullopt;
+  --RemainingVisits;
+  auto It = Results.find(Mirror);
+  if (It != Results.end())
+    return It->second;
+  if (Depth >= 32)
     return std::nullopt;
 
-  std::optional<bool> Result;
-  if (auto *SI = dyn_cast<SelectInst>(Mirror)) {
-    std::optional<bool> True =
-        classQueryForMirror(SI->getTrueValue(), Kind, CB, ConstOops, Active);
-    std::optional<bool> False =
-        classQueryForMirror(SI->getFalseValue(), Kind, CB, ConstOops, Active);
-    if (True && False && *True == *False)
-      Result = *True;
+  Results.try_emplace(Mirror, std::nullopt);
+  std::optional<int> Result;
+  if (std::optional<int> OopId = lookupConstOop(Mirror, ConstOops)) {
+    Result = classQueryForConstantMirror(*OopId, Kind, CB);
+  } else if (auto *SI = dyn_cast<SelectInst>(Mirror)) {
+    std::optional<int> True =
+        classQueryForMirror(SI->getTrueValue(), Kind, CB, ConstOops, Results,
+                            RemainingVisits, Depth + 1);
+    if (True) {
+      std::optional<int> False =
+          classQueryForMirror(SI->getFalseValue(), Kind, CB, ConstOops, Results,
+                              RemainingVisits, Depth + 1);
+      if (False && *True == *False)
+        Result = *True;
+    }
   } else if (auto *PN = dyn_cast<PHINode>(Mirror)) {
     for (Value *Incoming : PN->incoming_values()) {
-      std::optional<bool> Next =
-          classQueryForMirror(Incoming, Kind, CB, ConstOops, Active);
+      std::optional<int> Next = classQueryForMirror(
+          Incoming, Kind, CB, ConstOops, Results, RemainingVisits, Depth + 1);
       if (!Next || (Result && *Result != *Next)) {
         Result = std::nullopt;
         break;
@@ -526,7 +647,7 @@ std::optional<bool> classQueryForMirror(Value *Mirror, ClassQueryKind Kind,
     }
   }
 
-  Active.erase(Mirror);
+  Results[Mirror] = Result;
   return Result;
 }
 
@@ -535,16 +656,20 @@ bool foldClassQueryCall(CallInst *CI, ClassQueryKind Kind,
                         const DenseMap<Value *, int> &ConstOops) {
   if (!CI->getType()->isIntegerTy(32) || !CB.GetMirrorKlass ||
       (Kind == ClassQueryKind::IsArray && !CB.GetKlassLayoutHelper) ||
-      (Kind == ClassQueryKind::IsInterface && !CB.IsInterface))
+      (Kind == ClassQueryKind::IsInterface && !CB.IsInterface) ||
+      (Kind == ClassQueryKind::IsHidden && !CB.IsHiddenKlass) ||
+      (Kind == ClassQueryKind::GetModifiers && !CB.GetKlassModifierFlags) ||
+      (Kind == ClassQueryKind::GetAccessFlags && !CB.GetKlassAccessFlags))
     return false;
 
-  SmallPtrSet<Value *, 16> Active;
-  std::optional<bool> Result =
-      classQueryForMirror(CI->getArgOperand(0), Kind, CB, ConstOops, Active);
+  DenseMap<Value *, std::optional<int>> Results;
+  unsigned RemainingVisits = 256;
+  std::optional<int> Result = classQueryForMirror(
+      CI->getArgOperand(0), Kind, CB, ConstOops, Results, RemainingVisits);
   if (!Result)
     return false;
 
-  CI->replaceAllUsesWith(ConstantInt::get(CI->getType(), *Result ? 1 : 0));
+  CI->replaceAllUsesWith(ConstantInt::get(CI->getType(), *Result));
   CI->eraseFromParent();
   return true;
 }
@@ -814,10 +939,11 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
 
     SmallVector<CallInst *, 16> LoadKlassCalls;
     SmallVector<CallInst *, 16> LoadMirrorKlassCalls;
-    SmallVector<CallInst *, 16> ClassQueryCalls;
+    SmallVector<std::pair<CallInst *, ClassQueryKind>, 16> ClassQueryCalls;
     SmallVector<CallInst *, 16> GetClassCalls;
     SmallVector<CallInst *, 16> LayoutHelperCalls;
     SmallVector<CallInst *, 16> KlassInitializedCalls;
+    SmallVector<ICmpInst *, 16> ClassMirrorComparisons;
     SmallVector<LoadInst *, 16> Loads;
     for (BasicBlock *BB : RPOT) {
       for (Instruction &I : *BB) {
@@ -826,8 +952,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
             LoadKlassCalls.push_back(CI);
           if (isLoadMirrorKlassCall(CI))
             LoadMirrorKlassCalls.push_back(CI);
-          if (isClassIsArrayCall(CI) || isClassIsInterfaceCall(CI))
-            ClassQueryCalls.push_back(CI);
+          if (auto Kind = classQueryKind(CI))
+            ClassQueryCalls.emplace_back(CI, *Kind);
           if (isGetClassCall(CI))
             GetClassCalls.push_back(CI);
           if (isLayoutHelperCall(CI))
@@ -837,6 +963,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
         }
         if (auto *LI = dyn_cast<LoadInst>(&I))
           Loads.push_back(LI);
+        if (auto *Cmp = dyn_cast<ICmpInst>(&I))
+          ClassMirrorComparisons.push_back(Cmp);
       }
     }
 
@@ -862,17 +990,19 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
       }
     }
 
-    for (CallInst *CI : ClassQueryCalls) {
+    for (ICmpInst *Cmp : ClassMirrorComparisons) {
+      if (Cmp->getParent() == nullptr)
+        continue;
+      if (foldClassMirrorComparison(Cmp, *CB, ConstOops)) {
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
+    for (auto [CI, Kind] : ClassQueryCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      ClassQueryKind Kind = isClassIsArrayCall(CI)
-                                ? ClassQueryKind::IsArray
-                                : ClassQueryKind::IsInterface;
       if (foldClassQueryCall(CI, Kind, *CB, ConstOops)) {
-        if (Kind == ClassQueryKind::IsArray)
-          ++NumClassIsArrayFolded;
-        else
-          ++NumClassIsInterfaceFolded;
         RoundChanged = true;
         Changed = true;
       }
