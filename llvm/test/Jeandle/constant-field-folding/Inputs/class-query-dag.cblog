@@ -1,0 +1,12 @@
+GetMirrorKlass 0 = 100
+GetMirrorKlass 1 = 200
+GetMirrorKlass 2 = 0
+AreSameClassMirrors 0 0 = 1
+AreSameClassMirrors 0 1 = 0
+AreSameClassMirrors 0 2 = 0
+AreSameClassMirrors 1 0 = 0
+AreSameClassMirrors 1 1 = 1
+AreSameClassMirrors 1 2 = 0
+AreSameClassMirrors 2 0 = 0
+AreSameClassMirrors 2 1 = 0
+AreSameClassMirrors 2 2 = 1
