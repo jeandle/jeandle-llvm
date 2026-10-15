@@ -83,6 +83,7 @@
 
 #include <limits>
 #include <unordered_map>
+#include <utility>
 
 #define DEBUG_TYPE "partial-escape-analysis"
 
@@ -1904,8 +1905,12 @@ private:
   std::optional<bool> evalSubtypeRelation(uintptr_t SubKlass,
                                           uintptr_t SuperKlass);
   // Record a ReplaceCall effect substituting CB with Replacement (constant
-  // or alias); ID owns the mutation for eligibility filtering.
-  void emitReplaceCall(CallBase *CB, Value *Replacement, jeandle::ObjectID ID);
+  // or alias); ID owns the mutation for eligibility filtering. If dropping
+  // the effect would require another virtual object to have had real backing
+  // memory at CB, EligibilityDependency names that object for a fresh retry.
+  void emitReplaceCall(
+      CallBase *CB, Value *Replacement, jeandle::ObjectID ID,
+      jeandle::ObjectID EligibilityDependency = jeandle::InvalidObjectID);
   // PEA deopt support. Parse the complete safepoint bundle, combine durable
   // legacy descriptors with current virtual-object state, and publish one
   // immutable whole-pool rewrite. The pure planner owns reachability, pruning,
@@ -6530,7 +6535,8 @@ void Analyzer::processLoad(LoadInst *LI) {
 // ---------------------------------------------------------------------------
 
 void Analyzer::emitReplaceCall(CallBase *CB, Value *Replacement,
-                               jeandle::ObjectID ID) {
+                               jeandle::ObjectID ID,
+                               jeandle::ObjectID EligibilityDependency) {
   // PEA only folds Jeandle JavaOp intrinsics (CallInst/InvokeInst); every
   // caller is gated on an isJeandle* name predicate, which a CallBrInst
   // (inline-asm-with-goto, no called function) can never satisfy. Fail fast
@@ -6543,6 +6549,7 @@ void Analyzer::emitReplaceCall(CallBase *CB, Value *Replacement,
   E->Block = CB->getParent();
   E->Target = CB;
   E->Replacement = Replacement;
+  E->EligibilityDependency = EligibilityDependency;
   E->SeqNo = Result.nextSeqNo();
   E->setMutationOwner(ID);
   Result.addBlockEffect(std::move(E));
@@ -7365,6 +7372,10 @@ void Analyzer::processArrayCopy(CallBase *CB) {
   //     the call, so on this path the copy cannot throw and reference
   //     elements are assignable. An unvalidated call may still trap and must
   //     stay real for ArrayCopySpecialization.
+  // TODO(non-virtual src arraycopy): Match Graal's non-virtual source case by synthesizing element
+  // loads and recording their results in the virtual destination state. The
+  // deferred loads must be committed atomically with deleting the arraycopy
+  // call.
   bool CanFold = CB->hasFnAttr(jeandle::Attribute::ValidatedArrayCopy) &&
                  SrcID && DestID && Eligible.lookup(*SrcID) &&
                  Eligible.lookup(*DestID);
@@ -7399,14 +7410,13 @@ void Analyzer::processArrayCopy(CallBase *CB) {
     SrcPosV = SrcPos->getSExtValue();
     DestPosV = DestPos->getSExtValue();
     LenV = Length->getSExtValue();
-    const int64_t MaxElem = VMConsts.arrayCopyLoadStoreMaxElem();
     // (d) Bounds are re-verified here rather than trusted from the lowering
     //     guards: a non-negative constant length against the two virtual
     //     arrays' known constant lengths proves this copy cannot throw,
     //     which is what licenses deleting the call together with its
     //     exception edge. ArrayLength is uint32_t, so every term stays well
     //     inside int64_t.
-    CanFold = LenV >= 0 && LenV <= MaxElem && SrcPosV >= 0 && DestPosV >= 0 &&
+    CanFold = LenV >= 0 && SrcPosV >= 0 && DestPosV >= 0 &&
               SrcPosV <= static_cast<int64_t>(SrcVO->ArrayLength) &&
               DestPosV <= static_cast<int64_t>(DestVO->ArrayLength) &&
               LenV <= static_cast<int64_t>(SrcVO->ArrayLength) - SrcPosV &&
@@ -7516,18 +7526,17 @@ void Analyzer::processArrayCopy(CallBase *CB) {
           DstDefs.insert(Defs[Idx].begin(), Defs[Idx].end());
         }
       }
-      // Delete the call. The effect is owned by the DESTINATION: if dest
-      // later goes ineligible, the effect is dropped, the real call
-      // survives, and the commit-time surviving-use audit keeps src real as
-      // well (an ineligible owner's ReplaceCall target is not a removed
-      // use), so the runtime copy sees fully initialized memory on both
-      // sides. When the fold stands, neither array escapes through the
-      // copy — the C2 semantic of a validated ArrayCopyNode whose
-      // arguments stay NoEscape.
+      // Delete the call. The effect is owned by the DESTINATION. If dest later
+      // goes ineligible, the real call survives and its source must have valid
+      // backing memory at this point. Record src as an eligibility dependency
+      // so commit retries with src kept real from the beginning; a later source
+      // materialization would be too late for the restored call. When the fold
+      // stands, neither array escapes through the copy — the C2 semantic of a
+      // validated ArrayCopyNode whose arguments stay NoEscape.
       LLVM_DEBUG(dbgs() << "PEA: fold arraycopy VO(src)=" << *SrcID
                         << " VO(dest)=" << *DestID << " len=" << LenV << " at "
                         << *CB << "\n");
-      emitReplaceCall(CB, nullptr, *DestID);
+      emitReplaceCall(CB, nullptr, *DestID, *SrcID);
       return;
     }
   }
@@ -9116,12 +9125,14 @@ void Analyzer::commit() {
   //      count is nonzero at a real return/resume (unbalanced enter/exit).
   //   2. Unified ineligibility fixpoint: iterate plan rejection (a recursive
   //      / strict-lock-cascade transaction is rejected wholesale if any member
-  //      went ineligible), the surviving-use audit for proposed-deletion
-  //      allocations, the synthetic-source and live-VirtualRef cascades, and
-  //      the field/token availability sweep, until the eligibility set is
-  //      stable. Deopt pools are NOT part of this owner fixpoint: each pool is
-  //      an atomic safepoint transaction with no mutation owner, and a
-  //      late-invalid member/token marks the complete pool invalid.
+  //      went ineligible), effect eligibility dependencies (a restored
+  //      operation may require another object to have been real earlier), the
+  //      surviving-use audit for proposed-deletion allocations, the
+  //      synthetic-source and live-VirtualRef cascades, and the field/token
+  //      availability sweep, until the eligibility set is stable. Deopt pools
+  //      are NOT part of this owner fixpoint: each pool is an atomic safepoint
+  //      transaction with no mutation owner, and a late-invalid member/token
+  //      marks the complete pool invalid.
   //   3. dropEffectsForIneligible: remove every effect owned by an ineligible
   //      VO (except keep-real survivors) and stamp AlwaysEscapes.
   //   4. Escape classification: NeverEscapes / PartiallyEscapes /
@@ -9165,9 +9176,21 @@ void Analyzer::commit() {
 
   // -------------------------------------------------------------------------
   // Unified ordinary-effect ineligibility fixpoint, iterated until the set is
-  // stable. Two producers:
+  // stable. Four sources of ineligibility:
   //
-  //  (a) Transitive ineligibility cascade over LIVE reaching VirtualRef store
+  //  (a) Transaction and effect dependencies. A recursive / strict-lock
+  //      materialization plan is rejected as a unit when any member becomes
+  //      ineligible. A dropped effect also propagates to its
+  //      EligibilityDependency: for example, restoring an arraycopy because
+  //      its destination became ineligible requires its source to be real
+  //      before the call, not merely materialized at a later escape point.
+  //
+  //  (b) Final semantic-use audit. An ordinary allocation proposed for
+  //      deletion must have every semantic use removed by a surviving effect
+  //      or rewritten by a deopt-pool plan. Any unremoved use keeps the
+  //      allocation real through a fresh retry.
+  //
+  //  (c) Transitive ineligibility cascade over LIVE reaching VirtualRef store
   //      definitions plus the synthetic-Case-C source cascade. A definition
   //      becomes live when a load, materialization, deopt snapshot, or
   //      conservative fallback observes it. If its outer is kept real, the
@@ -9179,7 +9202,7 @@ void Analyzer::commit() {
   //      split sound: a store kept dead in the analysis cannot reach the
   //      transform's restore path.
   //
-  //  (b) Field-value availability sweep. Every value
+  //  (d) Field-value availability sweep. Every value
   //      referenced by a surviving effect's field snapshot must be
   //      PRODUCIBLE at apply time: a Constant / Argument / in-IR instruction
   //      (a WeakTrackingVH follows any RAUW), or an unparented analyzer-built
@@ -9294,6 +9317,8 @@ void Analyzer::commit() {
   {
     DenseMap<jeandle::ObjectID, SmallDenseSet<jeandle::ObjectID>>
         LiveVirtualRefDeps;
+    SmallVector<std::pair<jeandle::ObjectID, jeandle::ObjectID>, 4>
+        EligibilityDependencies;
     DenseSet<uint32_t> SurvivingMaterializationPlans;
     DenseMap<CallBase *, const jeandle::RewriteDeoptPoolEffect *> PoolsAt;
     DenseSet<CallBase *> DuplicatePools;
@@ -9303,13 +9328,20 @@ void Analyzer::commit() {
           assert(ME->PlanID != jeandle::MaterializeEffect::InvalidPlanID &&
                  "materialize effect must belong to a commit plan");
           SurvivingMaterializationPlans.insert(ME->PlanID);
-        } else if (const auto *SE = dyn_cast<jeandle::EliminateStoreEffect>(&E))
+        } else if (const auto *SE = dyn_cast<jeandle::EliminateStoreEffect>(&E)) {
           if (auto *SI = dyn_cast_or_null<StoreInst>(SE->getTarget()))
             if (ObservedFieldStores.count(SI))
               if (auto RIt = VirtualRefStoreTargets.find(SI);
                   RIt != VirtualRefStoreTargets.end())
                 if (E.hasMutationOwner())
                   LiveVirtualRefDeps[E.getMutationOwner()].insert(RIt->second);
+        } else if (const auto *Replace =
+                       dyn_cast<jeandle::ReplaceCallEffect>(&E)) {
+          if (E.hasMutationOwner() &&
+              Replace->EligibilityDependency != jeandle::InvalidObjectID)
+            EligibilityDependencies.emplace_back(
+                E.getMutationOwner(), Replace->EligibilityDependency);
+        }
     for (const auto &Kv : Result.BlockEffects)
       for (const auto &E : Kv.second)
         if (const auto *Pool = dyn_cast<jeandle::RewriteDeoptPoolEffect>(&E)) {
@@ -9343,6 +9375,18 @@ void Analyzer::commit() {
             Eligible[ID] = false;
             AnyChange = true;
           }
+      }
+      // A dropped replacement can revive an operation that needs another
+      // virtual object's backing memory at the replacement site. In
+      // particular, an arraycopy fold is owned by its destination, while its
+      // source may otherwise materialize only after the call. If the
+      // destination becomes ineligible, retry from untouched IR with that
+      // source allocation kept real from the beginning.
+      for (const auto &[Owner, Dependency] : EligibilityDependencies) {
+        if (Eligible.lookup(Owner) || !Eligible.lookup(Dependency))
+          continue;
+        markIneligible(Dependency, /*FreshRetry=*/true);
+        AnyChange = true;
       }
       // An ordinary allocation that is neither directly materialized nor
       // retained by a live prepared synthetic DAG is proposed for deletion.

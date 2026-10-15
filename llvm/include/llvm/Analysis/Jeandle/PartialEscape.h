@@ -676,6 +676,11 @@ public:
   // WeakTrackingVH: see ReplaceLoadEffect.
   WeakTrackingVH Target;
   WeakTrackingVH Replacement;
+  // Optional virtual object that must be kept real from the beginning if this
+  // replacement is discarded because its mutation owner becomes ineligible.
+  // Arraycopy uses this for its source: the source may otherwise materialize
+  // only after a restored runtime copy and expose stale backing memory to it.
+  ObjectID EligibilityDependency = InvalidObjectID;
   // When >= 0, the transform ignores `Replacement` and instead builds a GC-safe
   // oop-handle load (see createConstOopLoad) of the constant Java oop named by
   // this id, inserting it before `Target` and using it as the replacement. Used
