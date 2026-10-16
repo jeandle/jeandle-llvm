@@ -7395,16 +7395,24 @@ void Analyzer::processArrayCopy(CallBase *CB) {
   if (CanFold) {
     SrcVO = Result.VirtualObjects[*SrcID].get();
     DestVO = Result.VirtualObjects[*DestID].get();
-    // (c) Both operands are virtual arrays with identical element layouts.
-    //     Identical LLVM element types reject width and primitive/oop
-    //     mismatches up front (int[]→long[], int[]→Object[], ...);
-    //     same-typed reference arrays (String[]→Object[]) share the pointer
-    //     element type and are admitted — the validated subtype guard covers
-    //     their assignability.
+    // (c) Both operands are virtual arrays with compatible element layouts.
+    //     Primitive arrays additionally require the same JBasicType: distinct
+    //     Java element kinds can share one physical LLVM type (boolean/byte
+    //     use i8 and char/short use i16) but System.arraycopy must not copy
+    //     between them. Reference arrays may have different Klasses; their
+    //     shared pointer layout is sufficient here because the validated
+    //     subtype guard has already proved assignability.
+    jeandle::JBasicType SrcKind =
+        jeandle::elementTypeForArrayKlass(SrcVO->Klass);
+    jeandle::JBasicType DestKind =
+        jeandle::elementTypeForArrayKlass(DestVO->Klass);
     CanFold = SrcVO->isArray() && DestVO->isArray() &&
               SrcVO->ArrayElementType == DestVO->ArrayElementType &&
               SrcVO->ArrayIndexScale == DestVO->ArrayIndexScale &&
-              SrcVO->ArrayIndexScale > 0;
+              SrcVO->ArrayIndexScale > 0 &&
+              (SrcVO->ArrayElementType->isPointerTy() ||
+               (SrcKind != jeandle::JBasicType::Count &&
+                SrcKind == DestKind));
   }
   if (CanFold) {
     SrcPosV = SrcPos->getSExtValue();
@@ -7832,10 +7840,7 @@ void Analyzer::recordDeoptBundleMappings(CallBase *CB) {
                 static_cast<uint64_t>(*Delta / Scale) < VObj.ArrayLength &&
                 IsEncodableOffset(Entry.first);
             bool ExactElementType =
-                StorageType &&
-                (StorageType == VObj.ArrayElementType ||
-                 (VObj.ArrayElementType->isIntegerTy(1) &&
-                  StorageType->isIntegerTy(8) && VObj.ArrayIndexScale == 1));
+                StorageType && StorageType == VObj.ArrayElementType;
             bool ExactStoreSize = false;
             bool FullByteRange = false;
             if (StorageType) {

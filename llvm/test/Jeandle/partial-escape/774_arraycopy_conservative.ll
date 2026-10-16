@@ -3,6 +3,7 @@
 ; Conservative paths. None of these folds:
 ;  - non-constant length (a function argument),
 ;  - unvalidated call site (no "jeandle.arraycopy.validated" attribute),
+;  - different primitive array kinds with the same physical element width,
 ;  - zero-length validated copy DOES fold: the call is deleted and no field
 ;    state changes; a preexisting destination value survives the copy.
 ; In every non-folding case the pseudo call survives and both virtual arrays
@@ -84,6 +85,27 @@ u3:
   resume i64 %lp3
 }
 
+define void @test_arraycopy_same_width_primitive_mismatch() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+entry:
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
+            ptr inttoptr (i64 12351 to ptr), i32 1, i32 24, i32 16, i32 1048576)
+         to label %p1 unwind label %u4
+p1:
+  %dest = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
+            ptr inttoptr (i64 12352 to ptr), i32 1, i32 24, i32 16, i32 1048576)
+         to label %p2 unwind label %u4
+p2:
+  invoke hotspotcc void @jeandle.arraycopy(
+            ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dest, i64 0, i64 1,
+            ptr null, ptr null, i64 1, i64 1) #1
+         to label %pc unwind label %u4
+pc:
+  ret void
+u4:
+  %lp4 = landingpad i64 cleanup
+  resume i64 %lp4
+}
+
 attributes #0 = { "jeandle.arraycopy.kind"="arraycopy" }
 attributes #1 = { "jeandle.arraycopy.kind"="arraycopy" "jeandle.arraycopy.validated" }
 
@@ -103,4 +125,8 @@ attributes #1 = { "jeandle.arraycopy.kind"="arraycopy" "jeandle.arraycopy.valida
 ; CHECK-NOT: jeandle.new_array
 ; CHECK-NOT: jeandle.arraycopy
 ; CHECK: ret i32 7
+
+; boolean[] and byte[] share i8 storage but are distinct primitive array kinds.
+; CHECK-LABEL: define void @test_arraycopy_same_width_primitive_mismatch
+; CHECK: invoke hotspotcc void @jeandle.arraycopy
 !java-method-compilation = !{}

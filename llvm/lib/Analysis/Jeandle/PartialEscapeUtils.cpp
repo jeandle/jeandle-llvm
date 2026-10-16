@@ -171,7 +171,7 @@ bool isPEAHandledNonEscapingIntrinsic(const IntrinsicInst *II) {
 Type *llvmElementTypeFor(JBasicType Kind, LLVMContext &Ctx) {
   switch (Kind) {
   case JBasicType::Boolean:
-    return Type::getInt1Ty(Ctx);
+    return Type::getInt8Ty(Ctx);
   case JBasicType::Byte:
     return Type::getInt8Ty(Ctx);
   case JBasicType::Char:

@@ -361,8 +361,9 @@ bool isJeandleArrayCopyPseudoCall(const CallBase *CB);
 // require a surviving whole-pool rewrite.
 bool isPEAHandledNonEscapingIntrinsic(const IntrinsicInst *II);
 
-// Map a JBasicType to its LLVM IR storage type for one element (e.g., Byte→i8,
-// Object→ptr addrspace(1)).  Returns nullptr if Kind == Count.
+// Map a JBasicType to its LLVM IR storage type for one element (e.g.,
+// Boolean/Byte→i8, Char/Short→i16, Object→ptr addrspace(1)). Returns nullptr
+// if Kind == Count.
 Type *llvmElementTypeFor(JBasicType Kind, LLVMContext &Ctx);
 
 // Whether Ty may be emitted by materialization as an LLVM atomic store.
