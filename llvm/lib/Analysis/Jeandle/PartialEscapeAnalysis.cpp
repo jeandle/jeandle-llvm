@@ -7372,10 +7372,10 @@ void Analyzer::processArrayCopy(CallBase *CB) {
   //     the call, so on this path the copy cannot throw and reference
   //     elements are assignable. An unvalidated call may still trap and must
   //     stay real for ArrayCopySpecialization.
-  // TODO(non-virtual src arraycopy): Match Graal's non-virtual source case by synthesizing element
-  // loads and recording their results in the virtual destination state. The
-  // deferred loads must be committed atomically with deleting the arraycopy
-  // call.
+  // TODO(non-virtual src arraycopy): Match Graal's non-virtual source case by
+  // synthesizing element loads and recording their results in the virtual
+  // destination state. The deferred loads must be committed atomically with
+  // deleting the arraycopy call.
   bool CanFold = CB->hasFnAttr(jeandle::Attribute::ValidatedArrayCopy) &&
                  SrcID && DestID && Eligible.lookup(*SrcID) &&
                  Eligible.lookup(*DestID);
@@ -7411,8 +7411,7 @@ void Analyzer::processArrayCopy(CallBase *CB) {
               SrcVO->ArrayIndexScale == DestVO->ArrayIndexScale &&
               SrcVO->ArrayIndexScale > 0 &&
               (SrcVO->ArrayElementType->isPointerTy() ||
-               (SrcKind != jeandle::JBasicType::Count &&
-                SrcKind == DestKind));
+               (SrcKind != jeandle::JBasicType::Count && SrcKind == DestKind));
   }
   if (CanFold) {
     SrcPosV = SrcPos->getSExtValue();
@@ -9333,7 +9332,8 @@ void Analyzer::commit() {
           assert(ME->PlanID != jeandle::MaterializeEffect::InvalidPlanID &&
                  "materialize effect must belong to a commit plan");
           SurvivingMaterializationPlans.insert(ME->PlanID);
-        } else if (const auto *SE = dyn_cast<jeandle::EliminateStoreEffect>(&E)) {
+        } else if (const auto *SE =
+                       dyn_cast<jeandle::EliminateStoreEffect>(&E)) {
           if (auto *SI = dyn_cast_or_null<StoreInst>(SE->getTarget()))
             if (ObservedFieldStores.count(SI))
               if (auto RIt = VirtualRefStoreTargets.find(SI);
