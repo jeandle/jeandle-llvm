@@ -25,6 +25,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/ValueHandle.h"
@@ -39,6 +40,8 @@ class BinaryOperator;
 class Function;
 class Instruction;
 class IRBuilderBase;
+class Loop;
+class LoopInfo;
 class Value;
 struct OverflowTracking;
 
@@ -46,16 +49,52 @@ struct OverflowTracking;
 /// These are implementation details and should not be used by clients.
 namespace reassociate {
 
+/// Sort key for a leaf's position in the rebuilt tree. The rebuild puts
+/// Ops[0] at the outermost operand and Ops[end] at the innermost, so a
+/// recurrence phi belongs first (short loop carry) and invariants/constants
+/// last (grouped for LICM and folding). Rank alone can't express this: a
+/// header phi has the lowest rank in its loop and looks invariant.
+enum class OpCategory : uint8_t {
+  LoopCarriedRecurrence = 0,
+  LoopVariant = 1,
+  LoopInvariantOrConst = 2,
+};
+
 struct ValueEntry {
   unsigned Rank;
   Value *Op;
+  OpCategory Category;
 
-  ValueEntry(unsigned R, Value *O) : Rank(R), Op(O) {}
+  ValueEntry(unsigned R, Value *O, OpCategory Cat = OpCategory::LoopVariant)
+      : Rank(R), Op(O), Category(Cat) {}
 };
 
 inline bool operator<(const ValueEntry &LHS, const ValueEntry &RHS) {
-  return LHS.Rank > RHS.Rank; // Sort so that highest rank goes to start.
+  // Category first (lower sorts to the outermost operand), then rank as the
+  // legacy tiebreaker; operands in the same category keep their rank order.
+  if (LHS.Category != RHS.Category)
+    return LHS.Category < RHS.Category;
+  return LHS.Rank > RHS.Rank;
 }
+
+/// Classifies the leaves of one expression. The constructor precomputes the
+/// set of values on this expression's loop-carried recurrence (see the .cpp);
+/// classify() is then an O(1) membership test. A null loop (no LoopInfo, or
+/// code outside any loop) makes every leaf LoopVariant, i.e. plain rank
+/// ordering.
+class OpClassifier {
+public:
+  OpClassifier(const LoopInfo *LI, const Instruction *I);
+  OpCategory classify(const Value *V) const;
+
+private:
+  const Loop *EnclosingLoop;
+  // Values on this expression's loop-carried recurrence: the forward
+  // intra-iteration slice from each reduction phi whose next-iteration value
+  // the root computes. A leaf in this set sorts to the outermost operand so the
+  // loop carry stays one ALU op; everything else falls back to rank ordering.
+  SmallPtrSet<const Value *, 16> RecurrenceSet;
+};
 
 /// Utility class representing a base and exponent pair which form one
 /// factor of some product.
@@ -79,6 +118,9 @@ public:
 protected:
   DenseMap<BasicBlock *, unsigned> RankMap;
   DenseMap<AssertingVH<Value>, unsigned> ValueRankMap;
+  /// Set by run() for the current function (null for single-BB functions).
+  /// Read-only; used by OpClassifier to categorize operands.
+  LoopInfo *LI = nullptr;
   OrderedSet RedoInsts;
 
   // Arbitrary, but prevents quadratic behavior.
@@ -98,6 +140,10 @@ protected:
 
 public:
   LLVM_ABI PreservedAnalyses run(Function &F, FunctionAnalysisManager &);
+  // Shared body for both pass managers (not part of the exported API): the new
+  // PM passes LI from the FAM, the legacy wrapper from LoopInfoWrapperPass;
+  // null falls back to rank-only ordering.
+  PreservedAnalyses runImpl(Function &F, LoopInfo *LI);
 
 private:
   void BuildRankMap(Function &F, ReversePostOrderTraversal<Function *> &RPOT);
