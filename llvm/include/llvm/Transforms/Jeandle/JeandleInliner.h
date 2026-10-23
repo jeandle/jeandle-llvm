@@ -13,7 +13,7 @@
 // the extension point for devirtualization refinement between inline rounds.
 // JeandleInliner handles the current inline step: it inlines Java method calls
 // where the callee may initially be a declaration, asks
-// VMCallbacks::IsOkToInline for policy, and uses
+// VMCallbacks::GetInlineDecision for policy, and uses
 // VMCallbacks::GetInlineCalleeIR to obtain callee IR on demand.
 //
 // The pass supports nested/transitive inlining: after a callee is inlined,
@@ -45,6 +45,8 @@ using JeandleInlineScope = std::pair<Function *, int>;
 struct InlineRoundResult {
   PreservedAnalyses PA = PreservedAnalyses::all();
   bool ExposedNewCallSites = false;
+  bool HasLateInlineCandidates = false;
+  bool HitNodeCountCutoff = false;
 };
 
 class JeandleInlineDriver : public PassInfoMixin<JeandleInlineDriver> {
@@ -65,7 +67,8 @@ public:
 
   InlineRoundResult
   runInlineRound(Module &M, ModuleAnalysisManager &MAM,
-                 SmallVectorImpl<JeandleInlineScope> &InlineScopes);
+                 SmallVectorImpl<JeandleInlineScope> &InlineScopes,
+                 bool InLateInlinePhase);
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
 
 private:

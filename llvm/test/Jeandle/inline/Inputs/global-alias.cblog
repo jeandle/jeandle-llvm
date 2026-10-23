@@ -1,4 +1,4 @@
-IsOkToInline -1 3 102 = true
+GetInlineDecision -1 3 102 false = 1
 GetInlineCalleeIR 102 = true
 RecordInlineResult -1 3 102 0 = true
 RecordInliningComplete = true
