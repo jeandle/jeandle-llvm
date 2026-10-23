@@ -23,6 +23,7 @@
 #include "llvm/Transforms/Jeandle/JeandleNarrowOopMarker.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeIterative.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeTransform.h"
+#include "llvm/Transforms/Jeandle/PostPEACleanup.h"
 #include "llvm/Transforms/Jeandle/ProfileDevirtualization.h"
 #include "llvm/Transforms/Jeandle/RecoverTypeInfo.h"
 #include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"
@@ -288,6 +289,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     //       materializations exposed by InstCombine+SimplifyCFG+ADCE between
     //       rounds.
     PM.addPass(createModuleToFunctionPassAdaptor(PartialEscapeIterative()));
+    // PEA has now committed every deferred materialization. Remove
+    // compiler-only PEA related markers before their keepalive side effects can
+    // inhibit the post-PEA scalar and loop optimizations.
+    PM.addPass(createModuleToFunctionPassAdaptor(PostPEACleanup()));
   }
   // Post-inline type recovery + TCE — unconditional. Runs for both PEA-on
   // (cleans up PEA's materializations) and PEA-off (the default config) so

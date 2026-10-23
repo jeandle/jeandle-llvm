@@ -9,6 +9,7 @@ add_llvm_component_library(LLVMJeandleTransforms
   JavaOpLengthFolding.cpp
   PartialEscapeIterative.cpp
   PartialEscapeTransform.cpp
+  PostPEACleanup.cpp
   JeandleNarrowOopMarker.cpp
   JeandleInlineDriver.cpp
   JeandleInliner.cpp
