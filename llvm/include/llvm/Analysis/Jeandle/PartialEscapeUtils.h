@@ -343,6 +343,7 @@ bool isJeandleNewInstance(const CallBase *CB);
 bool isJeandleNewArray(const CallBase *CB);
 bool isJeandleAllocation(const CallBase *CB); // either of the above
 bool isJeandleArrayLength(const CallBase *CB);
+bool isJeandleAssumeJavaType(const CallBase *CB);
 bool isJeandleLoadKlass(const CallBase *CB);
 bool isJeandleGetClass(const CallBase *CB);
 bool isJeandleCheckCast(const CallBase *CB);
@@ -351,6 +352,9 @@ bool isJeandleCheckInstanceOf(const CallBase *CB);
 bool isJeandleCheckIfValueBased(const CallBase *CB);
 bool isJeandleArrayStoreCheck(const CallBase *CB);
 bool isJeandlePostBarrier(const CallBase *CB);
+bool isJeandleUnsafeGetReference(const CallBase *CB);
+bool isJeandleUnsafePutReference(const CallBase *CB);
+bool isJeandleReferenceRefersTo(const CallBase *CB);
 bool isJeandleMonitorEnter(const CallBase *CB);
 bool isJeandleMonitorExit(const CallBase *CB);
 bool isJeandleRegisterFinalizerIfNeeded(const CallBase *CB);

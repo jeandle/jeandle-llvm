@@ -6,7 +6,7 @@
 ; Before the post_barrier fold, processJavaOp had no case for it, so the
 ; barrier call used the virtual array and forced its materialization —
 ; defeating PEA for `new Object[]{...}`. foldPostBarrier resolves the address
-; operand to the virtual array and erases the barrier (emitReplaceCall with a
+; operand to the virtual array and erases the barrier (a ReplaceCall effect with a
 ; null replacement, the void-JavaOp deletion form). The store is eliminated and
 ; recorded into the array's field state, and the stored oop is recorded as a
 ; nested virtual reference, so neither the array nor the oop ever materializes:

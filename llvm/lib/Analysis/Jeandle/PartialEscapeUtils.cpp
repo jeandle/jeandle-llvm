@@ -72,6 +72,10 @@ bool isJeandleArrayLength(const CallBase *CB) {
   return isJeandleCallNamed(CB, "jeandle.arraylength");
 }
 
+bool isJeandleAssumeJavaType(const CallBase *CB) {
+  return isJeandleCallNamed(CB, "jeandle.assume_java_type");
+}
+
 bool isJeandleLoadKlass(const CallBase *CB) {
   return isJeandleCallNamed(CB, "jeandle.load_klass");
 }
@@ -102,6 +106,18 @@ bool isJeandleArrayStoreCheck(const CallBase *CB) {
 
 bool isJeandlePostBarrier(const CallBase *CB) {
   return isJeandleCallNamed(CB, "jeandle.post_barrier");
+}
+
+bool isJeandleUnsafeGetReference(const CallBase *CB) {
+  return isJeandleCallNamed(CB, "jeandle.unsafe_get_reference");
+}
+
+bool isJeandleUnsafePutReference(const CallBase *CB) {
+  return isJeandleCallNamed(CB, "jeandle.unsafe_put_reference");
+}
+
+bool isJeandleReferenceRefersTo(const CallBase *CB) {
+  return isJeandleCallNamed(CB, "jeandle.reference_refers_to");
 }
 
 bool isJeandleMonitorEnter(const CallBase *CB) {

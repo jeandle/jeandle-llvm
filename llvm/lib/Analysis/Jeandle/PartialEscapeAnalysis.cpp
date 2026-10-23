@@ -1858,6 +1858,7 @@ private:
   // returns false so the op falls through to materialization of its virtual
   // operands.
   bool foldArrayLength(CallBase *CB);
+  bool foldAssumeJavaType(CallBase *CB);
   bool foldLoadKlass(CallBase *CB);
   bool foldGetClass(CallBase *CB);
   bool foldCheckCast(CallBase *CB);
@@ -1886,6 +1887,34 @@ private:
   // barrier, value-based-class check, and finalizer registration. Each
   // returns true iff the op was folded or elided for a virtual receiver.
   bool foldArrayStoreCheck(CallBase *CB);
+  // TODO(unsafe-javaops): This is intentionally only the first safe subset.
+  // The runtime also defines volatile/acquire/release/opaque reference
+  // accessors, but deleting those calls would currently lose their ordering
+  // and barrier semantics. Support them only after PEA can emit matching
+  // atomic/fence and GC effects. Primitive/unaligned accesses, symbolic
+  // offsets, and array decompositions are also outside this handler; they need
+  // type/width/alignment/overlap proofs and per-kind FieldDesc replay,
+  // including AS3 encoding under CompressedOops.
+  // Fold the plain, unordered unsafe_get_reference operation for a virtual
+  // receiver. The constant offset must resolve to a valid reference-sized
+  // field; ordered/volatile variants and unsupported value shapes return
+  // false so the normal materialization path remains responsible for them.
+  bool foldUnsafeGetReference(CallBase *CB);
+  // Fold the plain, unordered unsafe_put_reference operation by recording its
+  // semantic value in FieldStates. Materialization later replays the value
+  // through the physical FieldDesc, including AS3 encoding under
+  // CompressedOops.
+  bool foldUnsafePutReference(CallBase *CB);
+  // Fold Reference.refersTo0 / PhantomReference.refersTo0 when the explicit
+  // target is a fresh virtual object. A real receiver cannot refer to an
+  // unpublished allocation, so the result is false; the JavaOp's
+  // single-thread CPUOrder fence is preserved.
+  bool foldReferenceRefersTo(CallBase *CB);
+  // Resolve a constant Unsafe byte offset, validate object/array bounds and
+  // access width, and create the physical FieldDesc used by later replay.
+  std::optional<int64_t> resolveUnsafeReferenceOffset(CallBase *CB,
+                                                      jeandle::ObjectID BaseID,
+                                                      Type *PhysicalType);
   bool foldPostBarrier(CallBase *CB);
   bool foldCheckIfValueBased(CallBase *CB);
   bool foldRegisterFinalizerIfNeeded(CallBase *CB);
@@ -1894,9 +1923,28 @@ private:
   // std::nullopt otherwise.
   std::optional<bool> evalSubtypeRelation(uintptr_t SubKlass,
                                           uintptr_t SuperKlass);
-  // Record a ReplaceCall effect substituting CB with Replacement (constant
-  // or alias); ID owns the mutation for eligibility filtering.
-  void emitReplaceCall(CallBase *CB, Value *Replacement, jeandle::ObjectID ID);
+  // Record only a ReplaceCall effect. OopHandleId >= 0 defers replacement
+  // creation to Transform for a GC-safe managed mirror load. The result alias
+  // is installed by one of the two policy-specific helpers below.
+  void recordReplaceCallEffect(CallBase *CB, Value *Replacement,
+                               jeandle::ObjectID MutationOwner,
+                               int OopHandleId = -1);
+  // Record a ReplaceCall and scalar-alias its non-void result to Replacement.
+  // Void calls may pass nullptr and receive no result alias.
+  void emitReplaceCallWithScalarAlias(CallBase *CB, Value *Replacement,
+                                      jeandle::ObjectID MutationOwner);
+  // Record a ReplaceCall and preserve CB as a virtual-object identity. The
+  // mutation owner and alias target can differ for nested virtual references.
+  void emitReplaceCallWithVirtualAlias(CallBase *CB, Value *Replacement,
+                                       jeandle::ObjectID MutationOwner,
+                                       jeandle::ObjectID AliasID,
+                                       bool IsWholeObject);
+  // Own an analysis-created instruction and schedule its placement before an
+  // in-IR Target through an ownerless ordinary effect. Callers manage its
+  // DebugLoc and any reuse cache.
+  void placeInstructionBefore(Instruction *InstructionToPlace,
+                              Instruction *Target);
+
   // PEA deopt support. Parse the complete safepoint bundle, combine durable
   // legacy descriptors with current virtual-object state, and publish one
   // immutable whole-pool rewrite. The pure planner owns reachability, pruning,
@@ -2921,15 +2969,8 @@ Instruction *Analyzer::getOrCreateSemanticOopCast(StoreInst *SI,
   Cast = CastInst::Create(Instruction::AddrSpaceCast, NarrowOop, WideTy,
                           "pea.semantic.oop", /*InsertBefore=*/nullptr);
   Cast->setDebugLoc(SI->getDebugLoc());
-  Result.OwnedInsts.emplace_back(Cast);
   SemanticOopCastCache.emplace(Key, Cast);
-
-  auto Place = std::make_unique<jeandle::PlaceInstructionEffect>();
-  Place->Block = SI->getParent();
-  Place->Target = SI;
-  Place->InstructionToPlace = Cast;
-  Place->SeqNo = Result.nextSeqNo();
-  Result.addBlockEffect(std::move(Place));
+  placeInstructionBefore(Cast, SI);
   return Cast;
 }
 
@@ -2968,14 +3009,7 @@ Value *Analyzer::coerceToType(Value *V, Type *LoadTy,
     assert(InsertContext && InsertContext->getParent() &&
            "coercion placement requires an in-IR load context");
     Cast->setDebugLoc(InsertContext->getDebugLoc());
-    Result.OwnedInsts.emplace_back(Cast);
-
-    auto Place = std::make_unique<jeandle::PlaceInstructionEffect>();
-    Place->Block = InsertContext->getParent();
-    Place->Target = InsertContext;
-    Place->InstructionToPlace = Cast;
-    Place->SeqNo = Result.nextSeqNo();
-    Result.addBlockEffect(std::move(Place));
+    placeInstructionBefore(Cast, InsertContext);
     return Cast;
   };
 
@@ -5411,6 +5445,7 @@ void Analyzer::processInstruction(Instruction *I) {
     // monitorexit_with_lightweight_lock, monitorexit_with_monitor_lock,
     // monitorexit_with_thin_lock, new_instance, new_array, post_barrier,
     // pre_barrier, reference_get, reference_refers_to,
+    // unsafe_get_reference, unsafe_put_reference,
     // register_finalizer_if_needed, safepoint_poll, try_acquire_monitor_lock,
     // try_release_monitor_lock. (NOT all listed here get a dedicated fold in
     // processJavaOp — see the isJeandle* predicates in
@@ -5908,16 +5943,16 @@ bool Analyzer::processStore(StoreInst *SI) {
   Value *PhysicalVal = Val;
 
   // Normalize the stored value through the scalar-alias chain before any
-  // resolution / recording. A value folded by processLoad / foldICmpEquality /
-  // emitReplaceCall is RAUW'd and ERASED by its ReplaceLoad/ReplaceCall effect
-  // in phase 1, which runs BEFORE the Materialize / RewriteDeoptPool effects
-  // that read the FieldStates snapshot — recording the folded instruction
-  // itself would leave a dangling pointer in the snapshot. The chain
-  // terminates at a value that is never erased (a constant, an argument, an
-  // OrigAlloc, or a real SSA def that dominates this store): the fold that
-  // produced the alias always precedes the store in RPO, so the alias is
-  // registered by the time we see the store. A value carrying a VIRTUAL alias
-  // never carries a scalar alias, so this does not change the
+  // resolution / recording. A value folded by processLoad, foldICmpEquality,
+  // or emitReplaceCallWithScalarAlias is RAUW'd and ERASED by its
+  // ReplaceLoad/ReplaceCall effect in phase 1, which runs BEFORE the
+  // Materialize / RewriteDeoptPool effects that read the FieldStates snapshot —
+  // recording the folded instruction itself would leave a dangling pointer in
+  // the snapshot. The chain terminates at a value that is never erased (a
+  // constant, an argument, an OrigAlloc, or a real SSA def that dominates this
+  // store): the fold that produced the alias always precedes the store in RPO,
+  // so the alias is registered by the time we see the store. A value carrying a
+  // VIRTUAL alias never carries a scalar alias, so this does not change the
   // resolveVirtualRef outcome below.
   while (Value *A = Aliases.getScalarAlias(Val))
     Val = A;
@@ -6495,11 +6530,12 @@ void Analyzer::processLoad(LoadInst *LI) {
 }
 
 // ---------------------------------------------------------------------------
-// JavaOp folding on virtual receivers.
+// JavaOp folding and virtual-receiver operations.
 // ---------------------------------------------------------------------------
 
-void Analyzer::emitReplaceCall(CallBase *CB, Value *Replacement,
-                               jeandle::ObjectID ID) {
+void Analyzer::recordReplaceCallEffect(CallBase *CB, Value *Replacement,
+                                       jeandle::ObjectID MutationOwner,
+                                       int OopHandleId) {
   // PEA only folds Jeandle JavaOp intrinsics (CallInst/InvokeInst); every
   // caller is gated on an isJeandle* name predicate, which a CallBrInst
   // (inline-asm-with-goto, no called function) can never satisfy. Fail fast
@@ -6512,15 +6548,87 @@ void Analyzer::emitReplaceCall(CallBase *CB, Value *Replacement,
   E->Block = CB->getParent();
   E->Target = CB;
   E->Replacement = Replacement;
+  E->OopHandleId = OopHandleId;
   E->SeqNo = Result.nextSeqNo();
-  E->setMutationOwner(ID);
+  E->setMutationOwner(MutationOwner);
   Result.addBlockEffect(std::move(E));
-  // Scalar-alias non-void call values so downstream resolveVirtualRef queries
-  // (e.g. another JavaOp later in the same block whose operand is the call
-  // result) see through to the replacement constant. Void JavaOps can use a
-  // null Replacement to request deletion only.
+}
+
+void Analyzer::emitReplaceCallWithScalarAlias(CallBase *CB, Value *Replacement,
+                                              jeandle::ObjectID MutationOwner) {
+  recordReplaceCallEffect(CB, Replacement, MutationOwner);
+  // Let later scalar users and field-state snapshots see the replacement
+  // rather than a call that the transform will erase. A null Replacement
+  // requests deletion of a void JavaOp and has no result to alias.
   if (Replacement)
     Aliases.addScalarAlias(CB, Replacement);
+}
+
+void Analyzer::emitReplaceCallWithVirtualAlias(CallBase *CB, Value *Replacement,
+                                               jeandle::ObjectID MutationOwner,
+                                               jeandle::ObjectID AliasID,
+                                               bool IsWholeObject) {
+  assert(CB && Replacement && CB->getType()->isPointerTy() &&
+         CB->getType() == Replacement->getType() &&
+         AliasID != jeandle::InvalidObjectID &&
+         "virtual-alias ReplaceCall requires a pointer result and valid alias");
+  recordReplaceCallEffect(CB, Replacement, MutationOwner);
+  Aliases.addVirtualAlias(CB, AliasID, IsWholeObject);
+}
+
+void Analyzer::placeInstructionBefore(Instruction *InstructionToPlace,
+                                      Instruction *Target) {
+  assert(InstructionToPlace && !InstructionToPlace->getParent() && Target &&
+         Target->getParent() &&
+         "analysis-created instruction must be placed at an in-IR target");
+  Result.OwnedInsts.emplace_back(InstructionToPlace);
+  auto E = std::make_unique<jeandle::PlaceInstructionEffect>();
+  E->Block = Target->getParent();
+  E->Target = Target;
+  E->InstructionToPlace = InstructionToPlace;
+  E->SeqNo = Result.nextSeqNo();
+  Result.addBlockEffect(std::move(E));
+}
+
+std::optional<int64_t>
+Analyzer::resolveUnsafeReferenceOffset(CallBase *CB, jeandle::ObjectID BaseID,
+                                       Type *PhysicalType) {
+  assert(CB && CB->arg_size() >= 2 && PhysicalType &&
+         PhysicalType->isPointerTy() &&
+         "Unsafe reference offset resolution requires a pointer JavaOp");
+  auto *OffsetC = dyn_cast<ConstantInt>(CB->getArgOperand(1));
+  if (!OffsetC || !OffsetC->getValue().isSignedIntN(64))
+    return std::nullopt;
+  int64_t Offset = OffsetC->getSExtValue();
+
+  TypeSize Size = DL.getTypeStoreSize(PhysicalType);
+  if (Size.isScalable() || Size.getFixedValue() == 0 ||
+      Size.getFixedValue() > 255)
+    return std::nullopt;
+  uint64_t ByteSize = Size.getFixedValue();
+  auto End = jeandle::pea::checkedOffsetAdd(Offset, ByteSize);
+  if (!End || Offset < 0)
+    return std::nullopt;
+
+  const jeandle::VirtualObject &VObj = *Result.VirtualObjects[BaseID];
+  if (VObj.isArray()) {
+    int64_t Base = static_cast<int64_t>(VObj.ArrayBaseOffset);
+    auto ArrayEnd = jeandle::pea::checkedArrayElementOffset(
+        Base, VObj.ArrayLength, VObj.ArrayIndexScale);
+    if (VObj.ArrayIndexScale == 0 || ByteSize != VObj.ArrayIndexScale ||
+        !ArrayEnd || Offset < Base || *End > *ArrayEnd ||
+        ((Offset - Base) % VObj.ArrayIndexScale) != 0)
+      return std::nullopt;
+  } else {
+    if (Offset < VMConsts.instanceBaseOffset() ||
+        static_cast<uint64_t>(*End) > VObj.SizeInBytes)
+      return std::nullopt;
+  }
+
+  auto &MutableVO = *Result.VirtualObjects[BaseID];
+  if (MutableVO.getOrCreateFieldIndex(Offset, PhysicalType, DL) < 0)
+    return std::nullopt;
+  return Offset;
 }
 
 std::optional<bool> Analyzer::evalSubtypeRelation(uintptr_t SubKlass,
@@ -6535,6 +6643,194 @@ std::optional<bool> Analyzer::evalSubtypeRelation(uintptr_t SubKlass,
   if (jeandle::areKlassesIncompatible(SubKlass, /*Exact=*/true, SuperKlass))
     return false;
   return std::nullopt;
+}
+
+bool Analyzer::foldUnsafeGetReference(CallBase *CB) {
+  if (CB->arg_size() < 2 || !CB->getType()->isPointerTy() ||
+      cast<PointerType>(CB->getType())->getAddressSpace() !=
+          jeandle::AddrSpace::JavaHeapAddrSpace)
+    return false;
+  auto BaseID = jeandle::pea::resolveVirtualRef(CB->getArgOperand(0),
+                                                CurrentState, Aliases, DL);
+  if (!BaseID || !Eligible.lookup(*BaseID))
+    return false;
+
+  LLVMContext &Ctx = F.getContext();
+  unsigned PhysicalAS = VMConsts.UseCompressedOops
+                            ? jeandle::AddrSpace::NarrowOopAddrSpace
+                            : jeandle::AddrSpace::JavaHeapAddrSpace;
+  Type *PhysicalType = PointerType::get(Ctx, PhysicalAS);
+  auto Offset = resolveUnsafeReferenceOffset(CB, *BaseID, PhysicalType);
+  if (!Offset)
+    return false;
+
+  const jeandle::FieldValue *Existing = nullptr;
+  auto FIt = FieldStates.find(*BaseID);
+  if (FIt != FieldStates.end()) {
+    auto VIt = FIt->second.find(*Offset);
+    if (VIt != FIt->second.end())
+      Existing = &VIt->second;
+  }
+  if (Existing)
+    observeFieldDefinition(*BaseID, *Offset, FieldDefinitions);
+  if (!Existing) {
+    emitReplaceCallWithScalarAlias(
+        CB, ConstantPointerNull::get(cast<PointerType>(CB->getType())),
+        *BaseID);
+    return true;
+  }
+
+  if (Existing->isScalar() || Existing->isMaterializedRef()) {
+    Value *V = Existing->isScalar() ? Existing->getScalar()
+                                    : Existing->getMaterialized();
+    if (!V)
+      return false;
+    Value *Replacement = coerceToType(V, CB->getType(), CB);
+    if (!Replacement)
+      return false;
+    emitReplaceCallWithScalarAlias(CB, Replacement, *BaseID);
+    return true;
+  }
+
+  if (!Existing->isVirtualRef()) {
+    assert(Existing->isUnknown() &&
+           "unexpected tracked FieldValue tag for unsafe reference load");
+    return false;
+  }
+  jeandle::ObjectID InnerID = Existing->getVirtualRef();
+  if (!Eligible.lookup(InnerID))
+    return false;
+  const jeandle::ObjectState *InnerState =
+      CurrentState.getObjectStateOptional(InnerID);
+  if (!InnerState)
+    return false;
+
+  const jeandle::VirtualObject &InnerVO = *Result.VirtualObjects[InnerID];
+  Value *Identity = nullptr;
+  if (InnerState->isMaterialized()) {
+    Identity = InnerState->getMaterializedValue();
+  } else {
+    // A get observes the logical identity. A synthetic replay PHI is only a
+    // materialization receiver and must not be used while the inner VO is
+    // still virtual.
+    Identity = InnerVO.IsSynthetic
+                   ? static_cast<Value *>(InnerVO.SyntheticPhi)
+                   : static_cast<Value *>(InnerVO.AllocationCall);
+    if (InnerVO.IsSynthetic && !isValueAvailableAt(Identity, CB))
+      return false;
+  }
+  if (!Identity)
+    return false;
+  Value *Replacement = coerceToType(Identity, CB->getType(), CB);
+  if (!Replacement)
+    return false;
+
+  if (InnerState->isMaterialized()) {
+    emitReplaceCallWithScalarAlias(CB, Replacement, *BaseID);
+    return true;
+  }
+
+  // Preserve the result as a virtual identity so later JavaOps resolve this
+  // nested reference to InnerID rather than treating it as a scalar value.
+  emitReplaceCallWithVirtualAlias(CB, Replacement, *BaseID, InnerID,
+                                  /*IsWholeObject=*/true);
+  return true;
+}
+
+bool Analyzer::foldUnsafePutReference(CallBase *CB) {
+  if (CB->arg_size() < 3 || !CB->getType()->isVoidTy())
+    return false;
+  auto BaseID = jeandle::pea::resolveVirtualRef(CB->getArgOperand(0),
+                                                CurrentState, Aliases, DL);
+  if (!BaseID || !Eligible.lookup(*BaseID))
+    return false;
+
+  Value *StoredValue = CB->getArgOperand(2);
+  while (Value *Alias = Aliases.getScalarAlias(StoredValue))
+    StoredValue = Alias;
+  if (!StoredValue->getType()->isPointerTy() ||
+      cast<PointerType>(StoredValue->getType())->getAddressSpace() !=
+          jeandle::AddrSpace::JavaHeapAddrSpace)
+    return false;
+
+  LLVMContext &Ctx = F.getContext();
+  unsigned PhysicalAS = VMConsts.UseCompressedOops
+                            ? jeandle::AddrSpace::NarrowOopAddrSpace
+                            : jeandle::AddrSpace::JavaHeapAddrSpace;
+  Type *PhysicalType = PointerType::get(Ctx, PhysicalAS);
+  auto Offset = resolveUnsafeReferenceOffset(CB, *BaseID, PhysicalType);
+  if (!Offset)
+    return false;
+
+  auto Identity = jeandle::pea::resolveVirtualIdentity(
+      StoredValue, CurrentState, Aliases, DL,
+      jeandle::pea::VirtualIdentityMode::WholeObject);
+  if (Identity.isDefined()) {
+    FieldStates[*BaseID][*Offset] = jeandle::FieldValue::virtualRef(
+        Identity.getObjectID(), StoredValue->getType());
+  } else if (jeandle::pea::resolveVirtualRef(StoredValue, CurrentState, Aliases,
+                                             DL)) {
+    // A derived virtual pointer cannot be represented as a reference field
+    // without losing its byte offset. Keep the JavaOp and let generic escape
+    // handling materialize its operands.
+    return false;
+  } else {
+    FieldStates[*BaseID][*Offset] = jeandle::FieldValue::scalar(StoredValue);
+  }
+
+  FieldDefinitions[*BaseID].erase(*Offset);
+  // The JavaOp contains pre/post barriers and the physical narrow-oop encode.
+  // A fresh virtual receiver has no concrete heap slot or card to observe;
+  // materialization replays the semantic value using the physical FieldDesc.
+  emitReplaceCallWithScalarAlias(CB, nullptr, *BaseID);
+  return true;
+}
+
+bool Analyzer::foldReferenceRefersTo(CallBase *CB) {
+  if (CB->arg_size() < 2 || !CB->getType()->isIntegerTy(32) ||
+      !CB->getArgOperand(0)->getType()->isPointerTy() ||
+      !CB->getArgOperand(1)->getType()->isPointerTy())
+    return false;
+
+  Value *Receiver = CB->getArgOperand(0);
+  Value *Target = CB->getArgOperand(1);
+
+  // A virtual Reference receiver is deliberately unsupported by the VM
+  // callback. Keep this handler limited to a real receiver and do not infer
+  // referent field state for synthetic/offline Reference-like objects.
+  auto ReceiverIdentity = jeandle::pea::resolveVirtualIdentity(
+      Receiver, CurrentState, Aliases, DL,
+      jeandle::pea::VirtualIdentityMode::BaseObject);
+  if (ReceiverIdentity.isDefined())
+    return false;
+
+  // WholeObject rejects derived pointers and therefore proves that Target is
+  // the complete, still-virtual allocation rather than an interior address.
+  auto TargetIdentity = jeandle::pea::resolveVirtualIdentity(
+      Target, CurrentState, Aliases, DL,
+      jeandle::pea::VirtualIdentityMode::WholeObject);
+  if (!TargetIdentity.isDefined())
+    return false;
+  jeandle::ObjectID TargetID = TargetIdentity.getObjectID();
+  if (!Eligible.lookup(TargetID))
+    return false;
+
+  // A virtual allocation has not been published. This proof also handles
+  // external arguments, loads, and merges conservatively, and prevents a
+  // same-object receiver/target shape from being folded.
+  if (!jeandle::pea::isProvablyDistinctFromVirtual(Receiver, TargetID,
+                                                   CurrentState, Aliases, DL))
+    return false;
+
+  // reference_refers_to contains a CPUOrder fence even though it has no GC
+  // barrier. Keep that ordering boundary when replacing the call.
+  LLVMContext &Ctx = F.getContext();
+  auto *Fence = new FenceInst(Ctx, AtomicOrdering::SequentiallyConsistent,
+                              SyncScope::SingleThread);
+  placeInstructionBefore(Fence, CB);
+  Constant *ResultValue = ConstantInt::get(CB->getType(), 0);
+  emitReplaceCallWithScalarAlias(CB, ResultValue, TargetID);
+  return true;
 }
 
 bool Analyzer::foldArrayLength(CallBase *CB) {
@@ -6552,7 +6848,29 @@ bool Analyzer::foldArrayLength(CallBase *CB) {
     return false;
   Type *I32 = Type::getInt32Ty(F.getContext());
   Constant *Len = ConstantInt::get(I32, VObj.ArrayLength);
-  emitReplaceCall(CB, Len, *BaseID);
+  emitReplaceCallWithScalarAlias(CB, Len, *BaseID);
+  return true;
+}
+
+bool Analyzer::foldAssumeJavaType(CallBase *CB) {
+  // `assume_java_type` narrows only the Java klass carried by the result; it
+  // preserves the oop identity of its sole argument. Keep that identity
+  // virtual so later field accesses and JavaOps still resolve to the same VO.
+  if (CB->arg_size() != 1 || CB->getType() != CB->getArgOperand(0)->getType())
+    return false;
+
+  Value *Oop = CB->getArgOperand(0);
+  auto BaseID = jeandle::pea::resolveVirtualRef(Oop, CurrentState, Aliases, DL);
+  if (!BaseID)
+    return false;
+  if (!Eligible.lookup(*BaseID))
+    return false;
+
+  // Preserve the result as a virtual object identity rather than a scalar
+  // replacement so downstream field accesses and JavaOps keep resolving it
+  // to the same VO.
+  emitReplaceCallWithVirtualAlias(CB, Oop, *BaseID, *BaseID,
+                                  /*IsWholeObject=*/true);
   return true;
 }
 
@@ -6573,7 +6891,7 @@ bool Analyzer::foldLoadKlass(CallBase *CB) {
   Type *PtrTy = PointerType::get(Ctx, jeandle::AddrSpace::CHeapAddrSpace);
   Constant *KlassAsInt = ConstantInt::get(I64, VObj.Klass);
   Constant *KlassPtr = ConstantExpr::getIntToPtr(KlassAsInt, PtrTy);
-  emitReplaceCall(CB, KlassPtr, *BaseID);
+  emitReplaceCallWithScalarAlias(CB, KlassPtr, *BaseID);
   return true;
 }
 
@@ -6604,14 +6922,7 @@ bool Analyzer::foldGetClass(CallBase *CB) {
   int MirrorOopId = VMCB->GetJavaMirror(VObj.Klass);
   if (MirrorOopId < 0)
     return false;
-  auto E = std::make_unique<jeandle::ReplaceCallEffect>();
-  E->Block = CB->getParent();
-  E->Target = CB;
-  E->Replacement = nullptr; // built in apply() from OopHandleId.
-  E->OopHandleId = MirrorOopId;
-  E->SeqNo = Result.nextSeqNo();
-  E->setMutationOwner(*BaseID);
-  Result.addBlockEffect(std::move(E));
+  recordReplaceCallEffect(CB, nullptr, *BaseID, MirrorOopId);
   return true;
 }
 
@@ -6640,7 +6951,7 @@ bool Analyzer::foldCheckCast(CallBase *CB) {
     return false;
   Constant *Res = *Folded ? ConstantInt::getTrue(CB->getType())
                           : ConstantInt::getFalse(CB->getType());
-  emitReplaceCall(CB, Res, *BaseID);
+  emitReplaceCallWithScalarAlias(CB, Res, *BaseID);
   return true;
 }
 
@@ -6670,7 +6981,7 @@ bool Analyzer::foldInstanceOf(CallBase *CB) {
     return false;
   Type *I32 = Type::getInt32Ty(F.getContext());
   Constant *Res = ConstantInt::get(I32, *Folded ? 1 : 0);
-  emitReplaceCall(CB, Res, *BaseID);
+  emitReplaceCallWithScalarAlias(CB, Res, *BaseID);
   return true;
 }
 
@@ -6812,7 +7123,7 @@ bool Analyzer::foldMonitorEnter(CallBase *CB) {
   // Monitor JavaOps return void (the fast/slow dispatch lives inside the
   // JavaOp body, invisible to PEA), so there is no result to replace: emit a
   // null Replacement and let the transform erase the (always unused) call.
-  emitReplaceCall(CB, nullptr, *BaseID);
+  emitReplaceCallWithScalarAlias(CB, nullptr, *BaseID);
   return true;
 }
 
@@ -6857,7 +7168,7 @@ bool Analyzer::foldMonitorExit(CallBase *CB) {
   }
   // Monitor JavaOps return void, so there is no result to replace; see
   // foldMonitorEnter for why the null Replacement deletes the call.
-  emitReplaceCall(CB, nullptr, *BaseID);
+  emitReplaceCallWithScalarAlias(CB, nullptr, *BaseID);
   return true;
 }
 
@@ -6896,7 +7207,7 @@ bool Analyzer::foldArrayStoreCheck(CallBase *CB) {
     // true. A primitive array's value is a primitive, never a virtual object,
     // and the elision deletes the call, so no operand reference survives.
     Constant *True = ConstantInt::getTrue(CB->getType());
-    emitReplaceCall(CB, True, *ArrayID);
+    emitReplaceCallWithScalarAlias(CB, True, *ArrayID);
     return true;
   }
 
@@ -6906,7 +7217,7 @@ bool Analyzer::foldArrayStoreCheck(CallBase *CB) {
   // deletes the call, so the null operand survives nowhere.
   if (isa<ConstantPointerNull>(Val)) {
     Constant *True = ConstantInt::getTrue(CB->getType());
-    emitReplaceCall(CB, True, *ArrayID);
+    emitReplaceCallWithScalarAlias(CB, True, *ArrayID);
     return true;
   }
   uintptr_t ValueKlass = 0;
@@ -6930,7 +7241,7 @@ bool Analyzer::foldArrayStoreCheck(CallBase *CB) {
     // stored value.
     if (VMCB->IsObjectKlass && VMCB->IsObjectKlass(ElementKlass)) {
       Constant *True = ConstantInt::getTrue(CB->getType());
-      emitReplaceCall(CB, True, *ArrayID);
+      emitReplaceCallWithScalarAlias(CB, True, *ArrayID);
       return true;
     }
     return false; // unknown value klass — cannot prove elidable.
@@ -6944,7 +7255,7 @@ bool Analyzer::foldArrayStoreCheck(CallBase *CB) {
     // Provably compatible — elide. The value does not escape through the
     // (deleted) check.
     Constant *True = ConstantInt::getTrue(CB->getType());
-    emitReplaceCall(CB, True, *ArrayID);
+    emitReplaceCallWithScalarAlias(CB, True, *ArrayID);
     return true;
   }
   // Provably incompatible: at runtime this throws ArrayStoreException. The
@@ -6967,7 +7278,7 @@ bool Analyzer::foldPostBarrier(CallBase *CB) {
   // mark. The store is replayed as initialization when the object is
   // materialized, so the original barrier must not survive with the old slot
   // address.
-  emitReplaceCall(CB, nullptr, *BaseID);
+  emitReplaceCallWithScalarAlias(CB, nullptr, *BaseID);
   return true;
 }
 
@@ -7026,7 +7337,7 @@ bool Analyzer::foldCheckIfValueBased(CallBase *CB) {
   // an exact (virtualized) klass that does not carry the ValueBased marker
   // canonicalizes to false.
   Constant *False = ConstantInt::getFalse(CB->getType());
-  emitReplaceCall(CB, False, *BaseID);
+  emitReplaceCallWithScalarAlias(CB, False, *BaseID);
   return true;
 }
 
@@ -7065,7 +7376,7 @@ bool Analyzer::foldRegisterFinalizerIfNeeded(CallBase *CB) {
   // allocation can be eliminated.
   assert(!VMCB->HasFinalizer(VObj.Klass) &&
          "processAllocation must refuse finalizable klasses");
-  emitReplaceCall(CB, nullptr, *BaseID);
+  emitReplaceCallWithScalarAlias(CB, nullptr, *BaseID);
   return true;
 }
 
@@ -7255,8 +7566,16 @@ bool Analyzer::foldICmpEquality(ICmpInst *ICmp) {
 // to the generic escape path.
 bool Analyzer::processJavaOp(CallBase *CB) {
   using namespace jeandle::pea;
+  if (isJeandleUnsafeGetReference(CB))
+    return foldUnsafeGetReference(CB);
+  if (isJeandleUnsafePutReference(CB))
+    return foldUnsafePutReference(CB);
+  if (isJeandleReferenceRefersTo(CB))
+    return foldReferenceRefersTo(CB);
   if (isJeandleArrayLength(CB))
     return foldArrayLength(CB);
+  if (isJeandleAssumeJavaType(CB))
+    return foldAssumeJavaType(CB);
   if (isJeandleLoadKlass(CB))
     return foldLoadKlass(CB);
   if (isJeandleGetClass(CB))
