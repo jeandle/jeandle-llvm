@@ -55,6 +55,35 @@ exit:
   ret void
 }
 
+; Entry-state polls use the guarded per-batch inner preheader instead. Keep
+; the opaque clamp here so acceptance cannot come from a SCEV trip bound.
+define void @accepts_attributed_entry_nest(i64 %n) "java-method" {
+entry:
+  br label %outer.header
+outer.header:
+  %outer.iv = phi i64 [ 0, %entry ], [ %outer.iv.next, %outer.latch ]
+  %outer.cond = icmp slt i64 %outer.iv, %n
+  br i1 %outer.cond, label %inner.entry, label %exit
+inner.entry:
+  %batch.end = call i64 @llvm.sadd.sat.i64(i64 %outer.iv, i64 1000)
+  %cap.cond = icmp slt i64 %batch.end, %n
+  %inner.limit = select i1 %cap.cond, i64 %batch.end, i64 %n
+  call hotspotcc void @jeandle.safepoint_poll() #0 [ "deopt"(i64 %outer.iv) ]
+  br label %inner.header
+inner.header:
+  %iv = phi i64 [ %outer.iv, %inner.entry ], [ %iv.next, %inner.latch ]
+  br label %inner.latch
+inner.latch:
+  %iv.next = add nsw i64 %iv, 1
+  %inner.cond = icmp slt i64 %iv.next, %inner.limit
+  br i1 %inner.cond, label %inner.header, label %outer.latch
+outer.latch:
+  %outer.iv.next = phi i64 [ %iv.next, %inner.latch ]
+  br label %outer.header
+exit:
+  ret void
+}
+
 ; Same nest, but the outer latch poll lacks the attribute: nothing marks the
 ; inner loop as strip-mined, and its clamped trip count is opaque to SCEV, so
 ; it is reported uncovered.
@@ -172,10 +201,12 @@ exit:
 attributes #0 = { "jeandle.strip-mined-poll" }
 
 ; WARN-NOT:  accepts_attributed_nest
+; WARN-NOT:  accepts_attributed_entry_nest
 ; WARN:      'inner.header' in function 'rejects_unattributed_nest'
 ; WARN-NEXT: SafepointCoverageVerifier: loop with header 'inner.header' in function 'rejects_attribute_on_outer_header'
 ; WARN-NEXT: SafepointCoverageVerifier: loop with header 'outer.header' in function 'rejects_attribute_on_non_poll'
 ; WARN-NEXT: SafepointCoverageVerifier: loop with header 'inner.header' in function 'rejects_attribute_on_non_poll'
 
 ; ABORT-NOT: accepts_attributed_nest
+; ABORT-NOT: accepts_attributed_entry_nest
 ; ABORT:     Jeandle safepoint coverage verification failed
