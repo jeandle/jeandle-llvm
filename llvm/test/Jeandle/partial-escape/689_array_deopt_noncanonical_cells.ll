@@ -10,10 +10,9 @@
 ; A virtual-array descriptor represents exactly one canonical cell per Java
 ; element.  Any touched byte cell that cannot be mapped to
 ; base + index*scale with the array's element storage representation must
-; reject the whole descriptor.  boolean[] uses i8 physical storage for its i1
-; logical element type; all other kinds require the exact element type.  The
-; fallback reuses the original allocation, replays the tracked store before the
-; safepoint, and leaves the real oop in the bundle.
+; reject the whole descriptor. The fallback reuses the original allocation,
+; replays the tracked store before the safepoint, and leaves the real oop in
+; the bundle.
 
 @arrayOopDesc.element_size.object = private constant i32 8
 @arrayOopDesc.element_size.long = private constant i32 4
@@ -128,10 +127,9 @@ unwind:
 ; CHECK-SAME: i64 85899345930, i32 99,
 ; CHECK-SAME: i64 524300, i32 0) ]
 
-; A boolean[] has one-byte physical cells even though its logical LLVM element
-; type is i1.  The front end therefore uses i8 loads and stores.  That exact
-; storage representation is canonical for a VM boolean element and must remain
-; eligible for a deopt descriptor.
+; A boolean[] has one-byte physical cells, represented by i8 loads and stores.
+; That exact storage representation is canonical for a VM boolean element and
+; must remain eligible for a deopt descriptor.
 define void @boolean_i8_cells_are_canonical() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
@@ -158,7 +156,7 @@ unwind:
 ; CHECK-SAME: [ "deopt"(i32 14, i32 14,
 ; CHECK-SAME: i64 262157, i64 68913, i32 3,
 ; CHECK-SAME: i64 68719476746, i8 1,
-; CHECK-SAME: i64 73014444042, i1 false,
+; CHECK-SAME: i64 73014444042, i8 0,
 ; CHECK-SAME: i64 77309411338, i8 1,
 ; CHECK-SAME: i64 524300, i32 0) ]
 

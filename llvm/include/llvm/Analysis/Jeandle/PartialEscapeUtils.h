@@ -354,14 +354,16 @@ bool isJeandlePostBarrier(const CallBase *CB);
 bool isJeandleMonitorEnter(const CallBase *CB);
 bool isJeandleMonitorExit(const CallBase *CB);
 bool isJeandleRegisterFinalizerIfNeeded(const CallBase *CB);
+bool isJeandleArrayCopyPseudoCall(const CallBase *CB);
 
 // Whether processIntrinsic treats II's ordinary operands and non-deopt operand
 // bundles as non-escaping. Deopt bundles remain executable frame state and
 // require a surviving whole-pool rewrite.
 bool isPEAHandledNonEscapingIntrinsic(const IntrinsicInst *II);
 
-// Map a JBasicType to its LLVM IR storage type for one element (e.g., Byte→i8,
-// Object→ptr addrspace(1)).  Returns nullptr if Kind == Count.
+// Map a JBasicType to its LLVM IR storage type for one element (e.g.,
+// Boolean/Byte→i8, Char/Short→i16, Object→ptr addrspace(1)). Returns nullptr
+// if Kind == Count.
 Type *llvmElementTypeFor(JBasicType Kind, LLVMContext &Ctx);
 
 // Whether Ty may be emitted by materialization as an LLVM atomic store.

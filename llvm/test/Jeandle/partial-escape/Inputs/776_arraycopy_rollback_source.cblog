@@ -1,0 +1,4 @@
+RequiresStrictLockOrder = 1
+ElementBasicTypeOfArrayKlass 12345 = 4
+ElementBasicTypeOfArrayKlass 12346 = 4
+IsValueBased 12346 = true
