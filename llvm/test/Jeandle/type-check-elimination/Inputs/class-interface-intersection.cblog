@@ -1,0 +1,12 @@
+IsObjectKlass 7 = false
+IsObjectKlass 9 = false
+IsInterface 9 = false
+IsInterface 7 = true
+GetSecondarySupers 9 = []
+GetSecondarySupers 7 = []
+IsSubtype 9 7 = false
+IsSubtype 7 9 = false
+IsSubtype 9 9 = true
+IsEffectivelyFinal 7 = false
+IsUnverifiedInterface 9 = false
+IsUnverifiedInterface 7 = true

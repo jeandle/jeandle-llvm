@@ -5,7 +5,7 @@
 ; propagates through and the field load recovers. Exercises pass-through
 ; transfer across multiple cast kinds that earlier passes may introduce.
 
-define void @test(ptr addrspace(1) "java-klass"="5" %obj) #0 gc "hotspotgc" {
+define void @test(ptr addrspace(1) noundef "java-klass"="5" %obj) #0 gc "hotspotgc" {
 entry:
   %c1 = freeze ptr addrspace(1) %obj
   %c2 = addrspacecast ptr addrspace(1) %c1 to ptr addrspace(3)

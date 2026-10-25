@@ -1,0 +1,6 @@
+# 3 is a plain non-final, non-Object class.
+IsObjectKlass 3 = false
+IsInterface 3 = false
+IsEffectivelyFinal 3 = false
+GetSecondarySupers 3 = []
+IsSubtype 3 3 = true

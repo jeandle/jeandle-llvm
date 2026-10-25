@@ -1,0 +1,8 @@
+IsObjectKlass 7 = false
+IsObjectKlass 8 = false
+IsInterface 7 = true
+IsInterface 8 = true
+GetSecondarySupers 7 = []
+GetSecondarySupers 8 = []
+IsSubtype 7 8 = false
+IsSubtype 8 7 = false

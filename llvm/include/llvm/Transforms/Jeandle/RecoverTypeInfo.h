@@ -34,10 +34,14 @@ namespace llvm {
 //       - loop-carried PHIs (including self-referential and
 //         mutually-recursive back-edges) converge without explicit cycle
 //         detection, since Top is the meet identity and Bottom is terminal.
-//     Transitions are descents except for one-shot "rescues", where a value
-//     ascends once from Top/Bottom to a Known that instanceof-derived facts
-//     prove (see the lattice comment in the .cpp); trajectories are bounded
-//     by klass-chain depth and the fixpoint still converges;
+//     Transitions are descents except for two bounded exceptions (see the
+//     lattice comment in the .cpp): a dead-path contradiction between the
+//     lattice bound and a context/edge fact retains the lattice bound, and a
+//     Bottom value resolves ("rescue") from a constant instanceof-derived
+//     fact. Most inputs settle in a bounded number of sweeps; deeply
+//     contradictory shapes are cut off by the internal round cap, which is
+//     the termination guarantee, and every written state is independently
+//     sound.
 //   * a context-sensitive getJavaType query on the base at the load's
 //     position, which additionally sharpens the type through dominating
 //     jeandle.check_instanceof checks. The query is constant during the

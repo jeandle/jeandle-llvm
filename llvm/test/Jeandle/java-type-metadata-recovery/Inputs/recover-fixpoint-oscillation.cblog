@@ -1,0 +1,19 @@
+# The PHI's declared-klass arm is klass 3; the dominating check proves klass 4.
+# The two are unrelated (both subtype queries fail), so their typeIntersect is
+# empty. Klass 3's field at offset 16 is declared as klass 3 itself (a linked
+# list); klass 4's field at the same offset is also declared as klass 3, which
+# is what the (now one-shot) context rescue derives.
+GetFieldType 3 16 = 3
+GetFieldType 4 16 = 3
+ArrayElementKlass 3 = 0
+ArrayElementKlass 4 = 0
+IsUnverifiedInterface 3 = false
+IsEffectivelyFinal 3 = false
+IsEffectivelyFinal 4 = false
+IsSubtype 3 4 = false
+IsSubtype 4 3 = false
+
+IsInterface 3 = false
+GetSecondarySupers 3 = []
+IsInterface 4 = false
+GetSecondarySupers 4 = []

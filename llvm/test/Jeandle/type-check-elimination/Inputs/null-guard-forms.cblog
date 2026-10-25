@@ -1,0 +1,6 @@
+# 22 is a plain non-final, non-Object class.
+IsObjectKlass 22 = false
+IsInterface 22 = false
+IsEffectivelyFinal 22 = false
+GetSecondarySupers 22 = []
+IsSubtype 22 22 = true

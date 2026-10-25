@@ -140,8 +140,8 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
         jeandle::getJavaType(Obj, &DT, CheckCB, IsNullEdge);
 
     // --- Fold to true: known subtype ---
-    if (ObjType.isKnown() && (CB->IsSubtype(ObjType.Klass, SuperKlass) ||
-                              ObjType.Interfaces.contains(SuperKlass))) {
+    if ((ObjType.isKnown() && CB->IsSubtype(ObjType.Klass, SuperKlass)) ||
+        ObjType.Interfaces.contains(SuperKlass)) {
       Folds.push_back({CheckCB, ConstantInt::getTrue(CheckCB->getType())});
       continue;
     }

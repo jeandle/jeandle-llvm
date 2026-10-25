@@ -1,0 +1,6 @@
+# 2 is a plain non-final, non-Object class.
+IsObjectKlass 2 = false
+IsInterface 2 = false
+IsEffectivelyFinal 2 = false
+GetSecondarySupers 2 = []
+IsSubtype 2 2 = true

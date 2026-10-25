@@ -1,0 +1,1 @@
+# No VM queries are issued: both sites are skipped before any callback use.

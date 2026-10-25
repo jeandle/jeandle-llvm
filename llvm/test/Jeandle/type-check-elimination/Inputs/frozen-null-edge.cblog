@@ -1,0 +1,4 @@
+IsObjectKlass 3 = false
+IsSubtype 3 3 = true
+IsInterface 3 = false
+GetSecondarySupers 3 = []

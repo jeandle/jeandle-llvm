@@ -1,0 +1,18 @@
+# Base klass 5 has a field at offset 16 of declared type klass 7; klass 7 in
+# turn has a field at offset 16 of declared type klass 9 (the chained load
+# through the lazy-init merge).
+GetFieldType 5 16 = 7
+GetFieldType 7 16 = 9
+IsUnverifiedInterface 7 = false
+IsUnverifiedInterface 9 = false
+IsEffectivelyFinal 7 = false
+IsEffectivelyFinal 9 = false
+ArrayElementKlass 5 = 0
+ArrayElementKlass 7 = 0
+
+IsInterface 5 = false
+GetSecondarySupers 5 = []
+IsInterface 7 = false
+GetSecondarySupers 7 = []
+IsInterface 9 = false
+GetSecondarySupers 9 = []

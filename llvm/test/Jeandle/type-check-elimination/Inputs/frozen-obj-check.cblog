@@ -1,0 +1,6 @@
+# Klass 20, concrete and non-final.
+IsObjectKlass 20 = false
+IsInterface 20 = false
+GetSecondarySupers 20 = []
+IsEffectivelyFinal 20 = false
+IsSubtype 20 20 = true

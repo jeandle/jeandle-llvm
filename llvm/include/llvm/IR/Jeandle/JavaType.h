@@ -87,7 +87,9 @@ using IsNullEdgeOracle =
 /// Get the Java type of a value.
 ///
 /// When Context is null, performs a context-insensitive query using only
-/// attributes and metadata attached to the value (and PHI incoming values).
+/// attributes and metadata attached to the value and supported dependencies
+/// (PHIs, selects and pointer-identity expressions). Returned arguments and
+/// explicit return attributes constrain the result simultaneously.
 ///
 /// When Context is provided, additionally performs context-sensitive sharpening
 /// with the edge-semantics dataflow engine: guards attached to CFG edges are
@@ -115,12 +117,19 @@ using IsNullEdgeOracle =
 /// - Select instructions (constant and non-constant arms)
 /// - Integer casts: zext, sext, trunc (but not bitcast, fpcast, etc.)
 /// - ICmp comparisons of a check_instanceof result against a constant
+/// - Switch case values of a check_instanceof result
 /// - Direct jeandle.check_exact_klass calls
+/// - Freeze of a traced condition (with a definedness proof)
 /// - And (i1) of two traced conditions
 /// - Or (i1) of two traced conditions
 /// - Xor i1 %a, true: logical NOT
 /// - Direct jeandle.check_instanceof calls
-/// Unrecognized patterns conservatively return unknown ({}).
+///
+/// Widened boolean forms are tracked by their exact value domain, not by an
+/// assumed {0,1}: sext of an i1 check result widens to {0,-1}, and constant
+/// arms equal to neither domain value make the expression check-independent.
+/// And/Or/Xor are matched on i1 only. Unrecognized patterns conservatively
+/// return unknown ({}).
 JavaType getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
                      IsNullEdgeOracle IsNullEdge);
 
@@ -142,8 +151,8 @@ JavaType sharpen(Value *V, Instruction *Context, DominatorTree &DT,
                  BasicBlock *DestBB, IsNullEdgeOracle IsNullEdge);
 
 /// Compute the type union of two Java types. Used when the value could be
-/// either type (PHI, select). Widens positive type to LCA and intersects
-/// ExcludedKlasses (only exclusions common to both survive).
+/// either type (PHI, select). Widens positive type to LCA and keeps exclusions
+/// implied by both operands, explicitly or through positive bounds.
 JavaType typeUnion(JavaType A, JavaType B);
 
 /// Compute the type intersection of two Java types. Used when both constraints
@@ -151,21 +160,43 @@ JavaType typeUnion(JavaType A, JavaType B);
 /// Narrows to the more specific positive type and unions ExcludedKlasses.
 JavaType typeIntersect(JavaType A, JavaType B);
 
-/// Returns true if Klass and OtherKlass are provably incompatible under
-/// Java's single-class inheritance. Requires VM callbacks to be registered.
+/// Returns true if Klass and OtherKlass are provably incompatible, including
+/// Java's interface and array-covariance rules. Requires VM callbacks to be
+/// registered. Missing interface-array classification conservatively prevents
+/// proofs of incompatibility between unrelated non-exact class bounds.
 /// \p KlassExact indicates whether Klass is known to be an exact type.
 bool areKlassesIncompatible(uintptr_t Klass, bool KlassExact,
                             uintptr_t OtherKlass);
 
 /// Extract a Klass pointer constant from a Value.
-/// Strips pointer casts and aliases first, then handles: freeze passthrough,
-/// inttoptr of ConstantInt (instruction and ConstantExpr forms),
+/// Strips pointer casts and aliases first, then handles: defined freeze
+/// operands, inttoptr of ConstantInt (instruction and ConstantExpr forms),
 /// inttoptr(zext/sext(V)) widening casts, inttoptr(ptrtoint(V)) round-trip
 /// chains, load from a constant GlobalVariable (recurses into initializer,
 /// follows GlobalAlias), and bare ConstantInt (reachable via GlobalVariable
 /// recursion). Has a recursion depth limit to prevent infinite recursion.
 /// Returns 0 if the value does not encode a constant klass pointer.
 uintptr_t extractKlassConstant(Value *V);
+
+/// Return the single input of a Java pointer-identity expression, or nullptr.
+/// Recognizes zero-index GEPs, non-interposable aliases, pointer casts,
+/// invariant-group intrinsics and returned-argument calls. An independent
+/// result type constrains this dependency simultaneously. Freeze is handled
+/// separately because forwarding through it requires a definedness proof.
+Value *getJavaIdentityInput(Value *V);
+
+/// Prove that V is defined (never poison) at its definition, without
+/// context. Recognized as defined: freeze/alloca results, constants,
+/// arguments and call results carrying noundef/dereferenceable attributes,
+/// loads with the matching metadata, and the jeandle check helpers (their
+/// templates compute a concrete boolean for every contract-valid input), plus
+/// a closed set of pure operators over defined inputs. Anything else —
+/// including operations with poison-generating flags and addrspacecast — is
+/// conservatively not proven. This is the proof JavaType itself requires
+/// before forwarding type facts through a freeze; passes that mirror the
+/// freeze/definedness discipline (e.g. RecoverTypeInfo's lattice) should use
+/// the same predicate rather than re-deriving one.
+bool isProvenDefined(Value *V);
 
 } // namespace jeandle
 } // namespace llvm

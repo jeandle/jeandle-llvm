@@ -441,8 +441,17 @@ InvokeInst *optimizeInvokeBasic(InvokeInst &CB,
 bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
                       DomTreeUpdater &DTU,
                       const jeandle::VMCallbacks &Callbacks, uintptr_t Caller,
-                      jeandle::IsNullEdgeOracle IsNullEdge) {
+                      jeandle::IsNullEdgeOracle IsNullEdge,
+                      SmallVectorImpl<InvokeInst *> &Deferred) {
   using jeandle::JavaType;
+
+  // A java-attributed invoke is not necessarily a direct java call: legal IR
+  // can attach the call-site attributes to an indirect callee or to a call
+  // without a receiver argument. Every path below assumes a direct callee and
+  // at least one operand, so bail here instead of dereferencing.
+  Function *CalleeFn = CB.getCalledFunction();
+  if (!CalleeFn || CB.arg_empty())
+    return false;
 
   // linkTo* intrinsics need their MemberName operand removed and their invoke
   // rebuilt. Feed the rebuilt call back through this path so ordinary CHA
@@ -464,7 +473,10 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
       if (NewCB) {
         CB.replaceAllUsesWith(NewCB);
         CB.eraseFromParent();
-        optimizeCallSite(*NewCB, F, DT, DTU, Callbacks, Caller, IsNullEdge);
+        // Refinement of the rebuilt invoke is deferred to the caller's loop,
+        // which clears the LVI cache after this rewrite — recursing here
+        // would query the null-edge oracle on a stale lattice.
+        Deferred.push_back(NewCB);
         return true;
       }
       return false;
@@ -489,7 +501,7 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
   uintptr_t Callee = 0;
   uintptr_t Holder = 0;
   uint64_t Id = 0;
-  getFunctionJavaMethod(*CB.getCalledFunction(), Callee);
+  getFunctionJavaMethod(*CalleeFn, Callee);
   getUIntPtrFnAttr(CB, jeandle::Attribute::DeclaredHolder, Holder);
   getUIntFnAttr(CB, jeandle::Attribute::StatepointID, Id);
   assert(Id >= 0 && Id <= 0xffffffff && "must be 32 bits.");
@@ -513,6 +525,19 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
     return false;
   }
 
+  // Everything that can abort or fail runs before the VM-side call-site
+  // update: a malformed deopt bundle (diagnosed as fatal) or a missing check
+  // declaration must not leave the VM record rewritten with no matching IR
+  // change. After this point the remaining steps cannot fail.
+  int BCI = getCurrentDeoptBCI(CB);
+  std::string Prefix = "cha_bci_" + std::to_string(BCI);
+  OperandBundleDef PreCallDeopt = createPreCallDeoptBundle(CB);
+  if (!M->getFunction("jeandle.check_instanceof")) {
+    LLVM_DEBUG(dbgs() << "CHA: jeandle.check_instanceof declaration missing, "
+                         "skipping site\n");
+    return false;
+  }
+
   if (!Callbacks.UpdateCallSite(static_cast<int64_t>(Id),
                                 OptInfo.isStatic() ? jeandle::StaticCall
                                                    : jeandle::OptVirtualCall,
@@ -520,21 +545,14 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
     return false;
   }
 
-  int BCI = getCurrentDeoptBCI(CB);
-  std::string Prefix = "cha_bci_" + std::to_string(BCI);
-
   // Virtual/interface calls need a speculative receiver type guard.
-  std::optional<OperandBundleDef> PreCallDeopt = createPreCallDeoptBundle(CB);
-  if (!PreCallDeopt)
-    return false;
-
   BasicBlock *CheckInstanceofFail =
       insertCheckInstanceOf(CB, Receiver, OptInfo.constraint(), Prefix, &DTU);
   assert(CheckInstanceofFail && "failed to insert check_instanceof");
 
   IRBuilder<> BuilderFail(CheckInstanceofFail);
   buildDeoptimize(BuilderFail, *CB.getModule(), OptInfo.deoptReason(),
-                  jeandle::Deoptimization::Action_none, *PreCallDeopt);
+                  jeandle::Deoptimization::Action_none, PreCallDeopt);
 
   // Retarget the invoke after the VM call-site record has been updated.
   updateStaticOptVirtualCallAttrs(
@@ -572,13 +590,17 @@ PreservedAnalyses CHADevirtualization::run(Function &F,
   DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Lazy);
   // The null-edge oracle needs LazyValueInfo, whose cached per-block lattice
   // goes stale when a rewrite splits blocks. Queries always run before a
-  // site's rewrite, and every successful rewrite clears the cache, so each
-  // query sees a lattice consistent with the current CFG.
+  // site's rewrite, and every successful rewrite — including an MH rebuild
+  // queued for refinement — is followed by a cache clear before the next
+  // query, so each query sees a lattice consistent with the current CFG.
   LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
   LVINullEdgeOracle IsNullEdge{LVI};
 
   // Snapshot invoke instructions because successful rewrites can replace and
-  // erase call sites while the pass is running.
+  // erase call sites while the pass is running. The loop is index-based:
+  // optimizeCallSite appends MH rebuilds that still need ordinary CHA
+  // refinement, and they are picked up here after the cache clear instead of
+  // being recursed into with a stale lattice.
   SmallVector<InvokeInst *, 16> Calls;
   for (Instruction &I : instructions(F)) {
     if (auto *CB = dyn_cast<InvokeInst>(&I))
@@ -588,9 +610,9 @@ PreservedAnalyses CHADevirtualization::run(Function &F,
   bool Changed = false;
   uintptr_t Caller = 0;
   getFunctionJavaMethod(F, Caller);
-  for (InvokeInst *CB : Calls) {
-    bool Rewritten =
-        optimizeCallSite(*CB, F, DT, DTU, *Callbacks, Caller, IsNullEdge);
+  for (unsigned I = 0; I < Calls.size(); ++I) {
+    bool Rewritten = optimizeCallSite(*Calls[I], F, DT, DTU, *Callbacks, Caller,
+                                      IsNullEdge, Calls);
     Changed |= Rewritten;
     if (Rewritten)
       LVI.clear();

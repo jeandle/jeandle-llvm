@@ -1,0 +1,36 @@
+# 1=Object 2=Animal 3=Dog
+IsObjectKlass 1 = true
+IsObjectKlass 2 = false
+IsObjectKlass 3 = false
+
+IsInterface 1 = false
+IsInterface 2 = false
+IsInterface 3 = false
+
+GetSecondarySupers 1 = []
+GetSecondarySupers 2 = []
+GetSecondarySupers 3 = []
+
+IsEffectivelyFinal 1 = false
+IsEffectivelyFinal 2 = false
+IsEffectivelyFinal 3 = false
+
+IsSubtype 1 1 = true
+IsSubtype 1 2 = false
+IsSubtype 1 3 = false
+IsSubtype 2 1 = true
+IsSubtype 2 2 = true
+IsSubtype 2 3 = false
+IsSubtype 3 1 = true
+IsSubtype 3 2 = true
+IsSubtype 3 3 = true
+
+GetCommonSuperKlass 1 1 = 1
+GetCommonSuperKlass 1 2 = 1
+GetCommonSuperKlass 1 3 = 1
+GetCommonSuperKlass 2 1 = 1
+GetCommonSuperKlass 2 2 = 2
+GetCommonSuperKlass 2 3 = 2
+GetCommonSuperKlass 3 1 = 1
+GetCommonSuperKlass 3 2 = 2
+GetCommonSuperKlass 3 3 = 3

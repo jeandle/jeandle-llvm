@@ -1,0 +1,2 @@
+# No callbacks are needed when nothing matches; an empty-but-parseable log.
+IsObjectKlass 1 = true

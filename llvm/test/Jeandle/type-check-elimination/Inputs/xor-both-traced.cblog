@@ -1,0 +1,15 @@
+# Klass 21 is a subclass of klass 20 (neither final, no interfaces). The xor
+# true-side join takes the LCA of the two arms (20), and the fold checks the
+# self-subtype.
+IsSubtype 21 20 = true
+IsSubtype 20 21 = false
+GetCommonSuperKlass 20 21 = 20
+IsEffectivelyFinal 20 = false
+IsSubtype 20 20 = true
+IsObjectKlass 20 = false
+IsObjectKlass 21 = false
+
+IsInterface 20 = false
+GetSecondarySupers 20 = []
+IsInterface 21 = false
+GetSecondarySupers 21 = []

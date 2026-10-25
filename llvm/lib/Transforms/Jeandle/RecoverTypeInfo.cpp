@@ -110,18 +110,23 @@ namespace {
 //             knowledge under meet.
 //
 // The lattice is ordered Top > Known{K} > Known{parent(K)} > ... > Bottom, so
-// almost every transition during the fixpoint is a descent:
+// most transitions during the fixpoint are descents:
 //   * seeds (attributes / surviving metadata / constant oop) are fixed;
 //   * a forwarder descends as its operands descend;
 //   * a typed load descends as its base widens (the field may disappear at an
 //     ancestor klass, taking the load Known -> Bottom);
 //   * Bottom is terminal.
-// The one exception is the context-query rescue: a value can ascend once from
-// Top or Bottom to a Known the instanceof-derived facts prove (see
-// transferTypedLoad and the PHI case of transferForwarder). Each value's
-// trajectory is thus a klass-chain-bounded sequence of descents plus such
-// one-shot rescues, so the fixpoint still converges; the round cap is a
-// defensive backstop.
+// Two transitions are deliberately not plain descents (see transferTypedLoad
+// and the PHI case of transferForwarder): a dead-path contradiction between
+// the lattice bound and a context/edge fact retains the lattice bound
+// (vacuously sound — no live value satisfies both), which removes the
+// Bottom<->Known flip a cyclic dependency would otherwise exhibit, and a
+// Bottom value with a known context/edge fact resolves from that constant
+// fact ("rescue"). Most inputs therefore settle in a bounded number of
+// sweeps. Deep contradictions — a base whose lattice bound and context type
+// each imply mutually exclusive results — can still alternate; the round cap
+// is the necessary termination guarantee for those, and since every written
+// state is independently sound, a cap-stopped snapshot is safe to emit.
 struct Lattice {
   enum class Kind : uint8_t { Top, Known, Bottom };
   Kind K = Kind::Top;
@@ -145,23 +150,18 @@ struct Lattice {
 };
 
 // =============================================================================
-// Forwarders — oop-typed instructions whose klass is determined by their
+// Forwarders — pointer instructions whose klass is determined by their
 // operands (so they start at Top and are pulled down by the worklist). Loads
 // are handled separately (as seeds or field loads), and non-zero-offset GEPs
 // are NOT forwarders (they produce interior pointers, not object references).
+// Raw pointer wrappers are tracked so casts can carry an oop's type through
+// an intermediate address space.
 // =============================================================================
 bool isForwarder(Instruction &I) {
-  if (!isJavaOopType(I.getType()))
+  if (!I.getType()->isPointerTy())
     return false;
-  if (isa<PHINode>(I) || isa<SelectInst>(I) || isa<BitCastInst>(I) ||
-      isa<AddrSpaceCastInst>(I) || isa<FreezeInst>(I))
-    return true;
-  if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
-    return GEP->hasAllZeroIndices();
-  if (auto *II = dyn_cast<IntrinsicInst>(&I))
-    return II->getIntrinsicID() == Intrinsic::launder_invariant_group ||
-           II->getIntrinsicID() == Intrinsic::strip_invariant_group;
-  return false;
+  return isa<PHINode, SelectInst, FreezeInst>(I) ||
+         jeandle::getJavaIdentityInput(&I);
 }
 
 } // namespace
@@ -326,15 +326,33 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
 
   // Strip a load pointer to (base, constant offset). Returns nullopt offset if
   // the offset does not fit in an int (e.g. huge/variable composite that
-  // accumulated past int range). Uses stripAndAccumulateConstantOffsets so the
-  // base is reached across nested constant GEPs, bitcasts, addrspacecasts and
-  // invariant-group intrinsics.
+  // accumulated past int range). Accumulate each GEP using its own address
+  // space's index width. Calls with independent result bounds remain bases;
+  // unannotated identity calls can wrap field addresses and forward offsets.
   auto stripBaseOffset =
       [&](Value *Ptr) -> std::pair<Value *, std::optional<int>> {
     unsigned IdxBits = DL.getIndexTypeSizeInBits(Ptr->getType());
     APInt Off(IdxBits, 0, /*isSigned=*/true);
-    Value *Base = Ptr->stripAndAccumulateConstantOffsets(
-        DL, Off, /*AllowNonInbounds=*/true, /*AllowInvariantGroup=*/true);
+    Value *Base = Ptr;
+    SmallPtrSet<Value *, 8> Visited;
+    while (Visited.insert(Base).second) {
+      if (auto *Call = dyn_cast<CallBase>(Base))
+        if (klassFromAttr(Call->getAttributes(), AttributeList::ReturnIndex)
+                .isKnown())
+          break;
+      if (auto *GEP = dyn_cast<GEPOperator>(Base)) {
+        APInt Delta(DL.getIndexTypeSizeInBits(Base->getType()), 0);
+        if (!GEP->accumulateConstantOffset(DL, Delta) ||
+            Delta.getSignificantBits() > IdxBits)
+          break;
+        Off += Delta.sextOrTrunc(IdxBits);
+        Base = GEP->getPointerOperand();
+      } else if (Value *Input = jeandle::getJavaIdentityInput(Base)) {
+        Base = Input;
+      } else {
+        break;
+      }
+    }
     if (!Off.isSignedIntN(sizeof(int) * CHAR_BIT))
       return {Base, std::nullopt};
     return {Base, static_cast<int>(Off.getSExtValue())};
@@ -344,6 +362,8 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
   // State
   // ---------------------------------------------------------------------------
   DenseMap<Value *, Lattice> States;
+  // Returned calls forward an input and may independently constrain the result.
+  DenseMap<Instruction *, Lattice> ResultSeeds;
   // A tracked typed load: an oop-typed load whose result klass can be derived
   // from the klass of the object being loaded from.
   struct LoadInfo {
@@ -384,18 +404,23 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
                              Arg.getArgNo() + AttributeList::FirstArgIndex));
   }
 
-  unsigned OopInstCount = 0;
+  unsigned TrackedInstCount = 0;
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
-      if (!isJavaOopType(I.getType()))
+      if (!isJavaOopType(I.getType()) && !isForwarder(I))
         continue;
-      ++OopInstCount;
+      ++TrackedInstCount;
 
-      // Call / invoke with java-klass return attribute.
-      if (isa<CallBase>(&I)) {
-        auto *CB2 = cast<CallBase>(&I);
-        seed(&I,
-             klassFromAttr(CB2->getAttributes(), AttributeList::ReturnIndex));
+      if (auto *Call = dyn_cast<CallBase>(&I)) {
+        Lattice S =
+            klassFromAttr(Call->getAttributes(), AttributeList::ReturnIndex);
+        if (isForwarder(I)) {
+          seed(&I, Lattice::top());
+          if (S.isKnown())
+            ResultSeeds[&I] = S;
+        } else {
+          seed(&I, S);
+        }
         continue;
       }
 
@@ -430,9 +455,11 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
           QueryBase = stripBaseOffset(GEP->getPointerOperand()).first;
           HasVariableIndex = true;
         }
+        auto *BaseInst = dyn_cast<Instruction>(QueryBase);
         bool TrackedBase =
             (isa<Instruction>(QueryBase) || isa<Argument>(QueryBase)) &&
-            isJavaOopType(QueryBase->getType()) &&
+            (isJavaOopType(QueryBase->getType()) ||
+             (BaseInst && isForwarder(*BaseInst))) &&
             (HasVariableIndex || OffOpt.has_value());
         if (!TrackedBase) {
           // Loading from a stack slot / non-Java-heap address, or not from a
@@ -525,6 +552,19 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
   // ---------------------------------------------------------------------------
   // Transfer functions
   // ---------------------------------------------------------------------------
+  // Definedness proofs for freeze operands, cached per operand (the proof is
+  // context-independent and constant during the pass).
+  DenseMap<Value *, bool> FreezeDefinedCache;
+  auto isFrozenOperandDefined = [&](FreezeInst *FI) -> bool {
+    Value *Operand = FI->getOperand(0);
+    auto It = FreezeDefinedCache.find(Operand);
+    if (It == FreezeDefinedCache.end())
+      It = FreezeDefinedCache
+               .insert({Operand, jeandle::isProvenDefined(Operand)})
+               .first;
+    return It->second;
+  };
+
   auto transferForwarder = [&](Instruction &I) -> Lattice {
     if (auto *PN = dyn_cast<PHINode>(&I)) {
       // Per-incoming: intersect the lattice state with the edge sharpening
@@ -534,47 +574,91 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
       // incoming with a known edge fact contributes Known(S) immediately)
       // and even when the incoming recovers to a wider declared type.
       //
-      // Convergence note: as in transferTypedLoad, the per-incoming intersect
-      // is not strictly monotone in the lattice state (a rescue can ascend
-      // once from Top or Bottom to Known(S)); each value's trajectory is a
-      // klass-chain-bounded sequence of descents plus such one-shot rescues,
-      // sweeps run in deterministic program order, and the round cap is the
-      // definitive backstop. Soundness is unaffected: every contribution is
-      // the intersect of two independently sound facts, and metadata is only
-      // attached after the fixpoint.
+      // Convergence note: mirroring transferTypedLoad, a dead-path
+      // contradiction retains the lattice side, and a Bottom incoming is
+      // rescued to the edge-sharpened fact — a constant during the pass, so
+      // stable across sweeps. Deep contradictions can still alternate; the
+      // round cap guarantees termination and every written state is
+      // independently sound. Metadata is only attached after the fixpoint.
       Lattice R = Lattice::top();
       for (unsigned Idx = 0, E = PN->getNumIncomingValues(); Idx != E; ++Idx) {
+        // Literal null and poison arms are vacuous under the non-null
+        // contract (JavaType skips them in its own PHI handling); undef arms
+        // stay — an undef arm can materialize an arbitrary oop when reached.
+        if (isa<ConstantPointerNull, PoisonValue>(PN->getIncomingValue(Idx)))
+          continue;
         Lattice L = getLattice(PN->getIncomingValue(Idx));
         const jeandle::JavaType S = getEdgeSharpening(PN, Idx);
         if (L.isTop() && S.isUnknown())
           continue; // Top is the meet identity.
-        jeandle::JavaType Combined = jeandle::typeIntersect(
-            L.isKnown() ? jeandle::JavaType{L.Klass, L.Exact}
-                        : jeandle::JavaType{},
-            S);
-        if (Combined.isKnown())
-          R = meet(R, Lattice::known(Combined.Klass, Combined.Exact));
-        else if (!L.isTop())
-          R = meet(R, Lattice::bottom()); // contradiction (dead edge), or
-                                          // provably unknowable
+        jeandle::JavaType Combined;
+        if (L.isKnown()) {
+          Combined =
+              jeandle::typeIntersect(jeandle::JavaType{L.Klass, L.Exact}, S);
+          if (!Combined.isKnown())
+            // Dead-path contradiction: no live value satisfies both facts,
+            // so retaining the lattice bound is vacuously sound (same rule
+            // as JavaType's SCC keep-previous-klass). Dropping to Bottom
+            // instead could flip a cycle arm forever.
+            Combined = jeandle::JavaType{L.Klass, L.Exact};
+        } else if (S.isKnown()) {
+          // First resolution from Top, or the rescue of a Bottom incoming to
+          // the edge-sharpened fact.
+          Combined = S;
+        } else if (!L.isTop()) {
+          R = meet(R, Lattice::bottom()); // provably unknowable
+          continue;
+        } else {
+          continue; // L Top with unknown S — meet identity, handled above.
+        }
+        R = meet(R, Lattice::known(Combined.Klass, Combined.Exact));
       }
       return R;
     }
-    if (auto *SI = dyn_cast<SelectInst>(&I))
-      return meet(getLattice(SI->getTrueValue()),
-                  getLattice(SI->getFalseValue()));
-    if (isa<BitCastInst>(&I) || isa<AddrSpaceCastInst>(&I) ||
-        isa<FreezeInst>(&I))
-      return getLattice(I.getOperand(0));
-    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
-      assert(GEP->hasAllZeroIndices() && "non-zero GEP is not a forwarder");
-      return getLattice(GEP->getPointerOperand());
+    if (auto *SI = dyn_cast<SelectInst>(&I)) {
+      if (auto *C = dyn_cast<ConstantInt>(SI->getCondition()))
+        return getLattice(C->isZero() ? SI->getFalseValue()
+                                      : SI->getTrueValue());
+      // Null and poison arms are vacuous under the non-null contract, so a
+      // lazy-initialization select keeps its typed arm instead of meeting to
+      // Bottom (undef arms still meet — see the PHI case).
+      Value *TrueV = SI->getTrueValue(), *FalseV = SI->getFalseValue();
+      bool TrueVacuous = isa<ConstantPointerNull, PoisonValue>(TrueV);
+      bool FalseVacuous = isa<ConstantPointerNull, PoisonValue>(FalseV);
+      if (TrueVacuous && FalseVacuous)
+        return Lattice::bottom();
+      if (TrueVacuous)
+        return getLattice(FalseV);
+      if (FalseVacuous)
+        return getLattice(TrueV);
+      return meet(getLattice(TrueV), getLattice(FalseV));
     }
-    if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
-      assert((II->getIntrinsicID() == Intrinsic::launder_invariant_group ||
-              II->getIntrinsicID() == Intrinsic::strip_invariant_group) &&
-             "unexpected intrinsic forwarder");
-      return getLattice(II->getArgOperand(0));
+    if (auto *FI = dyn_cast<FreezeInst>(&I)) {
+      // freeze(x) is x only when x is defined: freezing a possibly-poison
+      // reference yields an arbitrary oop whose klass is unknowable. Apply
+      // the same definedness proof JavaType requires before forwarding a
+      // type through a freeze.
+      return isFrozenOperandDefined(FI) ? getLattice(I.getOperand(0))
+                                        : Lattice::bottom();
+    }
+    if (Value *Input = jeandle::getJavaIdentityInput(&I)) {
+      Lattice L = getLattice(Input);
+      auto It = ResultSeeds.find(&I);
+      if (It == ResultSeeds.end())
+        return L;
+      const Lattice &S = It->second;
+      // Keep an unresolved cycle edge as the join identity. An independent
+      // bound can refine a resolved input without widening pending loop facts.
+      if (L.isTop())
+        return L;
+      if (!L.isKnown())
+        return S;
+      jeandle::JavaType Combined =
+          jeandle::typeIntersect(jeandle::JavaType{L.Klass, L.Exact},
+                                 jeandle::JavaType{S.Klass, S.Exact});
+      // Either bound remains valid when their intersection is unrepresentable.
+      return Combined.isKnown() ? Lattice::known(Combined.Klass, Combined.Exact)
+                                : S;
     }
     llvm_unreachable("transferForwarder on non-forwarder");
   };
@@ -589,16 +673,32 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
     // recovered, including chains and loop-carried PHIs, which the query
     // cannot see because recovered metadata does not exist yet) and the cached
     // context-sensitive query (which additionally exploits instanceof
-    // sharpening). Intersection takes the narrower of the two; each is
-    // independently sound at the load. As the lattice descends the
-    // intersection only descends (narrower, or Bottom when the two sources
-    // contradict on a dead path), so the fixpoint still converges.
-    jeandle::JavaType Combined = jeandle::typeIntersect(
-        BL.isKnown() ? jeandle::JavaType{BL.Klass, BL.Exact}
-                     : jeandle::JavaType{},
-        CtxType);
-    if (!Combined.isKnown())
+    // sharpening). Each view is independently sound at the load, and the
+    // context query is constant during the pass. Their intersection can be
+    // empty on a dead path (unrelated non-exact bounds); a contradiction
+    // retains the lattice bound instead of dropping to Bottom — vacuously
+    // sound on the dead path (same rule as JavaType's SCC
+    // keep-previous-klass), and it removes the Bottom<->Known flip that would
+    // otherwise make a cyclic dependency oscillate forever. A Bottom base with
+    // a known context type resolves from the context type alone; that result
+    // is a constant (context type plus cached VM queries), so it is stable
+    // across sweeps. Deep contradictions (a base whose lattice bound and
+    // context type each derive different, mutually exclusive results) can
+    // still alternate; the round cap guarantees termination and every written
+    // state is independently sound, so a cap-stopped snapshot is safe.
+    jeandle::JavaType Combined;
+    if (BL.isKnown()) {
+      Combined = jeandle::typeIntersect(jeandle::JavaType{BL.Klass, BL.Exact},
+                                        CtxType);
+      if (!Combined.isKnown())
+        Combined = jeandle::JavaType{BL.Klass, BL.Exact}; // dead path
+    } else if (CtxType.isKnown()) {
+      // First resolution from Top, or the context-derived rescue of a Bottom
+      // base (e.g. an opaque call result sharpened by a dominating check).
+      Combined = CtxType;
+    } else {
       return BL.isTop() ? Lattice::top() : Lattice::bottom();
+    }
     // Array-ness first: ArrayElementKlass is non-zero exactly for object-array
     // klasses, while GetFieldType returns 0 for array klasses, so this
     // dispatch is unambiguous for both address shapes — including
@@ -648,7 +748,7 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
       if (getLattice(&I).isTop())
         Dynamic.push_back(&I);
 
-  unsigned Cap = 64 * (OopInstCount + 16) + 1024;
+  unsigned Cap = 64 * (TrackedInstCount + 16) + 1024;
   unsigned Round = 0;
   bool SweepChanged = true;
   while (SweepChanged) {
@@ -703,9 +803,13 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
           ConstantInt::get(Type::getInt64Ty(Ctx), L.Klass));
       LI->setMetadata(jeandle::Metadata::JavaKlass,
                       MDNode::get(Ctx, {KlassCMD}));
-      if (L.Exact)
-        LI->setMetadata(jeandle::Metadata::JavaKlassExact,
-                        MDNode::get(Ctx, {}));
+      // Set or clear the exact flag to match the recovered fact: a load can
+      // arrive with a lone !java-klass-exact flag (an earlier pass that does
+      // not strip the two together leaves this shape), and leaving it in
+      // place would combine with the fresh non-exact klass into an unproven
+      // exact claim for every consumer.
+      LI->setMetadata(jeandle::Metadata::JavaKlassExact,
+                      L.Exact ? MDNode::get(Ctx, {}) : nullptr);
       ++NumRecovered;
       Changed = true;
       LLVM_DEBUG(dbgs() << "recover-type-info: attached klass " << L.Klass

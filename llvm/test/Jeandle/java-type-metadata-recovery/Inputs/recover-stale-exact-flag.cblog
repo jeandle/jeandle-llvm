@@ -1,0 +1,11 @@
+# Base klass 5 has a field at offset 16 of declared type klass 7, a concrete
+# non-final class (recovered as non-exact).
+GetFieldType 5 16 = 7
+IsUnverifiedInterface 7 = false
+IsEffectivelyFinal 7 = false
+ArrayElementKlass 5 = 0
+
+IsInterface 5 = false
+GetSecondarySupers 5 = []
+IsInterface 7 = false
+GetSecondarySupers 7 = []

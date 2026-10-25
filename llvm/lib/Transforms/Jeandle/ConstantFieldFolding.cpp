@@ -171,7 +171,12 @@ transferForwarder(Instruction &I,
     return getLattice(SI->getTrueValue(), States)
         .meet(getLattice(SI->getFalseValue(), States));
 
-  if (isa<BitCastInst>(&I) || isa<AddrSpaceCastInst>(&I) || isa<FreezeInst>(&I))
+  if (auto *FI = dyn_cast<FreezeInst>(&I))
+    return jeandle::isProvenDefined(FI->getOperand(0))
+               ? getLattice(FI->getOperand(0), States)
+               : ConstOopLattice::bottom();
+
+  if (isa<BitCastInst>(&I) || isa<AddrSpaceCastInst>(&I))
     return getLattice(I.getOperand(0), States);
 
   if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
