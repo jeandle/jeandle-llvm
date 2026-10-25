@@ -2185,8 +2185,8 @@ void Analyzer::collectRetryVirtualizationSites(jeandle::ObjectID ID) {
   DenseSet<jeandle::ObjectID> Visited;
   while (!Worklist.empty()) {
     jeandle::ObjectID Cur = Worklist.pop_back_val();
-    if (!Visited.insert(Cur).second || Cur == jeandle::InvalidObjectID ||
-        Cur >= Result.VirtualObjects.size())
+    if (Cur == jeandle::InvalidObjectID ||
+        Cur >= Result.VirtualObjects.size() || !Visited.insert(Cur).second)
       continue;
     const jeandle::VirtualObject &VObj = *Result.VirtualObjects[Cur];
     if (VObj.IsSynthetic) {
