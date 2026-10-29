@@ -266,13 +266,11 @@ public:
 
   // Result of matching a GEP against the array's element-address pattern.
   // Index is the (possibly symbolic) Value* that names the Java-level
-  // element index; ElementType is the per-element LLVM type. Callers must
-  // inspect Index: a ConstantInt yields a constant element index (combine
+  // element index. A ConstantInt yields a constant element index (combine
   // it with ArrayBaseOffset + scale for the canonical byte offset); a
   // symbolic index forces the caller to bail (materialize the array).
   struct ArrayElementGEPMatch {
     llvm::Value *Index;
-    llvm::Type *ElementType;
   };
   std::optional<ArrayElementGEPMatch>
   matchArrayElementGEP(GetElementPtrInst *GEP,
@@ -467,9 +465,6 @@ public:
   ObjectState &getObjectStateForModification(ObjectID ID);
   const ObjectState *getObjectStateOptional(ObjectID ID) const;
 
-  unsigned getStateCount() const {
-    return ObjectStates ? static_cast<unsigned>(ObjectStates->size()) : 0u;
-  }
   // CFG liveness is target-specific rather than part of the shared virtual
   // object state. The analyzer's BlockExitInfo and EdgeContribution classify
   // structural predecessor inputs as Unseen, Dead, or Live.
@@ -865,8 +860,6 @@ public:
   // FieldValue; a SyntheticReplayIdentity instead supplies its owner's AS1
   // materialization receiver.
   Role PhiRole = Role::FieldValue;
-  // The PHI's value type (the tracked field's type at FieldOffset).
-  Type *PHIType = nullptr;
   // Byte offset of the merged field within the virtual object; the mutation
   // owner's field slot this PHI supplies. Ignored for SyntheticReplayIdentity.
   int64_t FieldOffset = 0;
@@ -914,7 +907,6 @@ public:
     return *Plan;
   }
   bool coversExactOccurrence(unsigned SemanticCell, ObjectID ID) const;
-  bool acceptsCurrentMember(ObjectID ID) const;
 
   void apply(TransformContext &Ctx) override;
   std::unique_ptr<Effect> clone() const override {
@@ -1104,11 +1096,8 @@ public:
     return &LockReplayBatches[It->second];
   }
 
-  // Net statistics, mutated in lockstep: each virtualization does
-  // ++VirtualizationDelta/--AllocationDelta, each de-virtualization the
-  // opposite, so AllocationDelta == -VirtualizationDelta always.
+  // Number of virtualizations, reduced when allocation owners lose eligibility.
   int VirtualizationDelta = 0;
-  int AllocationDelta = 0;
   // Source of Effect::SeqNo values; monotonically increasing over the
   // analysis run.
   uint32_t NextSeqNo = 0;

@@ -1,14 +1,10 @@
-; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-vm-callback-log=%S/Inputs/219_postbarrier_phi_addr_survives.cblog %s | FileCheck %s
+; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform,insert-gc-barriers" -jeandle-vm-callback-log=%S/Inputs/219_postbarrier_phi_addr_survives.cblog %s | FileCheck %s
 
-; jeandle.post_barrier(addr, oop) where `addr` is a PHI of two DISTINCT virtual
-; arrays (allocated on opposite sides of a diamond). resolveVirtualRef only
-; returns an ObjectID when all live PHI incomings resolve to the SAME virtual
-; object; here they resolve to two different ObjectIDs, so it returns nullopt
-; and foldPostBarrier returns false. The generic escape path materializes both
-; arrays and the barrier survives guarding the real store. Exercises the
-; resolveVirtualRef PHI-handling bail path for the new fold.
+; A PHI merging different array klasses keeps both arrays real. The retained
+; null store needs a pre barrier, and no post barrier, after PEA.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc void @jeandle.pre_barrier(ptr addrspace(1))
 declare hotspotcc void @jeandle.post_barrier(ptr addrspace(1), ptr addrspace(1))
 
 declare i32 @__gxx_personality_v0(...)
@@ -29,19 +25,18 @@ merge:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i32 16
   %p2 = getelementptr inbounds ptr addrspace(1), ptr addrspace(1) %base, i64 2
   store atomic ptr addrspace(1) null, ptr addrspace(1) %p2 unordered, align 4
-  call hotspotcc void @jeandle.post_barrier(ptr addrspace(1) %p2,
-                                           ptr addrspace(1) null)
   ret void
 u:
   %lp = landingpad i64 cleanup
   resume i64 %lp
 }
 
-; Both arrays must MATERIALIZE (the PHI of distinct virtuals cannot stay
-; virtual), and the barrier survives guarding the real store.
+; Both arrays remain real and the retained store receives its pre barrier.
 ; CHECK-LABEL: define void @test_postbarrier_phi_addr_survives
 ; CHECK: jeandle.new_array
+; CHECK: jeandle.pre_barrier
 ; CHECK: store atomic
-; CHECK: jeandle.post_barrier
+; CHECK-NOT: jeandle.post_barrier
+; CHECK: ret void
 
 !java-method-compilation = !{}

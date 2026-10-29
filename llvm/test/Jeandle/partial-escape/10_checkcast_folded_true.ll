@@ -1,6 +1,9 @@
-; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-vm-callback-log=%S/Inputs/10_checkcast_folded_true.cblog %s | FileCheck %s
+; RUN: llvm-link -S %s %S/Inputs/phase0_type_checks.ll -o %t
+; RUN: opt -S -passes="java-operation-lower<phase=0>" %t -o %t.lowered
+; RUN: FileCheck %s --check-prefix=LOWERED < %t.lowered
+; RUN: opt -S -passes="instcombine,simplifycfg,loop-simplify,instcombine,partial-escape-iterative" -jeandle-vm-callback-log=%S/Inputs/10_checkcast_folded_true.cblog %t.lowered | FileCheck %s
 
-; PEA: jeandle.checkcast on a virtual receiver folds to a constant
+; After phase-0 lowering, check_instanceof on a virtual receiver folds to a constant
 ; bool when the static subtype relation is known. Here the allocation has
 ; klass=5 and the cast targets klass=4; IsSubtype(5,4)=true (per cblog) so
 ; the call is replaced by `i1 true`.
@@ -29,5 +32,11 @@ u:
 ; CHECK-NOT: jeandle.new_instance
 ; CHECK-NOT: jeandle.checkcast
 ; CHECK: ret i1 true
+
+; LOWERED-LABEL: define i1 @test_checkcast
+; LOWERED-NOT: call hotspotcc i1 @jeandle.checkcast
+; LOWERED: call hotspotcc i1 @jeandle.check_instanceof
+; LOWERED-NOT: call hotspotcc i1 @jeandle.checkcast
+; LOWERED: ret i1
 
 !java-method-compilation = !{}

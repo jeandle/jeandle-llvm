@@ -1,21 +1,13 @@
-; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-vm-callback-log=%S/Inputs/214_postbarrier_virtual_array_fold.cblog %s | FileCheck %s
+; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform,insert-gc-barriers" -jeandle-vm-callback-log=%S/Inputs/214_postbarrier_virtual_array_fold.cblog %s | FileCheck %s
 
-; Object[] virtual array (klass 8888) holding a virtual instance (klass 5555).
-; The Jeandle frontend emits jeandle.post_barrier(addr, oop) after every
-; T_OBJECT array store (jeandleAbstractInterpreter.cpp:do_array_store_inner).
-; Before the post_barrier fold, processJavaOp had no case for it, so the
-; barrier call used the virtual array and forced its materialization —
-; defeating PEA for `new Object[]{...}`. foldPostBarrier resolves the address
-; operand to the virtual array and erases the barrier (emitReplaceCall with a
-; null replacement, the void-JavaOp deletion form). The store is eliminated and
-; recorded into the array's field state, and the stored oop is recorded as a
-; nested virtual reference, so neither the array nor the oop ever materializes:
-; the allocations, the store, and the barrier all disappear.
+; Object[] holding a virtual instance. PEA eliminates both allocations and
+; the reference store before InsertGCBarriers, so no barriers are needed.
 
 @arrayOopDesc.element_size.object = private constant i32 8
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
+declare hotspotcc void @jeandle.pre_barrier(ptr addrspace(1))
 declare hotspotcc void @jeandle.post_barrier(ptr addrspace(1), ptr addrspace(1))
 
 declare i32 @__gxx_personality_v0(...)
@@ -33,8 +25,6 @@ n2:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i32 16
   %p2 = getelementptr inbounds ptr addrspace(1), ptr addrspace(1) %base, i64 2
   store atomic ptr addrspace(1) %v, ptr addrspace(1) %p2 unordered, align 8
-  call hotspotcc void @jeandle.post_barrier(ptr addrspace(1) %p2,
-                                           ptr addrspace(1) %v)
   ret i32 0
 u:
   %lp = landingpad i64 cleanup
@@ -45,6 +35,7 @@ u:
 ; CHECK-NOT: jeandle.new_array
 ; CHECK-NOT: jeandle.new_instance
 ; CHECK-NOT: store
+; CHECK-NOT: jeandle.pre_barrier
 ; CHECK-NOT: jeandle.post_barrier
 ; CHECK: ret i32 0
 

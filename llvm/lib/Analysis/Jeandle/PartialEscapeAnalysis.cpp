@@ -214,35 +214,13 @@ static llvm::cl::list<std::string> JeandleEscapeAnalyzeFunctions(
                    "(the default) preserves substring-filter behavior."),
     llvm::cl::value_desc("function"));
 
-static bool matchesExactAnalyzeFunction(llvm::StringRef FunctionName) {
-  if (JeandleEscapeAnalyzeFunctions.empty())
-    return true;
-  for (const std::string &Allowed : JeandleEscapeAnalyzeFunctions) {
-    StringRef AllowedName(Allowed);
-    if (FunctionName == AllowedName)
-      return true;
-
-    // JDK-generated symbols append a numeric ciMethod identity. Try the stable
-    // name first, then accept that runtime suffix.
-    constexpr StringLiteral RootSuffix = ".root";
-    bool FunctionIsRoot = FunctionName.ends_with(RootSuffix);
-    bool AllowedIsRoot = AllowedName.ends_with(RootSuffix);
-    if (FunctionIsRoot != AllowedIsRoot)
-      continue;
-
-    StringRef Candidate = FunctionName;
-    StringRef StableName = AllowedName;
-    if (FunctionIsRoot) {
-      Candidate = Candidate.drop_back(RootSuffix.size());
-      StableName = StableName.drop_back(RootSuffix.size());
-    }
-    if (!Candidate.consume_front(StableName) || !Candidate.consume_front(".") ||
-        Candidate.empty() ||
-        !llvm::all_of(Candidate, [](char C) { return C >= '0' && C <= '9'; }))
-      continue;
-    return true;
-  }
-  return false;
+static bool matchesExactAnalyzeFunction(StringRef FunctionName) {
+  return JeandleEscapeAnalyzeFunctions.empty() ||
+         llvm::any_of(JeandleEscapeAnalyzeFunctions,
+                      [&](const std::string &Allowed) {
+                        return jeandle::pea::matchesFunctionNameFilter(
+                            FunctionName, Allowed);
+                      });
 }
 
 // Per-effect dbgs() trace. The cl::opt itself lives in
@@ -1522,9 +1500,7 @@ private:
   // B-vs-B' convergence check requires. Keying by the PHI (not by the
   // source-ID set) is what lets the source set evolve without minting a
   // fresh ObjectID every pass; two different PHIs at the same block still
-  // get distinct synthetics. The same map doubles as the memo that lets a
-  // later body pass re-resolve a loop-header PHI's back-edge incoming to
-  // the previous pass's synthetic (see processBlockPhis).
+  // get distinct synthetics.
   DenseMap<PHINode *, jeandle::ObjectID> CaseCVOCache;
 
   // Create an unparented PHI shell owned by Result.OwnedPhis; the transform
@@ -1688,8 +1664,7 @@ private:
   loopBlocksInRPO(Loop *L, ArrayRef<BasicBlock *> FunctionRPO);
   // One body pass of the inner fixpoint: process every block of L in LoopRPO
   // order (recursing into sub-loops), seeding the header with HeaderSeed
-  // when given. Publishes ActiveBodyPassLoop/BodyPassProcessed for the
-  // duration so processBlockPhis can recognize a not-yet-processed backedge.
+  // when given.
   void processLoopBodyOnePass(Loop *L, ArrayRef<BasicBlock *> LoopRPO,
                               ArrayRef<BasicBlock *> FunctionRPO,
                               const BlockExitData *HeaderSeed = nullptr);
@@ -1771,15 +1746,6 @@ private:
       const BlockExitData &Seed, const LoopSnapshot &S) const;
 #endif
 
-  // Active loop-body-pass context (processLoopBodyOnePass): the loop being
-  // re-processed and the blocks already processed in this pass. Consulted by
-  // processBlockPhis during an ordinary (unseeded) traversal to distinguish a
-  // loop-header PHI's not-yet-processed back-edge predecessor from a genuinely
-  // non-virtual incoming. Saved and restored around nested processLoop
-  // recursion; null when no body pass is active.
-  Loop *ActiveBodyPassLoop = nullptr;
-  llvm::SmallPtrSet<BasicBlock *, 16> BodyPassProcessed;
-
   // Structural equivalence of the BlockExitData base (the per-object
   // book-keeping). Backs the loop fixpoint's single-state B-vs-B'
   // convergence test; FieldValue::shallowEquals compares the per-field
@@ -1860,8 +1826,7 @@ private:
   bool foldArrayLength(CallBase *CB);
   bool foldLoadKlass(CallBase *CB);
   bool foldGetClass(CallBase *CB);
-  bool foldCheckCast(CallBase *CB);
-  bool foldInstanceOf(CallBase *CB);
+  bool foldCheckInstanceOf(CallBase *CB);
   // Fold a monitorenter on an eligible virtual receiver into lock-state
   // tracking and a ReplaceCall elision. Returns false otherwise; an
   // ineligible (already-abandoned) receiver first cascades still-locked
@@ -1882,14 +1847,13 @@ private:
   // monitorenter branch, distinct from foldMonitorEnter's elide-path
   // pre-cascade.
   void materializeVirtualLocksBefore(CallBase *MonEnter);
-  // Fold handlers for the VM-runtime JavaOps: array-store type check, card
-  // barrier, value-based-class check, and finalizer registration. Each
+  // Fold handlers for the VM-runtime JavaOps: array-store type check,
+  // value-based-class check, and finalizer registration. Each
   // returns true iff the op was folded or elided for a virtual receiver.
   bool foldArrayStoreCheck(CallBase *CB);
-  bool foldPostBarrier(CallBase *CB);
   bool foldCheckIfValueBased(CallBase *CB);
   bool foldRegisterFinalizerIfNeeded(CallBase *CB);
-  // Common helper for checkcast/check_instanceof: returns the folded constant
+  // Resolve the exact receiver's subtype relation to the queried klass:
   // bool (true/false) if the relationship is statically known, or
   // std::nullopt otherwise.
   std::optional<bool> evalSubtypeRelation(uintptr_t SubKlass,
@@ -3804,7 +3768,6 @@ bool Analyzer::MergeProcessor::mergeFieldStates(jeandle::ObjectID ID) {
     PE->SeqNo = 0;
     PE->setMutationOwner(ID);
     PE->PhiInst = Phi;
-    PE->PHIType = PhiType;
     PE->FieldOffset = Off;
     appendFullPhiInputs(*PE, InValues, PhiType);
     PendingPhiEffects.add(std::move(PE));
@@ -3984,8 +3947,10 @@ void Analyzer::deleteOwnedSince(size_t PhiMark, size_t InstMark) {
 //    virtual incoming at its predecessor's terminator.
 // Each incoming is resolved against its own predecessor's exit snapshot;
 // dead and not-yet-published (unseen backedge) slots are excluded from the
-// decision, as are poison wildcards and loop-carried self-references (each
-// with its own agreement rule below). CreatePHI effects are routed to Out —
+// decision, as are poison wildcards (with their agreement rule below).
+// LoopSimplify and InstCombine run before each production PEA round, folding
+// trivial self-referencing PHIs and canonicalizing multi-backedge headers.
+// CreatePHI effects are routed to Out —
 // a retry-cleared buffer during merge fixpoint iterations — and the whole
 // decision is re-derived from scratch on every call, so any stale alias on
 // the PHI is reset up front.
@@ -4024,7 +3989,6 @@ void Analyzer::processBlockPhis(BasicBlock *BB, jeandle::EffectList &Out) {
     SmallVector<std::optional<jeandle::ObjectID>, 4> InIDs;
     SmallBitVector Unresolved(Phi.getNumIncomingValues(), false);
     SmallBitVector Dead(Phi.getNumIncomingValues(), false);
-    SmallBitVector SelfCarry(Phi.getNumIncomingValues(), false);
     SmallBitVector PoisonWildcard(Phi.getNumIncomingValues(), false);
     bool AnyVirtual = false;
     bool AnyDerived = false; // a resolved incoming with a non-zero/non-constant
@@ -4061,52 +4025,6 @@ void Analyzer::processBlockPhis(BasicBlock *BB, jeandle::EffectList &Out) {
         Found = BaseIdentity.getObjectID();
         if (!WholeIdentity.isDefined() || WholeIdentity.getObjectID() != *Found)
           AnyDerived = true;
-      } else {
-        // Loop-carried self-reference: the incoming value peels (through
-        // offset-0 casts / zero-index GEPs / freeze) back to this PHI
-        // itself. The virtual alias that would resolve it may not have been
-        // registered yet in the current traversal. A self-carry denotes this
-        // PHI itself, so it agrees with
-        // whatever object the remaining incomings resolve to (verified
-        // against the consensus below). A NON-ZERO / non-constant offset on
-        // the carry changes the value per iteration — that is a derived
-        // carry, not an identity carry.
-        int64_t Off = 0;
-        bool NonConst = false;
-        Value *Base =
-            jeandle::pea::stripPointerCastsAndOffsets(V, DL, &Off, &NonConst);
-        if (Base == &Phi) {
-          SelfCarry.set(I);
-          if (NonConst || Off != 0)
-            AnyDerived = true;
-        }
-      }
-      // During an ordinary loop body pass, an incoming of the loop-header PHI
-      // whose predecessor is inside the loop but has not yet been processed in
-      // this pass cannot be trusted as a divergence. First try to re-resolve
-      // the incoming through the phi-keyed Case-C cache. If the memo does not
-      // cover this slot, the incoming is unknown and the post-body merge
-      // re-derives the decision with complete latch data. Restricted to the
-      // loop header: non-header blocks get no post-body re-merge, so an
-      // optimistic decision there could never be corrected. SelfCarry keeps
-      // precedence because it is structural and needs no alias.
-      if (!Found && !PoisonWildcard.test(I) && !SelfCarry.test(I) &&
-          ActiveBodyPassLoop && BB == ActiveBodyPassLoop->getHeader() &&
-          ActiveBodyPassLoop->contains(Pred) &&
-          !BodyPassProcessed.count(Pred)) {
-        auto MemoIt = CaseCVOCache.find(&Phi);
-        if (MemoIt != CaseCVOCache.end() && Eligible.lookup(MemoIt->second)) {
-          const jeandle::VirtualObject &MemoVO =
-              *Result.VirtualObjects[MemoIt->second];
-          if (MemoVO.IsSynthetic && I < MemoVO.SyntheticSourceIDs.size()) {
-            jeandle::ObjectID Cand = MemoVO.SyntheticSourceIDs[I];
-            if (Cand != jeandle::InvalidObjectID && Eligible.lookup(Cand) &&
-                PredED->Virtuals.count(Cand))
-              Found = Cand;
-          }
-        }
-        if (!Found)
-          Unresolved.set(I);
       }
       InIDs.push_back(Found);
       if (Found)
@@ -4127,13 +4045,12 @@ void Analyzer::processBlockPhis(BasicBlock *BB, jeandle::EffectList &Out) {
 
     // Case B: every RESOLVED incoming agrees on the same ObjectID AND the
     // object is still virtual at merge entry (mergeStates kept it).
-    // Self-carries are excluded from the consensus scan (they agree with the
-    // consensus by construction) and then validated against it: the
-    // consensus object must still be virtual at each self-carry pred's exit.
+    // Poison wildcards are excluded from the consensus scan; the consensus
+    // object must still be virtual at each wildcard predecessor's exit.
     bool AllSame = true;
     std::optional<jeandle::ObjectID> First;
     for (unsigned I = 0; I < InIDs.size(); ++I) {
-      if (Dead[I] || Unresolved[I] || SelfCarry[I] || PoisonWildcard[I])
+      if (Dead[I] || Unresolved[I] || PoisonWildcard[I])
         continue;
       const auto &O = InIDs[I];
       if (!O) {
@@ -4153,9 +4070,8 @@ void Analyzer::processBlockPhis(BasicBlock *BB, jeandle::EffectList &Out) {
           continue;
         EdgeContribution Contribution =
             contributionFor(Phi.getIncomingBlock(I), BB);
-        if ((SelfCarry[I] || PoisonWildcard[I]) &&
-            (!Contribution.isLive() ||
-             !Contribution.Data->Virtuals.count(*First))) {
+        if (PoisonWildcard[I] && (!Contribution.isLive() ||
+                                  !Contribution.Data->Virtuals.count(*First))) {
           AllSame = false;
           break;
         }
@@ -4842,16 +4758,6 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
     }
   }
 
-  // Early-bail if any incoming of Phi equals Phi itself (a
-  // back-edge self-reference on a loop-header PHI). A self-loop incoming
-  // means the per-pred VO this slot resolves to is one that we're about
-  // to synthesise *into* — there is no per-pred independent allocation
-  // and the identity check cannot meaningfully proceed.
-  for (unsigned OriginalIndex : PerPredOriginalIndices) {
-    if (Phi->getIncomingValue(OriginalIndex) == Phi)
-      return false;
-  }
-
   // Every VO has identity. Case C replaces each source identity with the
   // merged one, so no source identity may be observable anywhere else first.
   // LLVM aliases are explicit SSA instructions, so the rule is applied to
@@ -5173,7 +5079,6 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
     PE->SeqNo = 0;
     PE->setMutationOwner(NewID);
     PE->PhiInst = NewPhi;
-    PE->PHIType = P.PhiType;
     PE->FieldOffset = P.Off;
     unsigned LiveIndex = 0;
     for (unsigned OriginalIndex = 0; OriginalIndex < OriginalN;
@@ -5755,7 +5660,6 @@ void Analyzer::processAllocation(CallBase *CB) {
   Result.addBlockEffect(std::move(E));
 
   ++Result.VirtualizationDelta;
-  --Result.AllocationDelta;
   ++AttemptStats.Virtualized;
 
   // Enqueue end-of-block materialise under VirtualiseThenMaterialise.
@@ -6615,12 +6519,10 @@ bool Analyzer::foldGetClass(CallBase *CB) {
   return true;
 }
 
-bool Analyzer::foldCheckCast(CallBase *CB) {
-  // jeandle.checkcast itself is lower-phase="0" by design: its expansion
-  // exposes a null check (foldICmpEquality) and a jeandle.check_instanceof
-  // call (lower-phase="1"), which is the subtype-check op this fold sees in
-  // production. The direct jeandle.checkcast form is only reachable from lit
-  // tests.
+bool Analyzer::foldCheckInstanceOf(CallBase *CB) {
+  // Phase-0 lowering expands checkcast and instanceof into null checks and
+  // this phase-1 subtype query. Virtual receivers are non-null and have an
+  // exact allocation klass.
   if (CB->arg_size() < 2)
     return false;
   uintptr_t SuperK = jeandle::extractKlassConstant(CB->getArgOperand(0));
@@ -6640,36 +6542,6 @@ bool Analyzer::foldCheckCast(CallBase *CB) {
     return false;
   Constant *Res = *Folded ? ConstantInt::getTrue(CB->getType())
                           : ConstantInt::getFalse(CB->getType());
-  emitReplaceCall(CB, Res, *BaseID);
-  return true;
-}
-
-bool Analyzer::foldInstanceOf(CallBase *CB) {
-  // jeandle.instanceof itself is lower-phase="0" by design: its expansion
-  // exposes a null check (foldICmpEquality) and a jeandle.check_instanceof
-  // call (lower-phase="1", handled by foldCheckCast). The direct
-  // jeandle.instanceof form is only reachable from lit tests.
-  if (CB->arg_size() < 2)
-    return false;
-  uintptr_t SuperK = jeandle::extractKlassConstant(CB->getArgOperand(0));
-  if (SuperK == 0)
-    return false;
-  auto BaseID = jeandle::pea::resolveVirtualRef(CB->getArgOperand(1),
-                                                CurrentState, Aliases, DL);
-  if (!BaseID)
-    return false;
-  if (!Eligible.lookup(*BaseID))
-    return false;
-  jeandle::VirtualObject &VObj = *Result.VirtualObjects[*BaseID];
-  if (VObj.Klass == 0)
-    return false;
-  // Virtual objects are non-null by construction, so we can collapse the
-  // null-check inside instanceof and reduce to a pure subtype query.
-  auto Folded = evalSubtypeRelation(VObj.Klass, SuperK);
-  if (!Folded)
-    return false;
-  Type *I32 = Type::getInt32Ty(F.getContext());
-  Constant *Res = ConstantInt::get(I32, *Folded ? 1 : 0);
   emitReplaceCall(CB, Res, *BaseID);
   return true;
 }
@@ -6951,24 +6823,6 @@ bool Analyzer::foldArrayStoreCheck(CallBase *CB) {
   // surviving check must inspect the real value and array klass — materialize
   // both (return false -> generic escape path).
   return false;
-}
-
-bool Analyzer::foldPostBarrier(CallBase *CB) {
-  if (CB->arg_size() < 1)
-    return false;
-  auto BaseID = jeandle::pea::resolveVirtualRef(CB->getArgOperand(0),
-                                                CurrentState, Aliases, DL);
-  if (!BaseID)
-    return false;
-  if (!Eligible.lookup(*BaseID))
-    return false;
-
-  // A post barrier for a store into a virtual object has no concrete card to
-  // mark. The store is replayed as initialization when the object is
-  // materialized, so the original barrier must not survive with the old slot
-  // address.
-  emitReplaceCall(CB, nullptr, *BaseID);
-  return true;
 }
 
 bool Analyzer::foldCheckIfValueBased(CallBase *CB) {
@@ -7261,20 +7115,14 @@ bool Analyzer::processJavaOp(CallBase *CB) {
     return foldLoadKlass(CB);
   if (isJeandleGetClass(CB))
     return foldGetClass(CB);
-  if (isJeandleCheckCast(CB))
-    return foldCheckCast(CB);
   if (isJeandleCheckInstanceOf(CB))
-    return foldCheckCast(CB);
-  if (isJeandleInstanceOf(CB))
-    return foldInstanceOf(CB);
+    return foldCheckInstanceOf(CB);
   if (isJeandleMonitorEnter(CB))
     return foldMonitorEnter(CB);
   if (isJeandleMonitorExit(CB))
     return foldMonitorExit(CB);
   if (isJeandleArrayStoreCheck(CB))
     return foldArrayStoreCheck(CB);
-  if (isJeandlePostBarrier(CB))
-    return foldPostBarrier(CB);
   if (isJeandleCheckIfValueBased(CB))
     return foldCheckIfValueBased(CB);
   if (isJeandleRegisterFinalizerIfNeeded(CB))
@@ -8312,7 +8160,6 @@ void Analyzer::installSyntheticReplayIdentityPlan(
 
     auto Fill = [&](jeandle::CreatePHIEffect &PE) {
       PE.Block = Node.Merge;
-      PE.PHIType = WideTy;
       PE.PhiRole = jeandle::CreatePHIEffect::Role::SyntheticReplayIdentity;
       PE.FieldOffset = 0;
       PE.PHIIncomingValues.clear();
@@ -8841,10 +8688,8 @@ void Analyzer::dropEffectsForIneligible(
       return true;
     });
   }
-  if (!DroppedAllocOwners.empty()) {
+  if (!DroppedAllocOwners.empty())
     Result.VirtualizationDelta -= static_cast<int>(DroppedAllocOwners.size());
-    Result.AllocationDelta += static_cast<int>(DroppedAllocOwners.size());
-  }
   for (jeandle::ObjectID ID : IDs)
     Result.EscapeClassification[ID] =
         jeandle::PEAResult::EscapeKind::AlwaysEscapes;
@@ -10427,24 +10272,9 @@ void Analyzer::processLoopBodyOnePass(Loop *L, ArrayRef<BasicBlock *> LoopRPO,
   // we don't re-process them in this pass. FunctionRPO is computed once by
   // Analyzer::run; LoopRPO is the filtered loop-local view reused across the
   // inner fixpoint iterations.
-  //
-  // Publish the active body pass (loop + blocks processed so far) so
-  // processBlockPhis can tell a loop-header PHI's not-yet-processed
-  // back-edge predecessor (unknown) from a genuinely non-virtual incoming
-  // (divergence). Stack semantics for the nested processLoop recursion
-  // below; restored on every exit, including the OverflowFlag early
-  // returns, so the post-body merge (which runs after this function
-  // returns) and any outer loop see their own context.
-  Loop *SavedBodyPassLoop = ActiveBodyPassLoop;
-  llvm::SmallPtrSet<BasicBlock *, 16> SavedBodyPassProcessed;
-  SavedBodyPassProcessed.swap(BodyPassProcessed);
-  ActiveBodyPassLoop = L;
-  auto RestoreBodyPass = llvm::make_scope_exit([&] {
-    ActiveBodyPassLoop = SavedBodyPassLoop;
-    BodyPassProcessed.swap(SavedBodyPassProcessed);
-  });
+  SmallPtrSet<BasicBlock *, 16> Processed;
   for (BasicBlock *BB : LoopRPO) {
-    if (BodyPassProcessed.count(BB))
+    if (Processed.count(BB))
       continue;
     Loop *Inner = LI.getLoopFor(BB);
     if (Inner && Inner != L && Inner->getHeader() == BB) {
@@ -10457,7 +10287,7 @@ void Analyzer::processLoopBodyOnePass(Loop *L, ArrayRef<BasicBlock *> LoopRPO,
           !RetryVirtualizationAllocationSites.empty())
         return;
       for (BasicBlock *SB : Inner->blocks())
-        BodyPassProcessed.insert(SB);
+        Processed.insert(SB);
       continue;
     }
     if (BB == L->getHeader() && HeaderSeed)
@@ -10469,7 +10299,7 @@ void Analyzer::processLoopBodyOnePass(Loop *L, ArrayRef<BasicBlock *> LoopRPO,
     if (OverflowFlag || InvalidLoopMonotonicity ||
         !RetryVirtualizationAllocationSites.empty())
       return;
-    BodyPassProcessed.insert(BB);
+    Processed.insert(BB);
   }
 }
 

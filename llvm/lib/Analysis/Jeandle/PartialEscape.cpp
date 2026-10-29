@@ -95,17 +95,13 @@ int VirtualObject::getOrCreateFieldIndex(int64_t Offset, Type *Ty,
     ByteSize = static_cast<uint8_t>(PointerByteSize);
     IsReference = true;
   } else {
-    TypeSize Bits = DL.getTypeSizeInBits(Ty);
-    if (Bits.isScalable())
-      return -1; // runtime-dependent field width — conservative escape
-    uint64_t FixedBits = Bits.getFixedValue();
-    if (FixedBits == 0)
-      return -1; // unknown-size type (e.g. aggregate) — conservative escape
+    // The atomic-type gate guarantees a fixed power-of-two width >= 8.
+    uint64_t FixedBits = DL.getTypeSizeInBits(Ty).getFixedValue();
     // FieldDesc intentionally uses a compact byte-size representation. Wider
     // verifier-legal atomic types conservatively stay real.
     if (FixedBits > std::numeric_limits<uint8_t>::max() * 8ULL)
       return -1;
-    ByteSize = static_cast<uint8_t>((FixedBits + 7) / 8);
+    ByteSize = static_cast<uint8_t>(FixedBits / 8);
   }
 
   // This endpoint check is required even for the first field, where there is
@@ -278,8 +274,7 @@ VirtualObject::matchArrayElementGEP(GetElementPtrInst *GEP,
     (void)jeandle::pea::stripPointerCastsAndOffsets(GEPOp->getPointerOperand(),
                                                     DL, &BaseOff, &NonConst);
     if (!NonConst && BaseOff == static_cast<int64_t>(ArrayBaseOffset))
-      return ArrayElementGEPMatch{peelIndexWrappers(GEPOp->getOperand(1)),
-                                  ArrayElementType};
+      return ArrayElementGEPMatch{peelIndexWrappers(GEPOp->getOperand(1))};
   }
 
   // Pattern B: i8 GEP with a single byte-offset index. The byte offset may
@@ -314,12 +309,12 @@ VirtualObject::matchArrayElementGEP(GetElementPtrInst *GEP,
       if (Cidx < 0 || static_cast<uint64_t>(Cidx) >= ArrayLength)
         return std::nullopt;
       Constant *CIdx = ConstantInt::get(CI->getType(), Cidx, /*isSigned=*/true);
-      return ArrayElementGEPMatch{CIdx, ArrayElementType};
+      return ArrayElementGEPMatch{CIdx};
     }
 
     if (Value *Idx = matchAddBasePlusScaledIndex(
             ByteOff, static_cast<int64_t>(ArrayBaseOffset), ArrayIndexScale))
-      return ArrayElementGEPMatch{Idx, ArrayElementType};
+      return ArrayElementGEPMatch{Idx};
   }
 
   return std::nullopt;
@@ -896,10 +891,6 @@ bool RewriteDeoptPoolEffect::coversExactOccurrence(unsigned SemanticCell,
   return Plan->coversExactOccurrence(SemanticCell, ID);
 }
 
-bool RewriteDeoptPoolEffect::acceptsCurrentMember(ObjectID ID) const {
-  return llvm::is_contained(Plan->graph().currentMembers(), ID);
-}
-
 bool PEAResult::currentIdentityRepresentsSource(ObjectID CurrentID,
                                                 ObjectID SourceID) const {
   if (CurrentID == InvalidObjectID || SourceID == InvalidObjectID ||
@@ -928,9 +919,5 @@ bool PEAResult::hasOptimizationOpportunity() const {
   // True when there is work for the transform: any net virtualization, any
   // recorded effect (folds and materializations must be applied even when no
   // allocation stays virtual on net), or an explicit CFG-cleanup obligation.
-  // VirtualizationDelta and AllocationDelta are exact negations (see the
-  // field doc) and VirtualizationDelta is never decremented below 0, so
-  // VirtualizationDelta > 0 covers AllocationDelta != 0 and only one of the
-  // two terms is tested.
   return VirtualizationDelta > 0 || !BlockEffects.empty() || NeedsCFGCleanup;
 }

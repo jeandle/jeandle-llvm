@@ -40,6 +40,24 @@ using namespace llvm;
 
 namespace llvm::jeandle::pea {
 
+bool matchesFunctionNameFilter(StringRef FunctionName, StringRef Filter) {
+  if (FunctionName == Filter)
+    return true;
+
+  constexpr StringLiteral RootSuffix = ".root";
+  bool FunctionIsRoot = FunctionName.ends_with(RootSuffix);
+  if (FunctionIsRoot != Filter.ends_with(RootSuffix))
+    return false;
+  if (FunctionIsRoot) {
+    FunctionName = FunctionName.drop_back(RootSuffix.size());
+    Filter = Filter.drop_back(RootSuffix.size());
+  }
+  return FunctionName.consume_front(Filter) &&
+         FunctionName.consume_front(".") && !FunctionName.empty() &&
+         llvm::all_of(FunctionName,
+                      [](char C) { return C >= '0' && C <= '9'; });
+}
+
 // ===========================================================================
 // Callee-name predicates
 // ===========================================================================
@@ -80,14 +98,6 @@ bool isJeandleGetClass(const CallBase *CB) {
   return isJeandleCallNamed(CB, "jeandle.get_class");
 }
 
-bool isJeandleCheckCast(const CallBase *CB) {
-  return isJeandleCallNamed(CB, "jeandle.checkcast");
-}
-
-bool isJeandleInstanceOf(const CallBase *CB) {
-  return isJeandleCallNamed(CB, "jeandle.instanceof");
-}
-
 bool isJeandleCheckInstanceOf(const CallBase *CB) {
   return isJeandleCallNamed(CB, "jeandle.check_instanceof");
 }
@@ -98,10 +108,6 @@ bool isJeandleCheckIfValueBased(const CallBase *CB) {
 
 bool isJeandleArrayStoreCheck(const CallBase *CB) {
   return isJeandleCallNamed(CB, "jeandle.array_store_check");
-}
-
-bool isJeandlePostBarrier(const CallBase *CB) {
-  return isJeandleCallNamed(CB, "jeandle.post_barrier");
 }
 
 bool isJeandleMonitorEnter(const CallBase *CB) {

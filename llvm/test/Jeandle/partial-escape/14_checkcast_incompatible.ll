@@ -1,6 +1,9 @@
-; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-vm-callback-log=%S/Inputs/14_checkcast_incompatible.cblog %s | FileCheck %s
+; RUN: llvm-link -S %s %S/Inputs/phase0_type_checks.ll -o %t
+; RUN: opt -S -passes="java-operation-lower<phase=0>" %t -o %t.lowered
+; RUN: FileCheck %s --check-prefix=LOWERED < %t.lowered
+; RUN: opt -S -passes="instcombine,simplifycfg,loop-simplify,instcombine,partial-escape-iterative" -jeandle-vm-callback-log=%S/Inputs/14_checkcast_incompatible.cblog %t.lowered | FileCheck %s
 
-; PEA: jeandle.checkcast against a klass incompatible with the
+; After phase-0 lowering, check_instanceof against a klass incompatible with the
 ; virtual's exact allocation klass folds to constant false. Virtual objects
 ; always have an exact klass, so areKlassesIncompatible can complete the
 ; proof without further VM callbacks beyond IsSubtype + IsInterface.
@@ -29,5 +32,11 @@ u:
 ; CHECK-NOT: jeandle.new_instance
 ; CHECK-NOT: jeandle.checkcast
 ; CHECK: ret i1 false
+
+; LOWERED-LABEL: define i1 @test_checkcast_incompatible
+; LOWERED-NOT: call hotspotcc i1 @jeandle.checkcast
+; LOWERED: call hotspotcc i1 @jeandle.check_instanceof
+; LOWERED-NOT: call hotspotcc i1 @jeandle.checkcast
+; LOWERED: ret i1
 
 !java-method-compilation = !{}

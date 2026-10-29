@@ -1,0 +1,3 @@
+RequiresStrictLockOrder = 1
+HasFinalizer 12345 = 0
+CanVirtualize 12345 = 1
