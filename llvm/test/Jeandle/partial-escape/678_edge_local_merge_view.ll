@@ -5,7 +5,7 @@
 ; must retry after a pointer PHI materializes an incoming: an earlier PHI alias
 ; and the block body must be re-evaluated against the materialized view.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) readonly)
 declare void @may_throw()
@@ -25,7 +25,7 @@ define void @single_live_pred_view(i1 %take.real)
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
            ptr inttoptr (i64 67801 to ptr), i32 7, i32 44, i32 16,
-           i32 1048576)
+           i32 1048576, i1 false, i1 false)
        to label %new.o unwind label %unwind
 new.o:
   %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(

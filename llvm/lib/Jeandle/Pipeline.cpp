@@ -11,6 +11,7 @@
 #include "llvm/Jeandle/Pipeline.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
 #include "llvm/Transforms/Jeandle/CopySpecialization.h"
@@ -30,6 +31,7 @@
 #include "llvm/Transforms/Jeandle/SafepointPollElimination.h"
 #include "llvm/Transforms/Jeandle/SafepointStripMining.h"
 #include "llvm/Transforms/Jeandle/SafepointUtils.h"
+#include "llvm/Transforms/Jeandle/StringIntrinsicSpecialization.h"
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
@@ -181,6 +183,9 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
       break;
     }
   }
+  PM.addPass(
+      createModuleToFunctionPassAdaptor(StringIntrinsicSpecialization()));
+  PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   // ==== PEA segment ====
   // Everything below up to InsertGCBarriers exists to serve PEA: the
   // high-tier loop-optimization cluster that exposes virtualization
@@ -289,6 +294,8 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     //       rounds.
     PM.addPass(createModuleToFunctionPassAdaptor(PartialEscapeIterative()));
   }
+  PM.addPass(
+      createModuleToFunctionPassAdaptor(StringIntrinsicSpecialization()));
   // Post-inline type recovery + TCE — unconditional. Runs for both PEA-on
   // (cleans up PEA's materializations) and PEA-off (the default config) so
   // RecoverTypeInfo re-attaches !java-klass metadata stripped by the inline
@@ -344,6 +351,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
         SafepointPollEliminationMode::LoopDeletionPrep)));
   }
 
+  // High-tier passes resolve runtime declarations and layout constants by
+  // name. Once those passes finish, prune unused private kernels before
+  // expanding their bodies; late GC operations remain rooted by llvm.used.
+  PM.addPass(GlobalDCEPass());
   PM.addPass(JavaOperationLower(1));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(Level)));
   PM.addPass(ExpandNarrowOopCast());

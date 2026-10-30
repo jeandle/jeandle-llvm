@@ -71,6 +71,7 @@
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
+#include "llvm/IR/Jeandle/StringIntrinsics.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
@@ -1809,6 +1810,7 @@ private:
   // iff the op was folded; an unrecognized op returns false so the caller
   // takes the generic escape path.
   bool processJavaOp(CallBase *CB);
+  bool foldStringIntrinsic(CallBase *CB);
   // Known non-escaping LLVM intrinsics (assume, lifetime/invariant
   // markers, debug, annotations, branch hints, ...) are no-ops for PEA;
   // launder/strip.invariant.group forward the argument's virtual alias.
@@ -7103,11 +7105,269 @@ bool Analyzer::foldICmpEquality(ICmpInst *ICmp) {
   return true;
 }
 
+bool Analyzer::foldStringIntrinsic(CallBase *CB) {
+  using namespace jeandle;
+  using namespace jeandle::pea;
+  auto Op = decodeStringIntrinsic(*CB);
+  if (!Op || CB->hasOperandBundles())
+    return false;
+  auto A = [&](unsigned I) { return CB->getArgOperand(I); };
+  auto N = [&](unsigned I) {
+    Value *V = A(I);
+    while (Value *Alias = Aliases.getScalarAlias(V))
+      V = Alias;
+    return stringConstantInt(V);
+  };
+  auto Whole = [&](Value *V) -> std::optional<ObjectID> {
+    // The general identity resolver permits poison merge arms as wildcards.
+    // A string content proof requires every explicit carrier arm to denote
+    // defined input; in particular freeze must not supply that proof.
+    SmallVector<Value *, 8> Worklist(1, V);
+    SmallPtrSet<Value *, 16> Seen;
+    while (!Worklist.empty()) {
+      Value *Current = Worklist.pop_back_val();
+      if (!Seen.insert(Current).second)
+        continue;
+      if (isa<UndefValue>(Current) || Seen.size() > 32)
+        return std::nullopt;
+      // Follow computed conditions and aggregate/constant expressions too:
+      // an opcode whitelist can miss poison hidden behind arithmetic or an
+      // extract. Allocation identities and globals are leaves, not dataflow
+      // from their arguments, frame-state bundles, or initializers.
+      if (isa<GlobalValue>(Current))
+        continue;
+      if (auto *CB = dyn_cast<CallBase>(Current))
+        if (isJeandleAllocation(CB))
+          continue;
+      if (auto *U = dyn_cast<User>(Current))
+        for (Value *Operand : U->operand_values())
+          Worklist.push_back(Operand);
+    }
+    auto R = resolveVirtualIdentity(V, CurrentState, Aliases, DL,
+                                    VirtualIdentityMode::WholeObject);
+    if (!R.isDefined() || !Eligible.lookup(R.getObjectID()))
+      return std::nullopt;
+    ObjectID ID = R.getObjectID();
+    const ObjectState &OS = CurrentState.getObjectState(ID);
+    if (!OS.isVirtual() || !Result.VirtualObjects[ID]->isArray())
+      return std::nullopt;
+    return ID;
+  };
+  auto Left = Whole(A(0));
+  bool Eq = Op->Kind == StringIntrinsicKind::Equals;
+  bool Char = Op->Kind == StringIntrinsicKind::IndexOfChar;
+  auto Right = Char ? Left : Whole(A(Eq ? 1 : 2));
+  // A surviving op must materialize every participating virtual, including
+  // operands hidden by pointer carriers. The caller owns that fallback.
+  if (!Left || !Right)
+    return false;
+
+  auto Range = [&](ObjectID ID, int64_t Start, int64_t Count, bool UTF16,
+                   bool CharArray) {
+    const VirtualObject &VO = *Result.VirtualObjects[ID];
+    unsigned CellBits = CharArray ? 16 : 8;
+    unsigned Cells = UTF16 && !CharArray ? 2 : 1;
+    return VO.ArrayElementType && VO.ArrayElementType->isIntegerTy(CellBits) &&
+           VO.ArrayIndexScale == CellBits / 8 &&
+           VO.ArrayBaseOffset ==
+               VMConsts.arrayBaseOffsetFor(CharArray ? JBasicType::Char
+                                                     : JBasicType::Byte) &&
+           Start >= 0 && Count >= 0 && Start <= VO.ArrayLength / Cells &&
+           Count <= VO.ArrayLength / Cells - Start;
+  };
+  auto ReadCell = [&](ObjectID ID, int64_t Offset, unsigned Bits) -> Value * {
+    const VirtualObject &VO = *Result.VirtualObjects[ID];
+    Type *Ty = Type::getIntNTy(F.getContext(), Bits);
+    for (const auto &Field : VO.Fields) {
+      auto Overlap = Field.overlaps(Offset, Bits / 8);
+      if (!Overlap ||
+          (*Overlap && (Field.Offset != Offset || Field.LLVMType != Ty)))
+        return nullptr;
+    }
+    auto It = FieldStates[ID].find(Offset);
+    if (It == FieldStates[ID].end())
+      return ConstantInt::get(Ty, 0);
+    if (!It->second.isScalar())
+      return nullptr;
+    Value *V = It->second.getScalar();
+    while (Value *Alias = Aliases.getScalarAlias(V))
+      V = Alias;
+    if (V->getType() != Ty || isa<UndefValue>(V))
+      return nullptr;
+    return V;
+  };
+  auto Read = [&](ObjectID ID, int64_t Index, bool UTF16,
+                  bool CharArray = false) -> Value * {
+    const VirtualObject &VO = *Result.VirtualObjects[ID];
+    int64_t Offset = VO.ArrayBaseOffset + Index * (UTF16 ? 2 : 1);
+    Value *Lo = ReadCell(ID, Offset, CharArray ? 16 : 8);
+    if (!Lo || !UTF16 || CharArray)
+      return Lo;
+    Value *Hi = ReadCell(ID, Offset + 1, 8);
+    auto *L = dyn_cast_or_null<ConstantInt>(Lo);
+    auto *H = dyn_cast_or_null<ConstantInt>(Hi);
+    if (!L || !H)
+      return nullptr;
+    unsigned V = DL.isLittleEndian()
+                     ? L->getZExtValue() | (H->getZExtValue() << 8)
+                     : (L->getZExtValue() << 8) | H->getZExtValue();
+    return ConstantInt::get(Type::getInt16Ty(F.getContext()), V);
+  };
+  auto Difference = [](Value *L, Value *R) -> std::optional<int32_t> {
+    if (!L || !R)
+      return std::nullopt;
+    if (L == R)
+      return 0;
+    auto *LC = dyn_cast<ConstantInt>(L);
+    auto *RC = dyn_cast<ConstantInt>(R);
+    if (!LC || !RC)
+      return std::nullopt;
+    return int32_t(LC->getZExtValue()) - int32_t(RC->getZExtValue());
+  };
+  auto Finish = [&](int32_t V, ObjectID Owner) {
+    // Preserve reaching real stores if final eligibility later retains a
+    // consumer. Eligible virtuals still eliminate these stores normally.
+    observeFieldDefinitions(*Left, FieldDefinitions);
+    observeFieldDefinitions(*Right, FieldDefinitions);
+    emitReplaceCall(CB,
+                    CB->getType()->isVoidTy()
+                        ? nullptr
+                        : ConstantInt::getSigned(CB->getType(), V),
+                    Owner);
+    return true;
+  };
+  if (Eq || Op->Kind == StringIntrinsicKind::Compare) {
+    if (Eq && *Left == *Right)
+      return Finish(1, *Left);
+    if (!N(Eq ? 2 : 1) || (!Eq && !N(3)))
+      return false;
+    int64_t LC = *N(Eq ? 2 : 1), RC = Eq ? LC : *N(3);
+    bool LU = !Eq && Op->leftUTF16(), RU = !Eq && Op->rightUTF16();
+    if (!Range(*Left, 0, LC, LU, false) || !Range(*Right, 0, RC, RU, false))
+      return false;
+    int64_t Count = std::min(LC, RC);
+    if (*Left == *Right && LU == RU)
+      return Finish(Eq ? 1 : LC - RC, *Left);
+    if (Count > StringScalarLimit)
+      return false;
+    for (int64_t I = 0; I < Count; ++I) {
+      auto D = Difference(Read(*Left, I, LU), Read(*Right, I, RU));
+      if (!D)
+        return false;
+      if (*D)
+        return Finish(Eq ? 0 : *D, *Left);
+    }
+    return Finish(Eq ? 1 : LC - RC, *Left);
+  }
+  if (Char) {
+    if (!N(1) || !N(2) || !N(3) || *N(3) < *N(2) ||
+        *N(3) - *N(2) > StringScalarLimit ||
+        !Range(*Left, *N(2), *N(3) - *N(2), Op->leftUTF16(), false))
+      return false;
+    for (int64_t I = *N(2); I < *N(3); ++I) {
+      auto *C = dyn_cast_or_null<ConstantInt>(Read(*Left, I, Op->leftUTF16()));
+      if (!C)
+        return false;
+      if (C->getZExtValue() ==
+          (Op->leftUTF16() ? uint64_t(*N(1)) : uint64_t(*N(1)) & 255))
+        return Finish(I, *Left);
+    }
+    return Finish(-1, *Left);
+  }
+  if (Op->Kind == StringIntrinsicKind::IndexOf) {
+    if (!N(1) || !N(3) || !N(4) || *N(3) <= 0 || *N(4) < 0 || *N(4) > *N(1) ||
+        *N(1) > StringScalarLimit || *N(3) > StringScalarLimit ||
+        !Range(*Left, 0, *N(1), Op->leftUTF16(), false) ||
+        !Range(*Right, 0, *N(3), Op->rightUTF16(), false) ||
+        std::max<int64_t>(0, *N(1) - *N(4) - *N(3) + 1) * *N(3) >
+            StringSearchComparisonLimit)
+      return false;
+    for (int64_t I = *N(4); I <= *N(1) - *N(3); ++I) {
+      bool Same = true;
+      for (int64_t J = 0; J < *N(3); ++J) {
+        auto D = Difference(Read(*Left, I + J, Op->leftUTF16()),
+                            Read(*Right, J, Op->rightUTF16()));
+        if (!D)
+          return false;
+        if (*D) {
+          Same = false;
+          break;
+        }
+      }
+      if (Same)
+        return Finish(I, *Left);
+    }
+    return Finish(-1, *Left);
+  }
+
+  bool Inflate = Op->Kind == StringIntrinsicKind::Inflate;
+  bool Compress = Op->Kind == StringIntrinsicKind::Compress;
+  bool SrcChar = !Inflate && !Op->Layout;
+  bool DstChar = !Compress && (Inflate ? !Op->Layout : Op->Layout);
+  if (!N(1) || !N(3) || !N(4) || *N(4) > StringScalarLimit ||
+      !Range(*Left, *N(1), *N(4), !Inflate, SrcChar) ||
+      !Range(*Right, *N(3), *N(4), !Compress, DstChar) || *Left == *Right)
+    return false;
+  struct Write {
+    int64_t Offset;
+    ConstantInt *Value;
+  };
+  SmallVector<Write, 32> Writes;
+  auto AddWrite = [&](int64_t Offset, unsigned Bits, unsigned V) {
+    Writes.push_back(
+        {Offset, ConstantInt::get(Type::getIntNTy(F.getContext(), Bits), V)});
+  };
+  int32_t Return = *N(4);
+  const VirtualObject &Dst = *Result.VirtualObjects[*Right];
+  for (int64_t I = 0; I < *N(4); ++I) {
+    auto *C = dyn_cast_or_null<ConstantInt>(
+        Read(*Left, *N(1) + I, !Inflate, SrcChar));
+    if (!C)
+      return false;
+    unsigned V = C->getZExtValue();
+    if (Compress && V > 255) {
+      Return = 0;
+      break;
+    }
+    int64_t Offset = Dst.ArrayBaseOffset + (*N(3) + I) * (Compress ? 1 : 2);
+    if (Compress || DstChar)
+      AddWrite(Offset, Compress ? 8 : 16, V);
+    else {
+      AddWrite(Offset, 8, DL.isLittleEndian() ? V & 255 : V >> 8);
+      AddWrite(Offset + 1, 8, DL.isLittleEndian() ? V >> 8 : V & 255);
+    }
+  }
+  // Validate the entire transaction before changing any abstract cell or
+  // layout entry. A failure must leave the original op and state untouched.
+  for (const Write &W : Writes)
+    for (const auto &Field : Dst.Fields) {
+      auto Overlap = Field.overlaps(W.Offset, W.Value->getBitWidth() / 8);
+      if (!Overlap || (*Overlap && (Field.Offset != W.Offset ||
+                                    Field.LLVMType != W.Value->getType())))
+        return false;
+    }
+  observeFieldDefinitions(*Left, FieldDefinitions);
+  observeFieldDefinitions(*Right, FieldDefinitions);
+  for (const Write &W : Writes) {
+    int Index = Result.VirtualObjects[*Right]->getOrCreateFieldIndex(
+        W.Offset, W.Value->getType(), DL);
+    assert(Index >= 0 && "validated string destination cell");
+    (void)Index;
+    FieldStates[*Right][W.Offset] = FieldValue::scalar(W.Value);
+    // The retained JavaOp supplies these writes if the owner is ineligible;
+    // no individual eliminated StoreInst defines the new cell.
+    FieldDefinitions[*Right][W.Offset].clear();
+  }
+  return Finish(Return, *Right);
+}
+
 // Dispatch a recognized JavaOp on a virtual receiver to its fold. Returns
 // true iff the call was handled — folded to a constant / deleted, or a
 // known-safe non-escaping shape needing no transform; false routes the call
 // to the generic escape path.
 bool Analyzer::processJavaOp(CallBase *CB) {
+  if (jeandle::decodeStringIntrinsic(*CB))
+    return foldStringIntrinsic(CB);
   using namespace jeandle::pea;
   if (isJeandleArrayLength(CB))
     return foldArrayLength(CB);

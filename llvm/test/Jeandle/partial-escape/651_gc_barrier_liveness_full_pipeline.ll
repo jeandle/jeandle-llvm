@@ -14,7 +14,7 @@
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(
-    ptr, i32, i32, i32, i32)
+    ptr, i32, i32, i32, i32, i1, i1)
 declare void @observe(i32)
 declare void @publish(ptr addrspace(1))
 declare void @sink(ptr addrspace(1))
@@ -48,7 +48,7 @@ entry:
       to label %alloc.array unwind label %unwind
 alloc.array:
   %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 8888 to ptr), i32 2, i32 32, i32 16, i32 1048576)
+      ptr inttoptr (i64 8888 to ptr), i32 2, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %body unwind label %unwind
 body:
   %holder.external = getelementptr inbounds i8,
@@ -89,7 +89,7 @@ define void @materialized_array_replay(
     personality ptr @__gxx_personality_v0 {
 entry:
   %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 8888 to ptr), i32 2, i32 32, i32 16, i32 1048576)
+      ptr inttoptr (i64 8888 to ptr), i32 2, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %body unwind label %unwind
 body:
   %array.base = getelementptr inbounds i8,

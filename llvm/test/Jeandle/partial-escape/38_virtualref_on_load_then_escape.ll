@@ -11,14 +11,14 @@
 ; allocation disappears.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_virtualref_on_load_then_escape() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-              ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+              ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
            to label %nA unwind label %u1
 nA:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
@@ -42,7 +42,7 @@ u2:
 ; The outer (klass 67890) is fully eliminated.
 ; CHECK-NOT: i64 67890
 ; The original allocation for the inner (klass 12345) is retained.
-; CHECK: %[[MAT:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+; CHECK: %[[MAT:[A-Za-z0-9._]+]] = invoke hotspotcc{{.*}}ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
 ; CHECK-NEXT: to label %{{.*}} unwind label %{{.*}}
 ; The sink receives the inner OrigAlloc directly, not the eliminated load.
 ; CHECK: call void @sink(ptr addrspace(1) %[[MAT]])

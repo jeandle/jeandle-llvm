@@ -11,14 +11,14 @@
 ; escapes; both allocations and the field store all disappear.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) readonly)
 declare i32 @__gxx_personality_v0(...)
 
 define i32 @test_virtualref_on_load_basic() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-              ptr inttoptr (i64 12345 to ptr), i32 7, i32 44, i32 16, i32 1048576)
+              ptr inttoptr (i64 12345 to ptr), i32 7, i32 44, i32 16, i32 1048576, i1 false, i1 false)
            to label %nA unwind label %u1
 nA:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(

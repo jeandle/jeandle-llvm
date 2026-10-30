@@ -1,0 +1,3 @@
+RequiresStrictLockOrder = 1
+ElementBasicTypeOfArrayKlass 10001 = 1
+ElementBasicTypeOfArrayKlass 10002 = 2

@@ -30,6 +30,7 @@
 #include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
+#include "llvm/IR/Jeandle/VMConstants.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/Support/Debug.h"
@@ -44,6 +45,7 @@
 using namespace llvm;
 
 STATISTIC(NumFieldsFolded, "Number of constant field loads folded");
+STATISTIC(NumArrayLengthsFolded, "Number of jeandle.arraylength calls folded");
 STATISTIC(NumKlassesFolded, "Number of jeandle.load_klass calls folded");
 STATISTIC(NumMirrorKlassesFolded,
           "Number of jeandle.load_mirror_klass calls folded");
@@ -325,6 +327,33 @@ Constant *klassPointerConstant(LLVMContext &Ctx, Type *Ty, uintptr_t Klass) {
     return nullptr;
   return ConstantExpr::getIntToPtr(
       ConstantInt::get(Type::getInt64Ty(Ctx), Klass), Ty);
+}
+
+bool isArrayLengthCall(CallInst *CI) {
+  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+  return Callee && Callee->getName() == "jeandle.arraylength" &&
+         CI->getFunctionType() == Callee->getFunctionType() &&
+         !CI->getFunctionType()->isVarArg() && CI->arg_size() == 1 &&
+         CI->getType()->isIntegerTy(32) &&
+         isWideOopType(CI->getArgOperand(0)->getType()) &&
+         !CI->hasOperandBundles() && !CI->isMustTailCall();
+}
+
+bool foldArrayLengthCall(CallInst *CI, const jeandle::VMCallbacks &CB,
+                         const DenseMap<Value *, int> &ConstOops,
+                         const jeandle::VMConstants &VMConsts) {
+  std::optional<int> OopId = lookupConstOop(CI->getArgOperand(0), ConstOops);
+  int64_t Offset = VMConsts.arrayLengthOffset();
+  if (!OopId || Offset < 0 || Offset > INT_MAX)
+    return false;
+
+  auto [BasicType, RawValue] = CB.GetConstantField(*OopId, Offset);
+  if (BasicType != T_INT || RawValue < 0 || RawValue > INT_MAX)
+    return false;
+
+  CI->replaceAllUsesWith(ConstantInt::get(CI->getType(), RawValue));
+  CI->eraseFromParent();
+  return true;
 }
 
 bool isLoadKlassCall(CallInst *CI) {
@@ -702,6 +731,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
   assert(CB && CB->GetConstantField && "VMCallbacks must be set");
 
   const DataLayout &DL = M->getDataLayout();
+  const jeandle::VMConstants VMConsts = jeandle::VMConstants::fromModule(*M);
 
   constexpr unsigned MaxRounds = 64;
   unsigned Round = 0;
@@ -727,6 +757,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
     LVINullEdgeOracle IsNullEdge{LVI};
 
+    SmallVector<CallInst *, 16> ArrayLengthCalls;
     SmallVector<CallInst *, 16> LoadKlassCalls;
     SmallVector<CallInst *, 16> LoadMirrorKlassCalls;
     SmallVector<CallInst *, 16> GetClassCalls;
@@ -736,6 +767,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (BasicBlock *BB : RPOT) {
       for (Instruction &I : *BB) {
         if (auto *CI = dyn_cast<CallInst>(&I)) {
+          if (isArrayLengthCall(CI))
+            ArrayLengthCalls.push_back(CI);
           if (isLoadKlassCall(CI))
             LoadKlassCalls.push_back(CI);
           if (isLoadMirrorKlassCall(CI))
@@ -749,6 +782,14 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
         }
         if (auto *LI = dyn_cast<LoadInst>(&I))
           Loads.push_back(LI);
+      }
+    }
+
+    for (CallInst *CI : ArrayLengthCalls) {
+      if (foldArrayLengthCall(CI, *CB, ConstOops, VMConsts)) {
+        ++NumArrayLengthsFolded;
+        RoundChanged = true;
+        Changed = true;
       }
     }
 

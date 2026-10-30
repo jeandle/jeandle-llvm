@@ -1,0 +1,8 @@
+GetConstantField 0 16 = (8, 1)
+GetConstantField 0 17 = (8, 1)
+GetConstantField 1 16 = (8, -1)
+GetConstantField 2 16 = (-1, 0)
+GetConstantField 3 16 = (-1, 0)
+GetConstantField 4 16 = (5, 65)
+GetConstantField 4 18 = (5, 256)
+GetConstantField 4 20 = (5, 66)

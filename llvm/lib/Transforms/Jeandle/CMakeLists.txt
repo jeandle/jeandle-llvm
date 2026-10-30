@@ -1,5 +1,6 @@
 add_llvm_component_library(LLVMJeandleTransforms
   CopySpecialization.cpp
+  StringIntrinsicSpecialization.cpp
   CHADevirtualization.cpp
   ConstantFieldFolding.cpp
   ExpandNarrowOopCast.cpp

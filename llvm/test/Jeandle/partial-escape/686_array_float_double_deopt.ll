@@ -5,14 +5,14 @@
 ; arrays, an untouched element, explicit +0 and -0, a NaN payload, and a
 ; finite non-default value for both element kinds.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @safepoint()
 declare i32 @__gxx_personality_v0(...)
 
 define void @float_array_zero_length() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 68601 to ptr), i32 0, i32 16, i32 16, i32 1048576)
+            ptr inttoptr (i64 68601 to ptr), i32 0, i32 16, i32 16, i32 1048576, i1 false, i1 false)
          to label %normal unwind label %unwind
 normal:
   call void @safepoint()
@@ -35,7 +35,7 @@ unwind:
 define void @double_array_zero_length() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 68602 to ptr), i32 0, i32 16, i32 16, i32 1048576)
+            ptr inttoptr (i64 68602 to ptr), i32 0, i32 16, i32 16, i32 1048576, i1 false, i1 false)
          to label %normal unwind label %unwind
 normal:
   call void @safepoint()
@@ -58,7 +58,7 @@ unwind:
 define void @float_array_values() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 68603 to ptr), i32 5, i32 36, i32 16, i32 1048576)
+            ptr inttoptr (i64 68603 to ptr), i32 5, i32 36, i32 16, i32 1048576, i1 false, i1 false)
          to label %normal unwind label %unwind
 normal:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
@@ -97,7 +97,7 @@ unwind:
 define void @double_array_values() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 68604 to ptr), i32 5, i32 56, i32 16, i32 1048576)
+            ptr inttoptr (i64 68604 to ptr), i32 5, i32 56, i32 16, i32 1048576, i1 false, i1 false)
          to label %normal unwind label %unwind
 normal:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16

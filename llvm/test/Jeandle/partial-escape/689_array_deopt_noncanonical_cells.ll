@@ -18,7 +18,7 @@
 @arrayOopDesc.element_size.object = private constant i32 8
 @arrayOopDesc.element_size.long = private constant i32 4
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @safepoint()
 declare i32 @__gxx_personality_v0(...)
@@ -27,7 +27,7 @@ define void @noncanonical_byte_cell() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 68901 to ptr), i32 2, i32 24, i32 16, i32 1048576)
+      ptr inttoptr (i64 68901 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false)
       to label %body unwind label %unwind
 body:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
@@ -53,7 +53,7 @@ define void @partial_canonical_cell() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 68902 to ptr), i32 2, i32 24, i32 16, i32 1048576)
+      ptr inttoptr (i64 68902 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false)
       to label %body unwind label %unwind
 body:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
@@ -78,7 +78,7 @@ define void @wrong_kind_same_width() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 68903 to ptr), i32 2, i32 24, i32 16, i32 1048576)
+      ptr inttoptr (i64 68903 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false)
       to label %body unwind label %unwind
 body:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
@@ -103,7 +103,7 @@ define void @zero_offset_wrappers_are_canonical() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 68904 to ptr), i32 2, i32 24, i32 16, i32 1048576)
+      ptr inttoptr (i64 68904 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false)
       to label %body unwind label %unwind
 body:
   %identity = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 0
@@ -136,7 +136,7 @@ define void @boolean_i8_cells_are_canonical() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 68913 to ptr), i32 3, i32 24, i32 16, i32 1048576)
+      ptr inttoptr (i64 68913 to ptr), i32 3, i32 24, i32 16, i32 1048576, i1 false, i1 false)
       to label %body unwind label %unwind
 body:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
@@ -166,7 +166,7 @@ define void @symbolic_offset_materializes_before_deopt(i64 %index)
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 68905 to ptr), i32 2, i32 24, i32 16, i32 1048576)
+      ptr inttoptr (i64 68905 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false)
       to label %body unwind label %unwind
 body:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
@@ -195,7 +195,7 @@ define void @typed_stride_mismatch_materializes() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 68912 to ptr), i32 2, i32 24, i32 16, i32 1048576)
+      ptr inttoptr (i64 68912 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false)
       to label %body unwind label %unwind
 body:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
@@ -225,7 +225,7 @@ define void @descriptor_store_size_mismatch_materializes() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 68912 to ptr), i32 1, i32 20, i32 16, i32 1048576)
+      ptr inttoptr (i64 68912 to ptr), i32 1, i32 20, i32 16, i32 1048576, i1 false, i1 false)
       to label %body unwind label %unwind
 body:
   %cell = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
@@ -255,7 +255,7 @@ define void @malformed_outer_shared_direct_child() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 68906 to ptr), i32 2, i32 32, i32 16, i32 1048576)
+      ptr inttoptr (i64 68906 to ptr), i32 2, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %alloc.child unwind label %unwind
 alloc.child:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
@@ -309,7 +309,7 @@ define void @malformed_outer_cyclic_component() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 68908 to ptr), i32 2, i32 32, i32 16, i32 1048576)
+      ptr inttoptr (i64 68908 to ptr), i32 2, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %alloc.a unwind label %unwind
 alloc.a:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(

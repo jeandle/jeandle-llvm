@@ -11,7 +11,7 @@
 @arrayOopDesc.element_size.object = private constant i32 8
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -77,7 +77,7 @@ alloc.second:
       to label %alloc.array unwind label %unwind
 alloc.array:
   %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 69014 to ptr), i32 1, i32 24, i32 16, i32 1048576)
+      ptr inttoptr (i64 69014 to ptr), i32 1, i32 24, i32 16, i32 1048576, i1 false, i1 false)
       to label %init unwind label %unwind
 init:
   %child.value = getelementptr inbounds i8, ptr addrspace(1) %child, i64 16

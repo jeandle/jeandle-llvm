@@ -7,14 +7,14 @@
 ; field_count == length still holds: a length-2 long[] yields 2 wire pairs ->
 ; 4 ScopeValue slots -> len = 4/2 = 2.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @sink(i64)
 declare i32 @__gxx_personality_v0(...)
 
 define void @array_long_deopt(i64 %v) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 53003 to ptr), i32 2, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 53003 to ptr), i32 2, i32 32, i32 16, i32 1048576, i1 false, i1 false)
          to label %n unwind label %u
 n:
   ; long[] base 16, scale 8: index 0 @ byte offset 16.

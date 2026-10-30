@@ -3,7 +3,7 @@
 ; A PHI merging different array klasses keeps both arrays real. The retained
 ; null store needs a pre barrier, and no post barrier, after PEA.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare hotspotcc void @jeandle.pre_barrier(ptr addrspace(1))
 declare hotspotcc void @jeandle.post_barrier(ptr addrspace(1), ptr addrspace(1))
 
@@ -14,11 +14,11 @@ entry:
   br i1 %c, label %a, label %b
 a:
   %arr1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-             ptr inttoptr (i64 8881 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+             ptr inttoptr (i64 8881 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
           to label %merge unwind label %u
 b:
   %arr2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-             ptr inttoptr (i64 8882 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+             ptr inttoptr (i64 8882 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
           to label %merge unwind label %u
 merge:
   %arr = phi ptr addrspace(1) [ %arr1, %a ], [ %arr2, %b ]

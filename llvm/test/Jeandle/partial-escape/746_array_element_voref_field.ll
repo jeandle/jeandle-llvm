@@ -13,14 +13,14 @@
 
 @arrayOopDesc.element_size.object = private constant i32 8
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare i32 @__gxx_personality_v0(...)
 
 define i32 @test_obj_array_element_voref_field(i32 %val) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 54004 to ptr), i32 1, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 54004 to ptr), i32 1, i32 32, i32 16, i32 1048576, i1 false, i1 false)
          to label %alloc_arr unwind label %u
 alloc_arr:
   %child = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(

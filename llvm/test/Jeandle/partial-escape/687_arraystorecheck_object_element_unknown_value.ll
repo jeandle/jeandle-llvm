@@ -5,7 +5,7 @@
 ; value deliberately has no klass metadata, so this exercises the Object
 ; element fast path rather than the general subtype query.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare hotspotcc i1 @jeandle.array_store_check(ptr addrspace(1), ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -13,7 +13,7 @@ define i1 @object_array_unknown_value(ptr addrspace(1) %value) gc "hotspotgc" pe
 entry:
   %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
              ptr inttoptr (i64 8888 to ptr), i32 4, i32 32, i32 16,
-             i32 1048576)
+             i32 1048576, i1 false, i1 false)
            to label %body unwind label %unwind
 body:
   %checked = call hotspotcc i1 @jeandle.array_store_check(

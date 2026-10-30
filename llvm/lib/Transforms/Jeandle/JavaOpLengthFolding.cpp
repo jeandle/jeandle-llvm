@@ -98,8 +98,8 @@ static ResolveResult resolveArrayLength(Value *V, const DataLayout &DL,
     return {ResolveKind::Conflict, nullptr};
 
   if (auto *CB = dyn_cast<CallBase>(Root)) {
-    if (jeandle::pea::isJeandleNewArray(CB) && CB->arg_size() == 5)
-      return {ResolveKind::Resolved, CB->getArgOperand(1)};
+    if (Value *Length = jeandle::pea::getJeandleNewArrayLength(CB))
+      return {ResolveKind::Resolved, Length};
     return {ResolveKind::Conflict, nullptr};
   }
 
