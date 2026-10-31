@@ -12,9 +12,9 @@
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/PostOrderIterator.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/SimplifyQuery.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -38,6 +38,7 @@
 #include <climits>
 #include <cstring>
 #include <optional>
+#include <utility>
 
 #define DEBUG_TYPE "constant-field-folding"
 
@@ -284,6 +285,84 @@ std::optional<int> lookupConstOop(Value *V,
   return It->second;
 }
 
+// A PHI/select may merge different constant mirrors even though every path
+// gives the same equality result. Ask the VM about object identity rather than
+// assuming that distinct oop-handle IDs denote distinct Java objects.
+using MirrorPair = std::pair<Value *, Value *>;
+using MirrorEqualityResults = DenseMap<MirrorPair, std::optional<int>>;
+
+std::optional<int> classMirrorEquality(Value *Left, Value *Right,
+                                       const jeandle::VMCallbacks &CB,
+                                       const DenseMap<Value *, int> &ConstOops,
+                                       MirrorEqualityResults &Results,
+                                       unsigned &Budget, unsigned Depth = 0) {
+  if (Budget == 0)
+    return std::nullopt;
+  --Budget;
+  MirrorPair Pair{Left, Right};
+  auto It = Results.find(Pair);
+  if (It != Results.end())
+    return It->second;
+  if (Depth >= 32)
+    return std::nullopt;
+
+  // Cache unknown results too; the initial entry conservatively breaks cycles.
+  Results.try_emplace(Pair, std::nullopt);
+  std::optional<int> Result;
+  std::optional<int> LeftId = lookupConstOop(Left, ConstOops);
+  std::optional<int> RightId = lookupConstOop(Right, ConstOops);
+  if (LeftId && RightId) {
+    int Same = CB.AreSameClassMirrors(*LeftId, *RightId);
+    if (Same >= 0)
+      Result = Same;
+  } else {
+    Value *Merged = LeftId ? Right : Left;
+    auto Evaluate = [&](Value *Incoming) {
+      return LeftId ? classMirrorEquality(Left, Incoming, CB, ConstOops,
+                                          Results, Budget, Depth + 1)
+                    : classMirrorEquality(Incoming, Right, CB, ConstOops,
+                                          Results, Budget, Depth + 1);
+    };
+    if (auto *SI = dyn_cast<SelectInst>(Merged)) {
+      std::optional<int> True = Evaluate(SI->getTrueValue());
+      if (True) {
+        std::optional<int> False = Evaluate(SI->getFalseValue());
+        if (False && *True == *False)
+          Result = *True;
+      }
+    } else if (auto *PN = dyn_cast<PHINode>(Merged)) {
+      for (Value *Incoming : PN->incoming_values()) {
+        std::optional<int> Next = Evaluate(Incoming);
+        if (!Next || (Result && *Result != *Next)) {
+          Result = std::nullopt;
+          break;
+        }
+        Result = *Next;
+      }
+    }
+  }
+  Results[Pair] = Result;
+  return Result;
+}
+
+bool foldClassMirrorComparison(ICmpInst *Cmp, const jeandle::VMCallbacks &CB,
+                               const DenseMap<Value *, int> &ConstOops) {
+  if (!CB.AreSameClassMirrors || !Cmp->isEquality() ||
+      !isJavaOopType(Cmp->getOperand(0)->getType()))
+    return false;
+  MirrorEqualityResults Results;
+  // Count cache hits too, so wide PHIs have bounded traversal cost.
+  unsigned Budget = 64;
+  std::optional<int> Same = classMirrorEquality(
+      Cmp->getOperand(0), Cmp->getOperand(1), CB, ConstOops, Results, Budget);
+  if (!Same)
+    return false;
+  bool Result = Cmp->getPredicate() == CmpInst::ICMP_EQ ? *Same : !*Same;
+  Cmp->replaceAllUsesWith(ConstantInt::get(Cmp->getType(), Result));
+  Cmp->eraseFromParent();
+  return true;
+}
+
 // Match a load whose pointer resolves, through any chain of constant-
 // offset GEPs and pointer-preserving casts, to a known ConstOop.
 //
@@ -337,6 +416,29 @@ bool isLoadMirrorKlassCall(CallInst *CI) {
   Function *Callee = CI ? CI->getCalledFunction() : nullptr;
   return Callee && Callee->getName() == "jeandle.load_mirror_klass" &&
          CI->arg_size() == 1;
+}
+
+enum class ClassQueryKind {
+  IsArray,
+  IsInterface,
+  IsPrimitive,
+  IsHidden,
+  GetModifiers,
+  GetAccessFlags
+};
+
+std::optional<ClassQueryKind> classQueryKind(CallInst *CI) {
+  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+  if (!Callee || CI->arg_size() != 1)
+    return std::nullopt;
+  return StringSwitch<std::optional<ClassQueryKind>>(Callee->getName())
+      .Case("jeandle.class_is_array", ClassQueryKind::IsArray)
+      .Case("jeandle.class_is_interface", ClassQueryKind::IsInterface)
+      .Case("jeandle.class_is_primitive", ClassQueryKind::IsPrimitive)
+      .Case("jeandle.class_is_hidden", ClassQueryKind::IsHidden)
+      .Case("jeandle.class_get_modifiers", ClassQueryKind::GetModifiers)
+      .Case("jeandle.class_get_access_flags", ClassQueryKind::GetAccessFlags)
+      .Default(std::nullopt);
 }
 
 bool isLayoutHelperCall(CallInst *CI) {
@@ -460,6 +562,161 @@ bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
     return false;
 
   CI->replaceAllUsesWith(KlassConstant);
+  CI->eraseFromParent();
+  return true;
+}
+
+// Preserve the canonical dynamic check. Only expose a preloaded offset once
+// propagation has proved the target Klass constant.
+bool specializeConstantClassCheck(CallInst *CI,
+                                  const jeandle::VMCallbacks &CB) {
+  if (!CB.GetSuperCheckOffset || CI->arg_size() != 2 ||
+      !CI->getType()->isIntegerTy(1))
+    return false;
+  uintptr_t Klass = jeandle::extractKlassConstant(CI->getArgOperand(0));
+  Function *WithOffset =
+      CI->getModule()->getFunction("jeandle.checkcast_nonnull_with_offset");
+  if (!Klass || !WithOffset || WithOffset->isVarArg() ||
+      WithOffset->arg_size() != 3 ||
+      WithOffset->getReturnType() != CI->getType() ||
+      !isJavaOopType(CI->getArgOperand(1)->getType()) ||
+      WithOffset->getFunctionType()->getParamType(0) !=
+          CI->getArgOperand(0)->getType() ||
+      WithOffset->getFunctionType()->getParamType(1) !=
+          CI->getArgOperand(1)->getType() ||
+      !WithOffset->getFunctionType()->getParamType(2)->isIntegerTy(32))
+    return false;
+  // Only specialize primary-super checks, where the constant offset also
+  // removes the secondary-super branch. Preserve the canonical secondary path.
+  GlobalVariable *SecondaryOffset = CI->getModule()->getGlobalVariable(
+      "Klass.secondary_super_cache_offset", true);
+  auto *Secondary =
+      SecondaryOffset && SecondaryOffset->isConstant() &&
+              SecondaryOffset->hasInitializer()
+          ? dyn_cast<ConstantInt>(SecondaryOffset->getInitializer())
+          : nullptr;
+  int Offset = CB.GetSuperCheckOffset(Klass);
+  if (!Secondary ||
+      Secondary->getValue().getLimitedValue() == static_cast<uint32_t>(Offset))
+    return false;
+  IRBuilder<> Builder(CI);
+  SmallVector<OperandBundleDef, 1> Bundles;
+  CI->getOperandBundlesAsDefs(Bundles);
+  CallInst *Check = Builder.CreateCall(
+      WithOffset,
+      {CI->getArgOperand(0), CI->getArgOperand(1), Builder.getInt32(Offset)},
+      Bundles);
+  Check->setCallingConv(CI->getCallingConv());
+  Check->setDebugLoc(CI->getDebugLoc());
+  CI->replaceAllUsesWith(Check);
+  CI->eraseFromParent();
+  return true;
+}
+
+std::optional<int> classQueryForConstantMirror(int OopId, ClassQueryKind Kind,
+                                               const jeandle::VMCallbacks &CB) {
+  uintptr_t Klass = CB.GetMirrorKlass(OopId);
+  if (Klass == jeandle::MirrorKlassUnavailable)
+    return std::nullopt;
+  if (Klass == 0) {
+    if (Kind == ClassQueryKind::IsPrimitive)
+      return 1;
+    if (Kind == ClassQueryKind::GetModifiers ||
+        Kind == ClassQueryKind::GetAccessFlags)
+      return 1041; // JVM_ACC_PUBLIC | JVM_ACC_FINAL | JVM_ACC_ABSTRACT.
+    return 0;
+  }
+  switch (Kind) {
+  case ClassQueryKind::IsArray: {
+    int LayoutHelper = CB.GetKlassLayoutHelper(Klass);
+    if (LayoutHelper == 0)
+      return std::nullopt;
+    return LayoutHelper < 0 ? 1 : 0;
+  }
+  case ClassQueryKind::IsInterface:
+    return CB.IsInterface(Klass) ? 1 : 0;
+  case ClassQueryKind::IsPrimitive:
+    return 0;
+  case ClassQueryKind::IsHidden:
+    return CB.IsHiddenKlass(Klass) ? 1 : 0;
+  case ClassQueryKind::GetModifiers:
+    return CB.GetKlassModifierFlags(Klass);
+  case ClassQueryKind::GetAccessFlags:
+    return CB.GetKlassAccessFlags(Klass);
+  }
+  llvm_unreachable("unknown Class query kind");
+}
+
+// Different constant mirrors can have the same queried property even when the
+// ConstOop lattice cannot retain a single identity. Cache both known and
+// unknown results per query. An empty entry also breaks cycles conservatively.
+// Count every operand visit, including cache hits, so wide PHIs have a bounded
+// cost.
+std::optional<int>
+classQueryForMirror(Value *Mirror, ClassQueryKind Kind,
+                    const jeandle::VMCallbacks &CB,
+                    const DenseMap<Value *, int> &ConstOops,
+                    DenseMap<Value *, std::optional<int>> &Results,
+                    unsigned &RemainingVisits, unsigned Depth = 0) {
+  if (RemainingVisits == 0)
+    return std::nullopt;
+  --RemainingVisits;
+  auto It = Results.find(Mirror);
+  if (It != Results.end())
+    return It->second;
+  if (Depth >= 32)
+    return std::nullopt;
+
+  Results.try_emplace(Mirror, std::nullopt);
+  std::optional<int> Result;
+  if (std::optional<int> OopId = lookupConstOop(Mirror, ConstOops)) {
+    Result = classQueryForConstantMirror(*OopId, Kind, CB);
+  } else if (auto *SI = dyn_cast<SelectInst>(Mirror)) {
+    std::optional<int> True =
+        classQueryForMirror(SI->getTrueValue(), Kind, CB, ConstOops, Results,
+                            RemainingVisits, Depth + 1);
+    if (True) {
+      std::optional<int> False =
+          classQueryForMirror(SI->getFalseValue(), Kind, CB, ConstOops, Results,
+                              RemainingVisits, Depth + 1);
+      if (False && *True == *False)
+        Result = *True;
+    }
+  } else if (auto *PN = dyn_cast<PHINode>(Mirror)) {
+    for (Value *Incoming : PN->incoming_values()) {
+      std::optional<int> Next = classQueryForMirror(
+          Incoming, Kind, CB, ConstOops, Results, RemainingVisits, Depth + 1);
+      if (!Next || (Result && *Result != *Next)) {
+        Result = std::nullopt;
+        break;
+      }
+      Result = *Next;
+    }
+  }
+
+  Results[Mirror] = Result;
+  return Result;
+}
+
+bool foldClassQueryCall(CallInst *CI, ClassQueryKind Kind,
+                        const jeandle::VMCallbacks &CB,
+                        const DenseMap<Value *, int> &ConstOops) {
+  if (!CI->getType()->isIntegerTy(32) || !CB.GetMirrorKlass ||
+      (Kind == ClassQueryKind::IsArray && !CB.GetKlassLayoutHelper) ||
+      (Kind == ClassQueryKind::IsInterface && !CB.IsInterface) ||
+      (Kind == ClassQueryKind::IsHidden && !CB.IsHiddenKlass) ||
+      (Kind == ClassQueryKind::GetModifiers && !CB.GetKlassModifierFlags) ||
+      (Kind == ClassQueryKind::GetAccessFlags && !CB.GetKlassAccessFlags))
+    return false;
+
+  DenseMap<Value *, std::optional<int>> Results;
+  unsigned RemainingVisits = 256;
+  std::optional<int> Result = classQueryForMirror(
+      CI->getArgOperand(0), Kind, CB, ConstOops, Results, RemainingVisits);
+  if (!Result)
+    return false;
+
+  CI->replaceAllUsesWith(ConstantInt::get(CI->getType(), *Result));
   CI->eraseFromParent();
   return true;
 }
@@ -728,18 +985,26 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     LVINullEdgeOracle IsNullEdge{LVI};
 
     SmallVector<CallInst *, 16> LoadKlassCalls;
+    SmallVector<CallInst *, 16> ClassInstanceChecks;
     SmallVector<CallInst *, 16> LoadMirrorKlassCalls;
+    SmallVector<std::pair<CallInst *, ClassQueryKind>, 16> ClassQueryCalls;
     SmallVector<CallInst *, 16> GetClassCalls;
     SmallVector<CallInst *, 16> LayoutHelperCalls;
     SmallVector<CallInst *, 16> KlassInitializedCalls;
+    SmallVector<ICmpInst *, 16> ClassMirrorComparisons;
     SmallVector<LoadInst *, 16> Loads;
     for (BasicBlock *BB : RPOT) {
       for (Instruction &I : *BB) {
         if (auto *CI = dyn_cast<CallInst>(&I)) {
           if (isLoadKlassCall(CI))
             LoadKlassCalls.push_back(CI);
+          if (Function *Callee = CI->getCalledFunction();
+              Callee && Callee->getName() == "jeandle.check_instanceof")
+            ClassInstanceChecks.push_back(CI);
           if (isLoadMirrorKlassCall(CI))
             LoadMirrorKlassCalls.push_back(CI);
+          if (auto Kind = classQueryKind(CI))
+            ClassQueryCalls.emplace_back(CI, *Kind);
           if (isGetClassCall(CI))
             GetClassCalls.push_back(CI);
           if (isLayoutHelperCall(CI))
@@ -749,6 +1014,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
         }
         if (auto *LI = dyn_cast<LoadInst>(&I))
           Loads.push_back(LI);
+        if (auto *Cmp = dyn_cast<ICmpInst>(&I))
+          ClassMirrorComparisons.push_back(Cmp);
       }
     }
 
@@ -769,6 +1036,31 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
         continue;
       if (foldLoadMirrorKlassCall(CI, *CB, ConstOops)) {
         ++NumMirrorKlassesFolded;
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
+    for (ICmpInst *Cmp : ClassMirrorComparisons) {
+      if (Cmp->getParent() == nullptr)
+        continue;
+      if (foldClassMirrorComparison(Cmp, *CB, ConstOops)) {
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
+    for (CallInst *CI : ClassInstanceChecks) {
+      if (specializeConstantClassCheck(CI, *CB)) {
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
+    for (auto [CI, Kind] : ClassQueryCalls) {
+      if (CI->getParent() == nullptr)
+        continue;
+      if (foldClassQueryCall(CI, Kind, *CB, ConstOops)) {
         RoundChanged = true;
         Changed = true;
       }

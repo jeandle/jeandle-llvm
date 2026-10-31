@@ -63,8 +63,10 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
     return PreservedAnalyses::all();
 
   Function *CheckFn = M->getFunction("jeandle.check_instanceof");
+  Function *OffsetCheckFn =
+      M->getFunction("jeandle.checkcast_nonnull_with_offset");
   Function *SubtypeFn = M->getFunction("jeandle.check_klass_subtype");
-  if (!CheckFn && !SubtypeFn)
+  if (!CheckFn && !OffsetCheckFn && !SubtypeFn)
     return PreservedAnalyses::all();
 
   DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
@@ -86,7 +88,8 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
     auto *Check = dyn_cast<CallInst>(&I);
     if (!Check)
       continue;
-    if (CheckFn && Check->getCalledFunction() == CheckFn)
+    if ((CheckFn && Check->getCalledFunction() == CheckFn) ||
+        (OffsetCheckFn && Check->getCalledFunction() == OffsetCheckFn))
       Checks.push_back(Check);
     if (SubtypeFn && Check->getCalledFunction() == SubtypeFn)
       SubtypeChecks.push_back(Check);
