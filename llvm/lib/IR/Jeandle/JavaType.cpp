@@ -166,18 +166,23 @@ bool jeandle::areKlassesIncompatible(uintptr_t Klass, bool KlassExact,
          !CB->IsUnverifiedInterface(OtherKlass);
 }
 
-/// Return true if F is jeandle.check_instanceof.
+/// Recognize non-null subtype checks, including the preloaded-offset form.
 static bool isCheckInstanceofFn(const Function *F) {
-  return F && F->getName() == "jeandle.check_instanceof";
+  return F && (F->getName() == "jeandle.check_instanceof" ||
+               F->getName() == "jeandle.checkcast_nonnull_with_offset");
 }
 
-/// If CB is a call/invoke to jeandle.check_instanceof, return the super klass
+/// If CB is a call/invoke to a non-null subtype check, return the super klass
 /// and obj. The name match alone is not an identity: legal IR may declare a
 /// same-named function with a different signature, so the operand accesses
 /// are guarded by an arity check.
 static bool isCheckInstanceofCall(const CallBase *CB, uintptr_t &Klass,
                                   Value *&Obj) {
-  if (!isCheckInstanceofFn(CB->getCalledFunction()) || CB->arg_size() != 2)
+  if (!isCheckInstanceofFn(CB->getCalledFunction()) ||
+      CB->arg_size() != (CB->getCalledFunction()->getName() ==
+                                 "jeandle.checkcast_nonnull_with_offset"
+                             ? 3u
+                             : 2u))
     return false;
   Klass = extractKlassConstant(CB->getArgOperand(0));
   Obj = CB->getArgOperand(1);
@@ -527,6 +532,7 @@ getDefinednessInputs(Value *V, SmallVectorImpl<Value *> &Inputs) {
     // This is the same name-based helper contract the tracing relies on.
     if (const Function *Callee = CB->getCalledFunction())
       if (Callee->getName() == "jeandle.check_instanceof" ||
+          Callee->getName() == "jeandle.checkcast_nonnull_with_offset" ||
           Callee->getName() == "jeandle.check_exact_klass" ||
           Callee->getName() == "jeandle.check_klass_subtype")
         return true;

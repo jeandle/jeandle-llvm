@@ -240,6 +240,9 @@ enum class JeandleInlineReason : int {
   def(GetKlassLayoutHelper, int, Int,                                            \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetSuperCheckOffset, int, Int,                                             \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
   def(GetKlassModifierFlags, int, Int,                                           \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
@@ -444,6 +447,8 @@ enum class JeandleInlineReason : int {
 ///                       — Returns Klass::layout_helper() for a constant Klass
 ///                         pointer, or 0 if unavailable. Pure (klass ->
 ///                         layout helper).
+///   GetSuperCheckOffset — Return the immutable subtype-check offset for a
+///                         known, non-null recorded Klass.
 ///   GetKlassModifierFlags / GetKlassAccessFlags / IsHiddenKlass
 ///                       — Return immutable Klass properties for Class queries.
 ///                         Only call these for a known, non-null Klass.

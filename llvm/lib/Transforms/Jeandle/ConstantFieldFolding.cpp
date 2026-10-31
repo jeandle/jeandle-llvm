@@ -566,6 +566,53 @@ bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
   return true;
 }
 
+// Preserve the canonical dynamic check. Only expose a preloaded offset once
+// propagation has proved the target Klass constant.
+bool specializeConstantClassCheck(CallInst *CI,
+                                  const jeandle::VMCallbacks &CB) {
+  if (!CB.GetSuperCheckOffset || CI->arg_size() != 2 ||
+      !CI->getType()->isIntegerTy(1))
+    return false;
+  uintptr_t Klass = jeandle::extractKlassConstant(CI->getArgOperand(0));
+  Function *WithOffset =
+      CI->getModule()->getFunction("jeandle.checkcast_nonnull_with_offset");
+  if (!Klass || !WithOffset || WithOffset->isVarArg() ||
+      WithOffset->arg_size() != 3 ||
+      WithOffset->getReturnType() != CI->getType() ||
+      !isJavaOopType(CI->getArgOperand(1)->getType()) ||
+      WithOffset->getFunctionType()->getParamType(0) !=
+          CI->getArgOperand(0)->getType() ||
+      WithOffset->getFunctionType()->getParamType(1) !=
+          CI->getArgOperand(1)->getType() ||
+      !WithOffset->getFunctionType()->getParamType(2)->isIntegerTy(32))
+    return false;
+  // Only specialize primary-super checks, where the constant offset also
+  // removes the secondary-super branch. Preserve the canonical secondary path.
+  GlobalVariable *SecondaryOffset = CI->getModule()->getGlobalVariable(
+      "Klass.secondary_super_cache_offset", true);
+  auto *Secondary =
+      SecondaryOffset && SecondaryOffset->isConstant() &&
+              SecondaryOffset->hasInitializer()
+          ? dyn_cast<ConstantInt>(SecondaryOffset->getInitializer())
+          : nullptr;
+  int Offset = CB.GetSuperCheckOffset(Klass);
+  if (!Secondary ||
+      Secondary->getValue().getLimitedValue() == static_cast<uint32_t>(Offset))
+    return false;
+  IRBuilder<> Builder(CI);
+  SmallVector<OperandBundleDef, 1> Bundles;
+  CI->getOperandBundlesAsDefs(Bundles);
+  CallInst *Check = Builder.CreateCall(
+      WithOffset,
+      {CI->getArgOperand(0), CI->getArgOperand(1), Builder.getInt32(Offset)},
+      Bundles);
+  Check->setCallingConv(CI->getCallingConv());
+  Check->setDebugLoc(CI->getDebugLoc());
+  CI->replaceAllUsesWith(Check);
+  CI->eraseFromParent();
+  return true;
+}
+
 std::optional<int> classQueryForConstantMirror(int OopId, ClassQueryKind Kind,
                                                const jeandle::VMCallbacks &CB) {
   uintptr_t Klass = CB.GetMirrorKlass(OopId);
@@ -938,6 +985,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     LVINullEdgeOracle IsNullEdge{LVI};
 
     SmallVector<CallInst *, 16> LoadKlassCalls;
+    SmallVector<CallInst *, 16> ClassInstanceChecks;
     SmallVector<CallInst *, 16> LoadMirrorKlassCalls;
     SmallVector<std::pair<CallInst *, ClassQueryKind>, 16> ClassQueryCalls;
     SmallVector<CallInst *, 16> GetClassCalls;
@@ -950,6 +998,9 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
         if (auto *CI = dyn_cast<CallInst>(&I)) {
           if (isLoadKlassCall(CI))
             LoadKlassCalls.push_back(CI);
+          if (Function *Callee = CI->getCalledFunction();
+              Callee && Callee->getName() == "jeandle.check_instanceof")
+            ClassInstanceChecks.push_back(CI);
           if (isLoadMirrorKlassCall(CI))
             LoadMirrorKlassCalls.push_back(CI);
           if (auto Kind = classQueryKind(CI))
@@ -994,6 +1045,13 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
       if (Cmp->getParent() == nullptr)
         continue;
       if (foldClassMirrorComparison(Cmp, *CB, ConstOops)) {
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
+    for (CallInst *CI : ClassInstanceChecks) {
+      if (specializeConstantClassCheck(CI, *CB)) {
         RoundChanged = true;
         Changed = true;
       }
