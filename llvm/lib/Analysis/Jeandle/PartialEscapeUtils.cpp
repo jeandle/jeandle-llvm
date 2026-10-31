@@ -89,7 +89,8 @@ bool isJeandleInstanceOf(const CallBase *CB) {
 }
 
 bool isJeandleCheckInstanceOf(const CallBase *CB) {
-  return isJeandleCallNamed(CB, "jeandle.check_instanceof");
+  return isJeandleCallNamed(CB, "jeandle.check_instanceof") ||
+         isJeandleCallNamed(CB, "jeandle.checkcast_nonnull_with_offset");
 }
 
 bool isJeandleCheckIfValueBased(const CallBase *CB) {
