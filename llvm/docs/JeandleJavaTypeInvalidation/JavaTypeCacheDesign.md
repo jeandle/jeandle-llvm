@@ -1,28 +1,28 @@
-# JavaType V2 四类缓存及失效契约
+# JavaType 四类缓存及失效契约
 
 本文件描述当前实现。基础类型、definedness、条件追踪及 CFG 查询共同使用
 `llvm/lib/IR/Jeandle/JavaType.cpp` 中的一套求解算法；
-`CachedJavaTypeV2.cpp` 保留完整的缓存查询包装：函数绑定、Base 查询
+`CachedJavaType.cpp` 保留完整的缓存查询包装：函数绑定、Base 查询
 起止统计以及 Final 查找和发布。四类缓存、Facts 的查找/写入策略、
-监控和失效仍实现在独立的 `JavaTypeCacheV2.h/.cpp`，Analysis 接口不变。
+监控和失效仍实现在独立的 `JavaTypeCache.h/.cpp`，Analysis 接口不变。
 
 ## 组织与查询入口
 
-`JavaTypeCacheV2` 是单个 Function 的聚合所有者，分别持有四个独立类：
+`JavaTypeCache` 是单个 Function 的聚合所有者，分别持有四个独立类：
 
 | 成员 / 类 | 保存内容 | 复用边界 |
 | --- | --- | --- |
-| `Base` / `JavaTypeBaseCacheV2` | `Value* → JavaType` 的基础类型结果 | 相同 IR、VM 类型环境；修改后可保留不受影响的值 |
-| `Defined` / `JavaTypeDefinedCacheV2` | `Value* → bool` 的完成 definedness 证明 | 同上；`false` 表示未能证明 defined |
-| `Facts` / `JavaTypeFactsCacheV2` | `(V, From, To)` 的根 guard 和完整 null-edge 判断 | 本次有效期内跨查询复用；IR 修改后清空 |
-| `Final` / `JavaTypeFinalCacheV2` | `(V, ContextBB)` 的完整顶层查询结果 | 通知之间复用；IR 修改或 oracle 维护后整体清空 |
+| `Base` / `JavaTypeBaseCache` | `Value* → JavaType` 的基础类型结果 | 相同 IR、VM 类型环境；修改后可保留不受影响的值 |
+| `Defined` / `JavaTypeDefinedCache` | `Value* → bool` 的完成 definedness 证明 | 同上；`false` 表示未能证明 defined |
+| `Facts` / `JavaTypeFactsCache` | `(V, From, To)` 的根 guard 和完整 null-edge 判断 | 本次有效期内跨查询复用；IR 修改后清空 |
+| `Final` / `JavaTypeFinalCache` | `(V, ContextBB)` 的完整顶层查询结果 | 通知之间复用；IR 修改或 oracle 维护后整体清空 |
 
 Analysis 及现有调用方仍使用最外层的单个缓存引用：
 
 ```cpp
-JavaType getCachedJavaTypeV2(Value *V, DominatorTree *DT,
+JavaType getCachedJavaType(Value *V, DominatorTree *DT,
                             Instruction *Context, IsNullEdgeOracle IsNullEdge,
-                            JavaTypeCacheV2 &Cache);
+                            JavaTypeCache &Cache);
 ```
 
 缓存包装先处理函数绑定和 Final 命中，开始 Base 查询统计后，调用
@@ -31,7 +31,7 @@ JavaType getCachedJavaTypeV2(Value *V, DominatorTree *DT,
 
 ```cpp
 JavaType getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
-                     IsNullEdgeOracle IsNullEdge, JavaTypeCacheV2 &Cache);
+                     IsNullEdgeOracle IsNullEdge, JavaTypeCache &Cache);
 ```
 
 原来的四参数 `getJavaType` 和 `sharpen` 继续使用查询内的本地存储。
@@ -41,7 +41,7 @@ JavaType getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
 必要的参数、存储选择和计数，不再维护第二份求解器。
 
 `DefinedMemo` 是文件内的存储选择器：普通查询使用自己的本地 bool 表，
-缓存查询借用 `JavaTypeDefinedCacheV2` 的表并记录计数。查询上下文同样
+缓存查询借用 `JavaTypeDefinedCache` 的表并记录计数。查询上下文同样
 选择本地或外部的 Base / Defined；进行中的求解状态仍不跨查询共享。
 
 预算、递归栈、SCC 工作图、`Processed` 和 `ValueTypes` 仍是单次查询状态。
@@ -80,7 +80,7 @@ Defined 的冻结结果等是否为叶子，按其自身证明规则判断。
 `(V, From, To)`。它们表示沿哪条边成立的事实，单个 Context 不能区分
 同一块的不同入边及其分支方向。
 
-缓存策略由 `JavaTypeFactsCacheV2::getNullEdge` 和 `getGuard` 管理：
+缓存策略由 `JavaTypeFactsCache::getNullEdge` 和 `getGuard` 管理：
 它们接收边和 Value，以及一个执行原计算的 `Compute` 回调；负责模式
 检查、命中、未命中后的写入和统计。`getGuard` 还接收当前条件追踪深度。
 原 `JavaType.cpp` 保留 `computeNullEdge` / `computeEdgeGuard` 的算法，
@@ -96,10 +96,10 @@ IR 不变时，也必须调用聚合类 `notifyOracleChanged()`。
 
 ## Final：轻量结果表，通知时整体清空
 
-保留 V2 的独立 Final 类、外部持有方式和统计开关，内部使用轻量的
+保留缓存实现的独立 Final 类、外部持有方式和统计开关，内部使用轻量的
 `DenseMap<(Value*, ContextBB*), JavaType>` 结果表。只有完整顶层查询读写
 Final；递归求解继续使用当前算法，不读取或发布 Final。
-查找和发布只发生在 `CachedJavaTypeV2.cpp` 的顶层包装中，原求解器
+查找和发布只发生在 `CachedJavaType.cpp` 的顶层包装中，原求解器
 不读取或写入 Final。命中直接返回结果，未命中完成求解后插入；插入
 不再遍历操作数或 CFG 前驱来收集依赖，也不维护 `ByValue` / `ByBlock`
 反向索引。
@@ -121,7 +121,7 @@ Final 只记录共性的命中、未命中、插入、删除、失效和清空�
 ## Analysis、PassManager 与调用方职责
 
 `JavaTypeAnalysisResult` 持有聚合缓存，使用 `StableOracleEpoch`，查询
-走 V2。其主动修改通知转发给聚合类，并执行 `LVI.clear()`；
+走缓存实现。其主动修改通知转发给聚合类，并执行 `LVI.clear()`；
 DT 仍由调用方在下一次查询前更新。完整 `clear()` 清四类缓存及 LVI。
 `-jeandle-verify-java-type-cache` 使用同一求解器的无跨查询缓存入口重新
 计算，严格比较完整结果；不会因为预算截断或 PHI 环跳过验证。
@@ -168,7 +168,7 @@ Result.invalidate(Changed);
 
 历史基线（调整前的依赖索引版本，并非本次验证结果）：
 
-- `JavaTypeQueryTests` 共 83 项，82 项通过；V2 的 36 项全部通过。
+- `JavaTypeQueryTests` 共 83 项，82 项通过；缓存实现 的 36 项全部通过。
   唯一失败是既有直接 V1 `JavaTypeQueryTest.CachedEntryNormalizesFreeze`。
 - `llvm/test/Jeandle` 的 lit 回归：807 项，782 通过、25 unsupported，
   0 失败。
@@ -179,16 +179,16 @@ Result.invalidate(Changed);
 
 - `cmake --build build/build-ninja-release --target JavaTypeQueryTests opt -j 2`
   构建通过。
-- `JavaTypeQueryTests` 共 84 项，83 项通过；V2 的 37 项全部通过。
+- `JavaTypeQueryTests` 共 84 项，83 项通过；缓存实现 的 37 项全部通过。
   唯一失败仍是既有直接 V1 `JavaTypeQueryTest.CachedEntryNormalizesFreeze`。
 - `llvm/test/Jeandle` 的 lit 回归共 808 项，783 通过、25 unsupported，
   0 失败。TCE 的统计断言已同步为修改后清空全部 Final 项。
 - 原版 JavaType 两文件、直接 V1 两文件和原版结构 CSV 与任务起点
   `79258fc1a` 一致；Cached CSV 保持四列。
 
-当前清理后的构建与回归结果另行记录。这里不宣称性能提升；应比较
-原版、依赖索引历史版本、关闭 Final 的 V2 和
-轻量 Final 的 V2，并在相同求解器、Base / Defined / Facts 配置下测量
+清理后的构建与回归结果见后文各阶段验证记录。这里不宣称性能提升；应比较
+原版、依赖索引历史版本、关闭 Final 的 缓存实现 和
+轻量 Final 实现，并在相同求解器、Base / Defined / Facts 配置下测量
 总耗时和修改后的重算成本。
 当前没有增加全局容量上限或基于访问频次的逐出机制。原版结构 CSV
 保留为迁移前基线，缓存接入的新增和调整记录在 Cached 结构 CSV。
@@ -196,17 +196,17 @@ Result.invalidate(Changed);
 ## V1 清理验证（2026-11-02）
 
 删除旧查询实现及其专属测试/回放工具，保留并迁移有用的失效和 Analysis
-回归到当前 V2 API。`JavaTypeQueryTests` 73/73 通过；完整 Jeandle lit
+回归到当前缓存 API。`JavaTypeQueryTests` 73/73 通过；完整 Jeandle lit
 回归 783 通过、25 unsupported、0 失败。旧 V1 freeze 失败用例不再属于
-当前测试集；V2 中可能 poison 与 noundef 输入的 freeze 正反例继续保留。
+当前测试集；缓存实现 中可能 poison 与 noundef 输入的 freeze 正反例继续保留。
 历史性能数据未改写，旧实现可从 Git 历史复现。
 
 ## 求解器合并验证
 
-原四参数查询、`sharpen` 与缓存重载现在共享原文件内的算法，原有 V2
+原四参数查询、`sharpen` 与缓存重载现在共享原文件内的算法，原有缓存实现
 缓存和 Analysis 生命周期测试继续验证复用及失效。合并后的构建、原版
-IR 单元测试、缓存单元测试和 Jeandle lit 结果另行记录；前面的历史结果
-不能代替本阶段验证。
+IR 单元测试、缓存单元测试和 Jeandle lit 结果见下一节；前面的历史
+结果不能代替本阶段验证。
 
 ## 共享底层接口验证（2026-11-02）
 
@@ -224,3 +224,51 @@ IR 单元测试、缓存单元测试和 Jeandle lit 结果另行记录；前面�
 
 尚未重新运行 perf；本次验证不构成性能提升的证据。按当前约定，直接
 使用现有缓存类，库依赖方向的整理留待后续讨论。
+
+## 消费者缓存接入审查（2026-11-03）
+
+五个消费者的九个 getJavaType 源码调用点全部通过
+`FAM.getResult<JavaTypeAnalysis>(F)` 获取分析，再调用
+`JavaTypes.getJavaType`；没有直接调用无缓存入口。
+
+| Pass | 查询点 | 修改后的生命周期 |
+| --- | --- | --- |
+| TypeCheckElimination | 1 处 | 折叠前批量通知；维护后 preserve JavaType、DT、LVI |
+| CHADevirtualization | 2 处 | 修改通知覆盖 assume、参数、替换/删除和 CFG；更新 DT/LVI 后继续查询并 preserve |
+| ConstantFieldFolding | 2 处 | 替换、删除前通知，pass 内可继续复用；有修改时只 preserve CFG，JavaType 在边界失效 |
+| RecoverTypeInfo | 1 处 | 所有查询在 metadata 写入前完成；有修改时只 preserve CFG，JavaType 在边界失效 |
+| CopySpecialization | 3 处 | arraycopy 源/目标及 instance-clone 源类型统一查询；先收集全部 CopyFacts，再改写；有修改时返回 none，JavaType/DT/LVI 在边界失效 |
+
+RecoverTypeInfo 的 PHI 入边 `sharpen` 查询仍由其本地 EdgeSharpenCache
+管理，语义不同于整值 getJavaType，不是同类查询绕过缓存。
+CopySpecialization 的三处查询已加入同一 Analysis 与统计路径。所有
+CopyFacts 在第一次改写前完成，后续扩展不再查询 JavaType，因此不需要
+pass 内逐项失效；它有修改时不保留任何分析，由 FAM 丢弃旧结果。
+新增消费者无需添加统计字段或专属计数器，查询事件会自动进入现有
+Function 累计和进程汇总。FAM 边界丢弃不生成显式失效事件，
+`invalidation requests: 0` 不意味着保留了缓存；存活状态由 FAM 或
+cache-boundary 另行检查，条目数量只是最近事件的快照。
+
+接入 CopySpecialization 之前的命名清理验证为 JavaTypeQueryTests
+76/76、原 JavaBaseTypeTest 69/69 通过；完整 Jeandle lit 回归 783 通过、
+25 unsupported、0 失败。这些是前一阶段结果，不能代替新增消费者验证。
+
+新增 [copy-specialization/cache-reuse.ll](../../test/Jeandle/copy-specialization/cache-reuse.ll)
+覆盖同块两次源查询的 Final 复用、改写后的 FAM 丢弃，以及缓存、禁用
+缓存和严格验证模式的输出一致性。
+
+
+## CopySpecialization 接入验证（2026-11-03）
+
+- `JavaTypeQueryTests` 构建通过，79/79 通过：缓存测试 40 项，查询与
+  Analysis 测试 39 项，含新增的无 copy、bulk clone 和字段标量化场景。
+- CopySpecialization 定向 lit 11/11 通过。新增 `cache-reuse.ll` 覆盖同块
+  Final 复用、边界丢弃及缓存/禁用缓存/严格验证的 IR 输出一致性。
+- 已有 clone、整数宽度、引用数组 fixture 增加缓存与禁用缓存输出对照；
+  `integer-width.ll` 还验证 arraycopy 源/目标各进入统一统计，两个相关
+  函数各两次查询，而 payload array-clone 分支不查询 JavaType。
+- 完整 Jeandle lit 共 809 项：784 通过、25 unsupported、0 失败。
+
+本轮仅接入消费者与回归，底层求解算法、缓存类和统计 schema 未改；
+新增三处查询自动进入原统计链路。未运行新的 perf 或计时实验，历史
+结果保持原样，不能据此量化新增接入的性能收益。

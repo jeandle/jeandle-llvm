@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Analysis/Jeandle/CachedJavaTypeV2.h"
+#include "llvm/Analysis/Jeandle/CachedJavaType.h"
 #include "llvm/Analysis/Jeandle/JavaTypeAnalysis.h"
 #include "llvm/Analysis/Jeandle/JavaTypeAnalysisStats.h"
 #include "llvm/Analysis/Jeandle/LVINullEdgeOracle.h"
@@ -15,6 +15,7 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
+#include "llvm/IR/Jeandle/VMConstants.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
@@ -24,6 +25,7 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Jeandle/ConstantFieldFolding.h"
+#include "llvm/Transforms/Jeandle/CopySpecialization.h"
 #include "gtest/gtest.h"
 
 #include <algorithm>
@@ -480,10 +482,10 @@ TEST_F(JavaTypeQueryTest, CachedAndOriginalQueriesAgreeAcrossBudgets) {
     ScopedQueryOption<unsigned> Budget("jeandle-max-facts-join-blocks", Limit);
     for (BasicBlock &BB : *F) {
       SCOPED_TRACE(BB.getName().str() + " budget=" + std::to_string(Limit));
-      JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+      JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
       Cache.setStatsEnabled(true);
       Instruction *Context = BB.getTerminator();
-      EXPECT_EQ(getCachedJavaTypeV2(V, &DT, Context, nullptr, Cache),
+      EXPECT_EQ(getCachedJavaType(V, &DT, Context, nullptr, Cache),
                 jeandle::getJavaType(V, &DT, Context, nullptr));
     }
   }
@@ -501,9 +503,9 @@ TEST_F(JavaTypeQueryTest, SelectiveBaseDeletionMatchesScanBaseline) {
   )");
   ASSERT_NE(F, nullptr);
   DominatorTree DT(*F);
-  JavaTypeCacheV2 ScanCache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache ScanCache(F, JavaTypeCache::Mode::StableOracleEpoch);
   ScanCache.setStatsEnabled(true);
-  JavaTypeCacheV2 KeyCache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache KeyCache(F, JavaTypeCache::Mode::StableOracleEpoch);
   KeyCache.setStatsEnabled(true);
   auto *First = cast<SelectInst>(&F->getEntryBlock().front());
   auto *Second = cast<SelectInst>(First->getNextNode());
@@ -511,22 +513,22 @@ TEST_F(JavaTypeQueryTest, SelectiveBaseDeletionMatchesScanBaseline) {
   Value *B = F->getArg(1);
   Value *Independent = F->getArg(2);
 
-  auto Populate = [&](JavaTypeCacheV2 &Cache) {
-    EXPECT_EQ(getCachedJavaTypeV2(Second, &DT, nullptr, nullptr, Cache).Klass,
+  auto Populate = [&](JavaTypeCache &Cache) {
+    EXPECT_EQ(getCachedJavaType(Second, &DT, nullptr, nullptr, Cache).Klass,
               22U);
-    EXPECT_EQ(getCachedJavaTypeV2(B, &DT, nullptr, nullptr, Cache).Klass,
+    EXPECT_EQ(getCachedJavaType(B, &DT, nullptr, nullptr, Cache).Klass,
               33U);
     EXPECT_EQ(
-        getCachedJavaTypeV2(Independent, &DT, nullptr, nullptr, Cache).Klass,
+        getCachedJavaType(Independent, &DT, nullptr, nullptr, Cache).Klass,
         44U);
     EXPECT_EQ(Cache.baseSize(), 5U);
   };
   Populate(ScanCache);
   Populate(KeyCache);
 
-  JavaTypeCacheV2InvalidationInfo Scanned = ScanCache.invalidate(
+  JavaTypeCacheInvalidationInfo Scanned = ScanCache.invalidate(
       {A}, false, JavaTypeBaseInvalidationMode::Scan);
-  JavaTypeCacheV2InvalidationInfo Keyed = KeyCache.invalidate(
+  JavaTypeCacheInvalidationInfo Keyed = KeyCache.invalidate(
       {A}, false, JavaTypeBaseInvalidationMode::SelectiveKeys);
 
   EXPECT_EQ(Scanned.BaseRemoved, 3U);
@@ -543,9 +545,9 @@ TEST_F(JavaTypeQueryTest, SelectiveBaseDeletionMatchesScanBaseline) {
   F->removeParamAttr(0, "java-klass");
   F->addParamAttr(0, Attribute::get(C, "java-klass", "33"));
   JavaType Expected = jeandle::getJavaType(Second, &DT, nullptr, nullptr);
-  EXPECT_EQ(getCachedJavaTypeV2(Second, &DT, nullptr, nullptr, ScanCache),
+  EXPECT_EQ(getCachedJavaType(Second, &DT, nullptr, nullptr, ScanCache),
             Expected);
-  EXPECT_EQ(getCachedJavaTypeV2(Second, &DT, nullptr, nullptr, KeyCache),
+  EXPECT_EQ(getCachedJavaType(Second, &DT, nullptr, nullptr, KeyCache),
             Expected);
 }
 
@@ -558,37 +560,37 @@ TEST_F(JavaTypeQueryTest, TypeFactCanBecomeKnownAndWeakensAfterRepeatedEdits) {
   )");
   ASSERT_NE(F, nullptr);
   DominatorTree DT(*F);
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
   Value *A = F->getArg(0);
   Value *B = F->getArg(1);
   Value *Derived = &F->getEntryBlock().front();
   Instruction *Context = F->getEntryBlock().getTerminator();
 
-  EXPECT_TRUE(getCachedJavaTypeV2(Derived, &DT, Context, nullptr, Cache)
+  EXPECT_TRUE(getCachedJavaType(Derived, &DT, Context, nullptr, Cache)
                   .isUnknown());
-  EXPECT_EQ(getCachedJavaTypeV2(B, &DT, Context, nullptr, Cache).Klass,
+  EXPECT_EQ(getCachedJavaType(B, &DT, Context, nullptr, Cache).Klass,
             33U);
 
   Cache.invalidate({A});
   F->addParamAttr(0, Attribute::get(C, "java-klass", "22"));
-  EXPECT_EQ(getCachedJavaTypeV2(B, &DT, Context, nullptr, Cache).Klass,
+  EXPECT_EQ(getCachedJavaType(B, &DT, Context, nullptr, Cache).Klass,
             33U);
   EXPECT_EQ(Cache.Final.getStats().Hits, 0U);
   EXPECT_EQ(
-      getCachedJavaTypeV2(Derived, &DT, Context, nullptr, Cache).Klass, 1U);
+      getCachedJavaType(Derived, &DT, Context, nullptr, Cache).Klass, 1U);
 
   Cache.invalidate({A});
   F->removeParamAttr(0, "java-klass");
   F->addParamAttr(0, Attribute::get(C, "java-klass", "44"));
   EXPECT_EQ(
-      getCachedJavaTypeV2(Derived, &DT, Context, nullptr, Cache).Klass, 1U);
+      getCachedJavaType(Derived, &DT, Context, nullptr, Cache).Klass, 1U);
 
   Cache.invalidate({A});
   F->removeParamAttr(0, "java-klass");
-  EXPECT_TRUE(getCachedJavaTypeV2(Derived, &DT, Context, nullptr, Cache)
+  EXPECT_TRUE(getCachedJavaType(Derived, &DT, Context, nullptr, Cache)
                   .isUnknown());
-  EXPECT_EQ(getCachedJavaTypeV2(Derived, &DT, Context, nullptr, Cache),
+  EXPECT_EQ(getCachedJavaType(Derived, &DT, Context, nullptr, Cache),
             jeandle::getJavaType(Derived, &DT, Context, nullptr));
 }
 
@@ -601,14 +603,14 @@ TEST_F(JavaTypeQueryTest, RepeatedTypeFactMutationRoundTripsThroughAValue) {
   )");
   ASSERT_NE(F, nullptr);
   DominatorTree DT(*F);
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
   Value *A = F->getArg(0);
   Value *Derived = &F->getEntryBlock().front();
 
   const unsigned Expected[] = {22U, 33U, 44U, 22U, 33U};
   for (unsigned I = 0; I != 5; ++I) {
-    EXPECT_EQ(getCachedJavaTypeV2(Derived, &DT, nullptr, nullptr, Cache).Klass,
+    EXPECT_EQ(getCachedJavaType(Derived, &DT, nullptr, nullptr, Cache).Klass,
               Expected[I]);
     if (I + 1 == 5)
       break;
@@ -617,7 +619,7 @@ TEST_F(JavaTypeQueryTest, RepeatedTypeFactMutationRoundTripsThroughAValue) {
     F->addParamAttr(
         0, Attribute::get(C, "java-klass", std::to_string(Expected[I + 1])));
   }
-  EXPECT_EQ(getCachedJavaTypeV2(Derived, &DT, nullptr, nullptr, Cache),
+  EXPECT_EQ(getCachedJavaType(Derived, &DT, nullptr, nullptr, Cache),
             jeandle::getJavaType(Derived, &DT, nullptr, nullptr));
 }
 
@@ -632,22 +634,22 @@ TEST_F(JavaTypeQueryTest, CallAndLoadTypeFactsAreInvalidatedBeforeEdits) {
   )");
   ASSERT_NE(F, nullptr);
   DominatorTree DT(*F);
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
   auto *Call = cast<CallInst>(&F->getEntryBlock().front());
   auto *Load = cast<LoadInst>(Call->getNextNode());
   Instruction *Context = F->getEntryBlock().getTerminator();
 
   EXPECT_TRUE(
-      getCachedJavaTypeV2(Call, &DT, Context, nullptr, Cache).isUnknown());
+      getCachedJavaType(Call, &DT, Context, nullptr, Cache).isUnknown());
   EXPECT_TRUE(
-      getCachedJavaTypeV2(Load, &DT, Context, nullptr, Cache).isUnknown());
+      getCachedJavaType(Load, &DT, Context, nullptr, Cache).isUnknown());
 
   Cache.invalidate({Call});
   Call->addRetAttr(Attribute::get(C, "java-klass", "22"));
   Call->addRetAttr(Attribute::get(C, "java-klass-exact"));
   JavaType CallType =
-      getCachedJavaTypeV2(Call, &DT, Context, nullptr, Cache);
+      getCachedJavaType(Call, &DT, Context, nullptr, Cache);
   EXPECT_EQ(CallType.Klass, 22U);
   EXPECT_TRUE(CallType.Exact);
 
@@ -657,7 +659,7 @@ TEST_F(JavaTypeQueryTest, CallAndLoadTypeFactsAreInvalidatedBeforeEdits) {
   Load->setMetadata("java-klass", MDNode::get(C, {Klass}));
   Load->setMetadata("java-klass-exact", MDNode::get(C, {}));
   JavaType LoadType =
-      getCachedJavaTypeV2(Load, &DT, Context, nullptr, Cache);
+      getCachedJavaType(Load, &DT, Context, nullptr, Cache);
   EXPECT_EQ(LoadType.Klass, 44U);
   EXPECT_TRUE(LoadType.Exact);
   EXPECT_EQ(LoadType, jeandle::getJavaType(Load, &DT, Context, nullptr));
@@ -674,25 +676,25 @@ TEST_F(JavaTypeQueryTest, ParentQueryReusesAndInvalidatesCachedChild) {
   )");
   ASSERT_NE(F, nullptr);
   DominatorTree DT(*F);
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
   Value *A = F->getArg(0);
   auto *Child = cast<SelectInst>(&F->getEntryBlock().front());
   auto *Parent = cast<SelectInst>(Child->getNextNode());
 
-  EXPECT_EQ(getCachedJavaTypeV2(Child, &DT, nullptr, nullptr, Cache).Klass,
+  EXPECT_EQ(getCachedJavaType(Child, &DT, nullptr, nullptr, Cache).Klass,
             1U);
-  EXPECT_EQ(getCachedJavaTypeV2(Parent, &DT, nullptr, nullptr, Cache).Klass,
+  EXPECT_EQ(getCachedJavaType(Parent, &DT, nullptr, nullptr, Cache).Klass,
             1U);
 
-  JavaTypeCacheV2InvalidationInfo Invalidated = Cache.invalidate({A});
+  JavaTypeCacheInvalidationInfo Invalidated = Cache.invalidate({A});
   EXPECT_EQ(Invalidated.BaseRemoved, 3U);
   EXPECT_EQ(Cache.baseSize(), 1U);
   F->removeParamAttr(0, "java-klass");
   F->addParamAttr(0, Attribute::get(C, "java-klass", "33"));
-  EXPECT_EQ(getCachedJavaTypeV2(Parent, &DT, nullptr, nullptr, Cache).Klass,
+  EXPECT_EQ(getCachedJavaType(Parent, &DT, nullptr, nullptr, Cache).Klass,
             33U);
-  EXPECT_EQ(getCachedJavaTypeV2(Parent, &DT, nullptr, nullptr, Cache),
+  EXPECT_EQ(getCachedJavaType(Parent, &DT, nullptr, nullptr, Cache),
             jeandle::getJavaType(Parent, &DT, nullptr, nullptr));
 }
 
@@ -713,7 +715,7 @@ TEST_F(JavaTypeQueryTest,
   )");
   ASSERT_NE(F, nullptr);
   DominatorTree DT(*F);
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
   BasicBlock *Entry = &F->getEntryBlock();
   BasicBlock *DeadBlock = block(*F, "dead");
@@ -723,12 +725,12 @@ TEST_F(JavaTypeQueryTest,
   Instruction *EntryBranch = Entry->getTerminator();
   Value *Obj = F->getArg(0);
 
-  EXPECT_TRUE(getCachedJavaTypeV2(Leaf, &DT, DeadBranch, nullptr, Cache)
+  EXPECT_TRUE(getCachedJavaType(Leaf, &DT, DeadBranch, nullptr, Cache)
                   .isUnknown());
-  EXPECT_EQ(getCachedJavaTypeV2(Obj, &DT, DeadBranch, nullptr, Cache).Klass,
+  EXPECT_EQ(getCachedJavaType(Obj, &DT, DeadBranch, nullptr, Cache).Klass,
             22U);
 
-  JavaTypeCacheV2InvalidationInfo Invalidated =
+  JavaTypeCacheInvalidationInfo Invalidated =
       Cache.invalidate({Leaf, EntryBranch}, true);
   EXPECT_FALSE(Invalidated.FullClear);
   EXPECT_EQ(Invalidated.BaseRemoved, 1U);
@@ -741,7 +743,7 @@ TEST_F(JavaTypeQueryTest,
   DT.recalculate(*F);
   EXPECT_FALSE(verifyFunction(*F, &errs()));
 
-  EXPECT_EQ(getCachedJavaTypeV2(Obj, &DT, nullptr, nullptr, Cache).Klass,
+  EXPECT_EQ(getCachedJavaType(Obj, &DT, nullptr, nullptr, Cache).Klass,
             22U);
   EXPECT_GT(Cache.Base.getStats().Hits, 0U);
 }
@@ -759,9 +761,9 @@ TEST_F(JavaTypeQueryTest, BatchedDiamondInvalidationMatchesSequential) {
   )");
   ASSERT_NE(F, nullptr);
   DominatorTree DT(*F);
-  JavaTypeCacheV2 Batched(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Batched(F, JavaTypeCache::Mode::StableOracleEpoch);
   Batched.setStatsEnabled(true);
-  JavaTypeCacheV2 Sequential(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Sequential(F, JavaTypeCache::Mode::StableOracleEpoch);
   Sequential.setStatsEnabled(true);
   auto *X = cast<SelectInst>(&F->getEntryBlock().front());
   auto *Y = cast<SelectInst>(X->getNextNode());
@@ -769,15 +771,15 @@ TEST_F(JavaTypeQueryTest, BatchedDiamondInvalidationMatchesSequential) {
   Value *Independent = F->getArg(2);
   Instruction *Context = F->getEntryBlock().getTerminator();
 
-  EXPECT_EQ(getCachedJavaTypeV2(Z, &DT, Context, nullptr, Batched).Klass,
+  EXPECT_EQ(getCachedJavaType(Z, &DT, Context, nullptr, Batched).Klass,
             1U);
-  EXPECT_EQ(getCachedJavaTypeV2(Independent, &DT, Context, nullptr, Batched)
+  EXPECT_EQ(getCachedJavaType(Independent, &DT, Context, nullptr, Batched)
                 .Klass,
             44U);
-  EXPECT_EQ(getCachedJavaTypeV2(Z, &DT, Context, nullptr, Sequential).Klass,
+  EXPECT_EQ(getCachedJavaType(Z, &DT, Context, nullptr, Sequential).Klass,
             1U);
   EXPECT_EQ(
-      getCachedJavaTypeV2(Independent, &DT, Context, nullptr, Sequential)
+      getCachedJavaType(Independent, &DT, Context, nullptr, Sequential)
           .Klass,
       44U);
 
@@ -788,11 +790,11 @@ TEST_F(JavaTypeQueryTest, BatchedDiamondInvalidationMatchesSequential) {
   Y->setOperand(1, F->getArg(0));
 
   JavaType Expected = jeandle::getJavaType(Z, &DT, Context, nullptr);
-  EXPECT_EQ(getCachedJavaTypeV2(Z, &DT, Context, nullptr, Batched),
+  EXPECT_EQ(getCachedJavaType(Z, &DT, Context, nullptr, Batched),
             Expected);
-  EXPECT_EQ(getCachedJavaTypeV2(Z, &DT, Context, nullptr, Sequential),
+  EXPECT_EQ(getCachedJavaType(Z, &DT, Context, nullptr, Sequential),
             Expected);
-  EXPECT_EQ(getCachedJavaTypeV2(Independent, &DT, Context, nullptr, Batched)
+  EXPECT_EQ(getCachedJavaType(Independent, &DT, Context, nullptr, Batched)
                 .Klass,
             44U);
   EXPECT_EQ(Batched.Final.getStats().Hits, 0U);
@@ -809,13 +811,13 @@ TEST_F(JavaTypeQueryTest, InvalidationAtValueLimitDoesNotClear) {
   for (unsigned I = 0; I != 4095; ++I)
     SelectInst::Create(F->getArg(1), F->getArg(0), F->getArg(0), "derived",
                        Ret->getIterator());
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
   EXPECT_EQ(
-      getCachedJavaTypeV2(F->getArg(0), nullptr, nullptr, nullptr, Cache)
+      getCachedJavaType(F->getArg(0), nullptr, nullptr, nullptr, Cache)
           .Klass,
       22U);
-  JavaTypeCacheV2InvalidationInfo Invalidated = Cache.invalidate({F->getArg(1)});
+  JavaTypeCacheInvalidationInfo Invalidated = Cache.invalidate({F->getArg(1)});
   EXPECT_FALSE(Invalidated.FullClear);
   EXPECT_EQ(Invalidated.ValuesVisited, 4096U);
 }
@@ -831,13 +833,13 @@ TEST_F(JavaTypeQueryTest, InvalidationJustBelowValueLimitDoesNotClear) {
   for (unsigned I = 0; I != 4094; ++I)
     SelectInst::Create(F->getArg(1), F->getArg(0), F->getArg(0), "derived",
                        Ret->getIterator());
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
   EXPECT_EQ(
-      getCachedJavaTypeV2(F->getArg(0), nullptr, nullptr, nullptr, Cache)
+      getCachedJavaType(F->getArg(0), nullptr, nullptr, nullptr, Cache)
           .Klass,
       22U);
-  JavaTypeCacheV2InvalidationInfo Invalidated = Cache.invalidate({F->getArg(1)});
+  JavaTypeCacheInvalidationInfo Invalidated = Cache.invalidate({F->getArg(1)});
   EXPECT_FALSE(Invalidated.FullClear);
   EXPECT_EQ(Invalidated.ValuesVisited, 4095U);
 }
@@ -862,14 +864,14 @@ TEST_F(JavaTypeQueryTest, InvalidationUseThresholdUsesInclusiveBoundary) {
       Remaining -= Operands;
     }
 
-    JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+    JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
 
     Cache.setStatsEnabled(true);
     EXPECT_EQ(
-        getCachedJavaTypeV2(F->getArg(0), nullptr, nullptr, nullptr, Cache)
+        getCachedJavaType(F->getArg(0), nullptr, nullptr, nullptr, Cache)
             .Klass,
         22U);
-    JavaTypeCacheV2InvalidationInfo Invalidated = Cache.invalidate({F->getArg(1)});
+    JavaTypeCacheInvalidationInfo Invalidated = Cache.invalidate({F->getArg(1)});
     EXPECT_EQ(Invalidated.UsesVisited, Uses);
     EXPECT_EQ(Invalidated.FullClear, Uses > 16384U);
   }
@@ -889,13 +891,13 @@ TEST_F(JavaTypeQueryTest, InvalidationUseLimitFallsBackToClear) {
         F->getParent()->getFunction("sink"),
         {F->getArg(1), F->getArg(1), F->getArg(1), F->getArg(1), F->getArg(1)},
         "sink", Ret->getIterator());
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
   EXPECT_EQ(
-      getCachedJavaTypeV2(F->getArg(0), nullptr, nullptr, nullptr, Cache)
+      getCachedJavaType(F->getArg(0), nullptr, nullptr, nullptr, Cache)
           .Klass,
       22U);
-  JavaTypeCacheV2InvalidationInfo Invalidated = Cache.invalidate({F->getArg(1)});
+  JavaTypeCacheInvalidationInfo Invalidated = Cache.invalidate({F->getArg(1)});
   EXPECT_TRUE(Invalidated.FullClear);
   EXPECT_EQ(Cache.baseSize(), 0U);
 }
@@ -990,6 +992,156 @@ TEST_F(JavaTypeQueryTest, DeadNarrowCFFLoadIsInvalidatedBeforeDeletion) {
   EXPECT_EQ(After.CurrentBaseEntries, 0U);
 }
 
+TEST_F(JavaTypeQueryTest, CopySpecializationWithoutCopiesPreservesCachedAnalysis) {
+  Function *F = parse(R"(
+    define void @test(ptr "java-klass"="22" %obj) #0 {
+      ret void
+    }
+    attributes #0 = { "java-method"="0" }
+  )");
+  ASSERT_NE(F, nullptr);
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+  auto *Analysis = &FAM.getResult<JavaTypeAnalysis>(*F);
+  Instruction *At = F->getEntryBlock().getTerminator();
+  EXPECT_EQ(Analysis->getJavaType(F->getArg(0), At), JavaType(22, false));
+
+  PreservedAnalyses PA = CopySpecialization().run(*F, FAM);
+  EXPECT_TRUE(PA.areAllPreserved());
+  EXPECT_EQ(FAM.getResult<JavaTypeStatsAnalysis>(*F).getStats().Queries, 1U);
+  FAM.invalidate(*F, PA);
+  EXPECT_EQ(FAM.getCachedResult<JavaTypeAnalysis>(*F), Analysis);
+  EXPECT_EQ(Analysis->getJavaType(F->getArg(0), At), JavaType(22, false));
+  EXPECT_EQ(FAM.getResult<JavaTypeStatsAnalysis>(*F).getStats().FinalHits, 1U);
+}
+
+TEST_F(JavaTypeQueryTest, CopySpecializationSharesQueriesBeforeBulkCloneExpansion) {
+  Function *F = parse(R"(
+    declare void @jeandle.copy(ptr addrspace(1), i64, ptr addrspace(1),
+                               i64, i64, ptr, ptr, i64, i64)
+    define hotspotcc void @jeandle.clone_payload(
+        ptr addrspace(1) %src, i64 %src_offset, ptr addrspace(1) %dest,
+        i64 %dest_offset, i64 %length, i1 %instance) {
+      ret void
+    }
+    define void @test(ptr addrspace(1) "java-klass"="22" %src,
+                      ptr addrspace(1) %dest) #0 gc "hotspotgc" {
+      call void @jeandle.copy(ptr addrspace(1) %src, i64 8,
+          ptr addrspace(1) %dest, i64 8, i64 1, ptr null, ptr null,
+          i64 8, i64 8) #1
+      call void @jeandle.copy(ptr addrspace(1) %src, i64 8,
+          ptr addrspace(1) %dest, i64 8, i64 1, ptr null, ptr null,
+          i64 8, i64 8) #1
+      ret void
+    }
+    attributes #0 = { "java-method"="0" }
+    attributes #1 = { "jeandle.copy.kind"="clone-instance" }
+  )");
+  ASSERT_NE(F, nullptr);
+  VMCallbacks CB = *getVMCallbacks();
+  CB.GetCloneInstanceInfo = [](uintptr_t Klass, bool Exact) {
+    EXPECT_EQ(Klass, 22U);
+    EXPECT_FALSE(Exact);
+    return CloneInstanceInfoResult{
+        static_cast<int>(CloneInstanceInfoStatus::NotApplicable), -1, {}};
+  };
+  registerVMCallbacks(CB);
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+
+  PreservedAnalyses PA = CopySpecialization().run(*F, FAM);
+  EXPECT_FALSE(PA.areAllPreserved());
+  const auto &Stats = FAM.getResult<JavaTypeStatsAnalysis>(*F).getStats();
+  EXPECT_EQ(Stats.Queries, 2U);
+  EXPECT_EQ(Stats.FinalMisses, 1U);
+  EXPECT_EQ(Stats.FinalHits, 1U);
+  unsigned Expanded = 0;
+  for (Instruction &I : F->getEntryBlock())
+    if (auto *Call = dyn_cast<CallInst>(&I)) {
+      ASSERT_NE(Call->getCalledFunction(), nullptr);
+      EXPECT_EQ(Call->getCalledFunction()->getName(), "jeandle.clone_payload");
+      ++Expanded;
+    }
+  EXPECT_EQ(Expanded, 2U);
+  EXPECT_FALSE(verifyFunction(*F, &errs()));
+
+  // Admission declined scalarization, but bulk expansion still changed IR.
+  // The pass performs no queries after those rewrites; FAM drops the result.
+  FAM.invalidate(*F, PA);
+  EXPECT_EQ(FAM.getCachedResult<JavaTypeAnalysis>(*F), nullptr);
+  EXPECT_EQ(FAM.getCachedResult<DominatorTreeAnalysis>(*F), nullptr);
+  EXPECT_EQ(FAM.getCachedResult<LazyValueAnalysis>(*F), nullptr);
+  auto &Analysis = FAM.getResult<JavaTypeAnalysis>(*F);
+  Instruction *At = F->getEntryBlock().getTerminator();
+  auto &DT = FAM.getResult<DominatorTreeAnalysis>(*F);
+  auto &LVI = FAM.getResult<LazyValueAnalysis>(*F);
+  EXPECT_EQ(Analysis.getJavaType(F->getArg(0), At),
+            getJavaType(F->getArg(0), &DT, At, LVINullEdgeOracle{LVI}));
+  EXPECT_EQ(Stats.FinalMisses, 2U);
+}
+
+TEST_F(JavaTypeQueryTest, CopySpecializationInvalidatesAfterCloneScalarization) {
+  Function *F = parse(R"(
+    declare void @jeandle.copy(ptr addrspace(1), i64, ptr addrspace(1),
+                               i64, i64, ptr, ptr, i64, i64)
+    define void @test(
+        ptr addrspace(1) "java-klass"="22" "java-klass-exact" %src,
+        ptr addrspace(1) %dest) #0 gc "hotspotgc" {
+      call void @jeandle.copy(ptr addrspace(1) %src, i64 8,
+          ptr addrspace(1) %dest, i64 8, i64 1, ptr null, ptr null,
+          i64 8, i64 8) #1
+      ret void
+    }
+    attributes #0 = { "java-method"="0" }
+    attributes #1 = { "jeandle.copy.kind"="clone-instance" }
+  )");
+  ASSERT_NE(F, nullptr);
+  VMCallbacks CB = *getVMCallbacks();
+  CB.GetCloneInstanceInfo = [](uintptr_t Klass, bool Exact) {
+    EXPECT_EQ(Klass, 22U);
+    EXPECT_TRUE(Exact);
+    return CloneInstanceInfoResult{
+        static_cast<int>(CloneInstanceInfoStatus::Ready), 1,
+        {{12, static_cast<int>(JBasicType::Int)}}};
+  };
+  registerVMCallbacks(CB);
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+
+  PreservedAnalyses PA = CopySpecialization().run(*F, FAM);
+  EXPECT_FALSE(PA.areAllPreserved());
+  const auto &Stats = FAM.getResult<JavaTypeStatsAnalysis>(*F).getStats();
+  EXPECT_EQ(Stats.Queries, 1U);
+  EXPECT_EQ(Stats.FinalMisses, 1U);
+  unsigned Loads = 0;
+  unsigned Stores = 0;
+  for (Instruction &I : F->getEntryBlock()) {
+    EXPECT_FALSE(isa<CallInst>(I));
+    Loads += isa<LoadInst>(I);
+    Stores += isa<StoreInst>(I);
+  }
+  EXPECT_EQ(Loads, 1U);
+  EXPECT_EQ(Stores, 1U);
+  EXPECT_FALSE(verifyFunction(*F, &errs()));
+
+  FAM.invalidate(*F, PA);
+  EXPECT_EQ(FAM.getCachedResult<JavaTypeAnalysis>(*F), nullptr);
+  EXPECT_EQ(FAM.getCachedResult<DominatorTreeAnalysis>(*F), nullptr);
+  EXPECT_EQ(FAM.getCachedResult<LazyValueAnalysis>(*F), nullptr);
+  auto &Analysis = FAM.getResult<JavaTypeAnalysis>(*F);
+  Instruction *At = F->getEntryBlock().getTerminator();
+  auto &DT = FAM.getResult<DominatorTreeAnalysis>(*F);
+  auto &LVI = FAM.getResult<LazyValueAnalysis>(*F);
+  JavaType Actual = Analysis.getJavaType(F->getArg(0), At);
+  EXPECT_EQ(Actual, JavaType(22, true));
+  EXPECT_EQ(Actual,
+            getJavaType(F->getArg(0), &DT, At, LVINullEdgeOracle{LVI}));
+  EXPECT_EQ(Stats.FinalMisses, 2U);
+}
+
 TEST_F(JavaTypeQueryTest, InvalidateBeforeRAUWAndDeletion) {
   Function *F = parse(R"(
     define void @test(ptr "java-klass"="22" %a,
@@ -1001,21 +1153,21 @@ TEST_F(JavaTypeQueryTest, InvalidateBeforeRAUWAndDeletion) {
   )");
   ASSERT_NE(F, nullptr);
   DominatorTree DT(*F);
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
   Instruction *Old = &F->getEntryBlock().front();
   Instruction *Derived = Old->getNextNode();
   Instruction *Context = F->getEntryBlock().getTerminator();
-  EXPECT_EQ(getCachedJavaTypeV2(Old, &DT, Context, nullptr, Cache).Klass, 22U);
-  EXPECT_EQ(getCachedJavaTypeV2(Derived, &DT, Context, nullptr, Cache).Klass,
+  EXPECT_EQ(getCachedJavaType(Old, &DT, Context, nullptr, Cache).Klass, 22U);
+  EXPECT_EQ(getCachedJavaType(Derived, &DT, Context, nullptr, Cache).Klass,
             22U);
   Cache.invalidate({Old});
   Old->replaceAllUsesWith(F->getArg(1));
   Old->eraseFromParent();
   EXPECT_FALSE(verifyFunction(*F, &errs()));
-  EXPECT_EQ(getCachedJavaTypeV2(Derived, &DT, Context, nullptr, Cache).Klass,
+  EXPECT_EQ(getCachedJavaType(Derived, &DT, Context, nullptr, Cache).Klass,
             33U);
-  EXPECT_EQ(getCachedJavaTypeV2(F->getArg(0), &DT, nullptr, nullptr, Cache).Klass,
+  EXPECT_EQ(getCachedJavaType(F->getArg(0), &DT, nullptr, nullptr, Cache).Klass,
             22U);
   EXPECT_GT(Cache.Base.getStats().Hits, 0U);
 }
@@ -1029,14 +1181,14 @@ TEST_F(JavaTypeQueryTest, InvalidateBeforeDeletionPreventsKeyReuse) {
     }
   )");
   ASSERT_NE(F, nullptr);
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
   auto *Old = cast<SelectInst>(&F->getEntryBlock().front());
   Instruction *Ret = F->getEntryBlock().getTerminator();
 
-  EXPECT_EQ(getCachedJavaTypeV2(Old, nullptr, nullptr, nullptr, Cache).Klass,
+  EXPECT_EQ(getCachedJavaType(Old, nullptr, nullptr, nullptr, Cache).Klass,
             22U);
-  JavaTypeCacheV2InvalidationInfo Invalidated = Cache.invalidate({Old});
+  JavaTypeCacheInvalidationInfo Invalidated = Cache.invalidate({Old});
   EXPECT_EQ(Invalidated.BaseRemoved, 1U);
   EXPECT_EQ(Cache.baseSize(), 1U);
 
@@ -1046,9 +1198,9 @@ TEST_F(JavaTypeQueryTest, InvalidateBeforeDeletionPreventsKeyReuse) {
                                          Ret->getIterator());
   DominatorTree DT(*F);
   EXPECT_EQ(
-      getCachedJavaTypeV2(Replacement, nullptr, nullptr, nullptr, Cache).Klass,
+      getCachedJavaType(Replacement, nullptr, nullptr, nullptr, Cache).Klass,
       33U);
-  EXPECT_EQ(getCachedJavaTypeV2(Replacement, nullptr, nullptr, nullptr, Cache),
+  EXPECT_EQ(getCachedJavaType(Replacement, nullptr, nullptr, nullptr, Cache),
             jeandle::getJavaType(Replacement, &DT, nullptr, nullptr));
 }
 
@@ -1069,10 +1221,10 @@ TEST_F(JavaTypeQueryTest, CFGInvalidationRecomputesPhiAndRetainsLeafTypes) {
   )");
   ASSERT_NE(F, nullptr);
   DominatorTree DT(*F);
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
   auto *PN = cast<PHINode>(&block(*F, "merge")->front());
-  EXPECT_EQ(getCachedJavaTypeV2(PN, &DT, nullptr, nullptr, Cache).Klass, 1U);
+  EXPECT_EQ(getCachedJavaType(PN, &DT, nullptr, nullptr, Cache).Klass, 1U);
   BasicBlock *Right = block(*F, "right");
   Instruction *OldBranch = F->getEntryBlock().getTerminator();
   Cache.invalidate({OldBranch, Right->getTerminator()}, true);
@@ -1082,11 +1234,11 @@ TEST_F(JavaTypeQueryTest, CFGInvalidationRecomputesPhiAndRetainsLeafTypes) {
   Right->eraseFromParent();
   DT.recalculate(*F);
   EXPECT_FALSE(verifyFunction(*F, &errs()));
-  EXPECT_EQ(getCachedJavaTypeV2(F->getArg(1), &DT, nullptr, nullptr, Cache).Klass,
+  EXPECT_EQ(getCachedJavaType(F->getArg(1), &DT, nullptr, nullptr, Cache).Klass,
             33U);
   EXPECT_GT(Cache.Base.getStats().Hits, 0U);
-  EXPECT_EQ(getCachedJavaTypeV2(PN, &DT, nullptr, nullptr, Cache).Klass, 22U);
-  EXPECT_EQ(getCachedJavaTypeV2(PN, &DT, nullptr, nullptr, Cache),
+  EXPECT_EQ(getCachedJavaType(PN, &DT, nullptr, nullptr, Cache).Klass, 22U);
+  EXPECT_EQ(getCachedJavaType(PN, &DT, nullptr, nullptr, Cache),
             jeandle::getJavaType(PN, &DT, nullptr, nullptr));
 }
 
@@ -1140,9 +1292,9 @@ TEST_F(JavaTypeQueryTest, UnsupportedInvalidationFallsBackToClear) {
   Function *F = parse(IR);
   ASSERT_NE(F, nullptr);
   DominatorTree DT(*F);
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
-  EXPECT_EQ(getCachedJavaTypeV2(F->getArg(0), &DT,
+  EXPECT_EQ(getCachedJavaType(F->getArg(0), &DT,
                              block(*F, "tail")->getTerminator(), nullptr,
                              Cache).Klass, 22U);
   auto Removed = Cache.invalidate({F});
@@ -1212,9 +1364,9 @@ TEST_F(JavaTypeQueryTest, InvalidationWorkLimitFallsBackToClear) {
   for (unsigned I = 0; I != 4100; ++I)
     Previous = SelectInst::Create(F->getArg(1), Previous, F->getArg(0),
                                   "derived", Ret->getIterator());
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
-  EXPECT_EQ(getCachedJavaTypeV2(F->getArg(0), nullptr, nullptr, nullptr, Cache)
+  EXPECT_EQ(getCachedJavaType(F->getArg(0), nullptr, nullptr, nullptr, Cache)
                 .Klass,
             22U);
   auto Invalidated = Cache.invalidate({F->getArg(1)});
@@ -1239,10 +1391,10 @@ TEST_F(JavaTypeQueryTest, DereferenceChangeDropsContextualResults) {
   )");
   ASSERT_NE(F, nullptr);
   DominatorTree DT(*F);
-  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  JavaTypeCache Cache(F, JavaTypeCache::Mode::StableOracleEpoch);
   Cache.setStatsEnabled(true);
   Instruction *Context = block(*F, "hit")->getTerminator();
-  EXPECT_EQ(getCachedJavaTypeV2(F->getArg(0), &DT, Context, nullptr, Cache)
+  EXPECT_EQ(getCachedJavaType(F->getArg(0), &DT, Context, nullptr, Cache)
                 .Klass,
             22U);
   // A store has no SSA users, but its dereference can affect LVI's null-edge
@@ -1254,7 +1406,7 @@ TEST_F(JavaTypeQueryTest, DereferenceChangeDropsContextualResults) {
   EXPECT_EQ(Invalidated.FinalRemoved, 1U);
   EXPECT_EQ(Cache.baseSize(), 1U);
   Store->eraseFromParent();
-  EXPECT_EQ(getCachedJavaTypeV2(F->getArg(0), &DT, Context, nullptr, Cache)
+  EXPECT_EQ(getCachedJavaType(F->getArg(0), &DT, Context, nullptr, Cache)
                 .Klass,
             22U);
   EXPECT_EQ(Cache.Final.getStats().Hits, 0U);

@@ -9,7 +9,7 @@
 #ifndef LLVM_ANALYSIS_JEANDLE_JAVATYPEANALYSIS_H
 #define LLVM_ANALYSIS_JEANDLE_JAVATYPEANALYSIS_H
 
-#include "llvm/Analysis/Jeandle/CachedJavaTypeV2.h"
+#include "llvm/Analysis/Jeandle/CachedJavaType.h"
 #include "llvm/IR/PassManager.h"
 
 #include <cstddef>
@@ -64,7 +64,7 @@ struct JavaTypeQueryEvent {
 
 /// Optional observations of one invalidation notification.
 struct JavaTypeInvalidationEvent {
-  JavaTypeCacheV2InvalidationInfo Info;
+  JavaTypeCacheInvalidationInfo Info;
   uint64_t ElapsedNanoseconds = 0;
   size_t BaseEntries = 0;
   size_t DefinedEntries = 0;
@@ -119,7 +119,7 @@ private:
   JavaTypeAnalysisResult(Function &F, DominatorTree &DT, LazyValueInfo &LVI,
                          JavaTypeQueryObserver *Observer)
       : F(F), DT(DT), LVI(LVI), Observer(Observer),
-        Cache(F, JavaTypeFactsCacheV2::Mode::StableOracleEpoch) {
+        Cache(F, JavaTypeFactsCache::Mode::StableOracleEpoch) {
     Cache.setStatsEnabled(Observer != nullptr);
   }
 
@@ -131,7 +131,7 @@ private:
   /// clock.
   JavaTypeQueryObserver *const Observer;
 
-  JavaTypeCacheV2 Cache;
+  JavaTypeCache Cache;
 
   void invalidateImpl(ArrayRef<Value *> Changed, bool CFGChanged,
                       bool ForceFull);

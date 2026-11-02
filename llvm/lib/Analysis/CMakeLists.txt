@@ -163,8 +163,8 @@ add_llvm_component_library(LLVMAnalysis
   ${GeneratedMLSources}
   Jeandle/DeoptPoolBundleLowering.cpp
   Jeandle/DeoptPoolPlanner.cpp
-  Jeandle/CachedJavaTypeV2.cpp
-  Jeandle/JavaTypeCacheV2.cpp
+  Jeandle/CachedJavaType.cpp
+  Jeandle/JavaTypeCache.cpp
   Jeandle/JavaTypeAnalysis.cpp
   Jeandle/JavaTypeAnalysisStats.cpp
   Jeandle/LVINullEdgeOracle.cpp

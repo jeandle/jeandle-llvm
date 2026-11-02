@@ -1,23 +1,23 @@
-# JavaType V2 的 Facts 边缓存
+# JavaType 的 Facts 边缓存
 
-> 本文保留 Facts 边缓存阶段的设计和验证记录。V1 专属实现及测试已移除，下面的旧路径、接口和测试数量对应当时提交；当前实现以 [JavaTypeCacheV2Design.md](JavaTypeCacheV2Design.md) 为准。
+> 本文保留 Facts 边缓存阶段的设计和验证记录。V1 专属实现及测试已移除，下面的旧路径、接口和测试数量对应当时提交；当前实现以 [JavaTypeCacheDesign.md](JavaTypeCacheDesign.md) 为准。
 
 这个方案在 Facts 求解过程中复用两类边信息：完整根调用的 `edgeGuard` 结果，以及满足稳定 oracle 契约时的完整 `isNullEdge` 判断。它保持 `factsAt` 的遍历、查询内 memo、预算和循环处理方式，避免直接把依赖当前查询状态的 `(Value, BasicBlock)` 完整 Facts 结果跨查询发布。
 
-实现位于独立的 [CachedJavaTypeV2.cpp](../../lib/Analysis/Jeandle/CachedJavaTypeV2.cpp) 和 [CachedJavaTypeV2.h](../../include/llvm/Analysis/Jeandle/CachedJavaTypeV2.h)。原版 [JavaType.cpp](../../lib/IR/Jeandle/JavaType.cpp) 和公共 `JavaType` 定义保持不变。缓存由调用方持有并通过聚合对象传入；当前通过 JavaTypeAnalysis 接入消费者 pass。
+实现位于独立的 [CachedJavaType.cpp](../../lib/Analysis/Jeandle/CachedJavaType.cpp) 和 [CachedJavaType.h](../../include/llvm/Analysis/Jeandle/CachedJavaType.h)。原版 [JavaType.cpp](../../lib/IR/Jeandle/JavaType.cpp) 和公共 `JavaType` 定义保持不变。缓存由调用方持有并通过聚合对象传入；当前通过 JavaTypeAnalysis 接入消费者 pass。
 
 ## 1. 当前接口和保存内容
 
-四类缓存现由 `JavaTypeCacheV2` 聚合持有，定义移至 `JavaTypeCacheV2.h/.cpp`；查询入口只接收一个总 cache 引用。Facts 仍是独立成员，保留自己的模式、失效和计数。`JavaTypeAnalysis` 已切换到 V2，并显式使用稳定 oracle 模式。
+四类缓存现由 `JavaTypeCache` 聚合持有，定义移至 `JavaTypeCache.h/.cpp`；查询入口只接收一个总 cache 引用。Facts 仍是独立成员，保留自己的模式、失效和计数。`JavaTypeAnalysis` 已切换到缓存实现，并显式使用稳定 oracle 模式。
 
 ```cpp
-JavaTypeCacheV2 Cache(F, JavaTypeFactsCacheV2::Mode::StableOracleEpoch);
+JavaTypeCache Cache(F, JavaTypeFactsCache::Mode::StableOracleEpoch);
 Cache.setStatsEnabled(true); // 默认关闭；Analysis由统计开关控制。
 LVINullEdgeOracle Oracle{LVI};
-JavaType T = getCachedJavaTypeV2(V, &DT, Context, Oracle, Cache);
+JavaType T = getCachedJavaType(V, &DT, Context, Oracle, Cache);
 ```
 
-默认 `GuardOnly` 不缓存 null 判断，也不启用会跳过 oracle 的 Final；Base、Defined和guard仍可复用。详细生命周期及 Final 选择性失效见 [JavaTypeCacheV2Design.md](JavaTypeCacheV2Design.md)。
+默认 `GuardOnly` 不缓存 null 判断，也不启用会跳过 oracle 的 Final；Base、Defined和guard仍可复用。详细生命周期及 Final 选择性失效见 [JavaTypeCacheDesign.md](JavaTypeCacheDesign.md)。
 
 两张表都使用原 helper 调用点的 `(V, From, To)` 作为 key。这里的 `V` 是原算法传给 helper 的实际值；不为了增加命中率，另行统一各 helper 不同的 casts/freeze/identity 归一化规则。
 
@@ -88,9 +88,9 @@ Base 的选择性失效不能自动满足 Facts 的失效规则。类型 guard �
 
 ## 4. 已完成的临时原型验证
 
-以下结果来自迁入仓库前的独立原型，位于 `/tmp/facts-edge-cache-prototype/`；它们是方案证据，不代替保留版的编译和仓库回归。原型名称 `FactsEdgeCache`、可修改 mode 和 `invalidate()` 并非最终 API；保留版采用 `JavaTypeFactsCacheV2`、固定 mode 和 `clear()`。
+以下结果来自迁入仓库前的独立原型，位于 `/tmp/facts-edge-cache-prototype/`；它们是方案证据，不代替保留版的编译和仓库回归。原型名称 `FactsEdgeCache`、可修改 mode 和 `invalidate()` 并非最终 API；保留版采用 `JavaTypeFactsCache`、固定 mode 和 `clear()`。
 
-原型使用最新版 V2 的独立副本，只在两个 helper 外层增加查表。对比原版完整 `JavaType`，不只比较 `Klass`；每次顶层对比清空 Base cache，以隔离边缓存收益。普通案例使用真实 `LVINullEdgeOracle`，另有稳定/动态自定义 oracle 用于状态与契约测试。
+原型使用最新版缓存实现的独立副本，只在两个 helper 外层增加查表。对比原版完整 `JavaType`，不只比较 `Klass`；每次顶层对比清空 Base cache，以隔离边缓存收益。普通案例使用真实 `LVINullEdgeOracle`，另有稳定/动态自定义 oracle 用于状态与契约测试。
 
 覆盖共享前缀、同 block 重查、多对象、低/高预算切换、循环 PHI、不可约 CFG 多入口、switch guard、条件 PHI 循环、guard 修改、CFG bypass 和定义位置移动。结果如下：
 
@@ -157,16 +157,16 @@ Base 的选择性失效不能自动满足 Facts 的失效规则。类型 guard �
 
 ## 7. 第一阶段保留版验证结果（历史）
 
-已执行：
+当时执行了构建与测试。以下命令使用当前命名；历史结果对应旧提交：
 
 ```sh
 cmake --build build/build-ninja-release --target JavaTypeQueryTests -j 2
 build/build-ninja-release/unittests/IR/JavaTypeQueryTests \
-  --gtest_output=json:/tmp/facts-v2-retained-test-results.json
+  --gtest_output=json:/tmp/facts-retained-test-results.json
 ```
 
-目标编译通过。V2 共 27/27 项测试通过，其中新增 7 项 Facts 回归：真实 LVI 双模式与共享边、预算/PHI/不可约循环/switch、动态 oracle、guard/CFG 修改、RAUW/删除、定义点移动、原始 PHI 输入 key 身份。测试按完整 JavaType 与原版比较。
+目标编译通过。缓存实现 共 27/27 项测试通过，其中新增 7 项 Facts 回归：真实 LVI 双模式与共享边、预算/PHI/不可约循环/switch、动态 oracle、guard/CFG 修改、RAUW/删除、定义点移动、原始 PHI 输入 key 身份。测试按完整 JavaType 与原版比较。
 
-全套结果为 73/74。唯一失败是既有 V1 用例 `JavaTypeQueryTest.CachedEntryNormalizesFreeze`，此前已在不链接 V2 的独立程序复现（`/tmp/javatype-v2-legacy-baseline/`）；不属于本次 Facts 改动。本次没有修改 V1 或该测试。
+全套结果为 73/74。唯一失败是既有 V1 用例 `JavaTypeQueryTest.CachedEntryNormalizesFreeze`，此前已在不链接缓存实现的独立程序复现（独立复现记录见历史提交）；不属于本次 Facts 改动。本次没有修改 V1 或该测试。
 
-与任务开始状态逐文件 SHA256 比较，原版 JavaType.cpp/.h、LVI、LVINullEdgeOracle、原版 CSV、已有 CMake 修改及 SCC-getBaseType.md 全部未变。保留版的 factsAt、phiValueType、valueDimension、computeNullEdge、computeEdgeGuard、isProvenDefined 主体与已验证原型一致。审计记录为 `/tmp/facts-v2-retained-boundary-audit.json`。原型的内部状态检查与仓库公开接口回归是两组独立证据，不混用计数。
+与任务开始状态逐文件 SHA256 比较，原版 JavaType.cpp/.h、LVI、LVINullEdgeOracle、原版 CSV、已有 CMake 修改及 SCC-getBaseType.md 全部未变。保留版的 factsAt、phiValueType、valueDimension、computeNullEdge、computeEdgeGuard、isProvenDefined 主体与已验证原型一致。审计记录保留在当时的临时实验材料中，原路径可从 Git 历史查阅。原型的内部状态检查与仓库公开接口回归是两组独立证据，不混用计数。

@@ -1,12 +1,12 @@
-# JavaType V2：第一阶段复用实验记录
+# JavaType 缓存：第一阶段复用实验记录
 
-> 本文保留第一阶段的实验条件和结果。当前四类缓存、统一接口及 Analysis 接入见 [JavaTypeCacheV2Design.md](JavaTypeCacheV2Design.md)；V1 专属实现及测试已移除，下面的旧接口、历史路径和“尚未接入”描述仅对应当时状态。
+> 本文保留第一阶段的实验条件和结果。当前四类缓存、统一接口及 Analysis 接入见 [JavaTypeCacheDesign.md](JavaTypeCacheDesign.md)；V1 专属实现及测试已移除，下面的旧接口、历史路径和“尚未接入”描述仅对应当时状态。
 
 本次以工作区最新版 `JavaType.cpp` 为语义基准，按
 `/home/zjj/.codex/skills/jeandle-javatype-cache/SKILL.md` 开发。
 实验设计、Base 依赖、CFG/Facts 三个方向分别由 subagent 研究，再汇总实现与验证。
-保留的改动包括 Cached V2 的 Base 缓存管理、诊断接口和可选 Facts 边级缓存。
-Facts 方案先在 `/tmp` 验证，再按用户要求保留到现有 V2；详见 [FactsEdgeCacheV2.md](FactsEdgeCacheV2.md)。
+保留的改动包括 Cached 的 Base 缓存管理、诊断接口和可选 Facts 边级缓存。
+Facts 方案先在 `/tmp` 验证，再按用户要求保留到现有缓存实现；详见 [FactsEdgeCache.md](FactsEdgeCache.md)。
 原版查询、公共 JavaType 定义、LVI、V1 和消费者 pass 均不改。
 
 ## 1. 实验目标：减少可避免的 miss，并检查实际少做的工作
@@ -15,7 +15,7 @@ Facts 方案先在 `/tmp` 验证，再按用户要求保留到现有 V2；详见
 把这些计为跨查询收益会掩盖每次查询重新求解的问题。
 不同根可以全部 miss，却复用共同的深子图；一个便宜的 argument 高频 hit 也不一定带来时间收益。
 
-本次 V2 的统计约定：
+本次缓存实现的统计约定：
 
 | 观察值 | 定义与解释 |
 |---|---|
@@ -32,7 +32,7 @@ Facts 方案先在 `/tmp` 验证，再按用户要求保留到现有 V2；详见
 
 `PriorQueryHits` 需要查询开始时的 key 快照，只在传入可选 Diagnostics 时启用。
 正式计时传 `nullptr`，关闭快照和详细工作量计数；`Info` 的入口计数仍然存在，不能称为完全无统计开销。
-V2 不共享完整块 Facts/Final，因此这两层的共享命中率应显示 N/A。可选边缓存的计数使用独立的 JavaTypeFactsCacheV2::Stats。
+缓存实现 不共享完整块 Facts/Final，因此这两层的共享命中率应显示 N/A。可选边缓存的计数使用独立的 JavaTypeFactsCache::Stats。
 
 推荐同时报告：
 
@@ -48,7 +48,7 @@ Unknown 是一种可完成、可缓存的结果，不能计入“未缓存”。
 
 ### 对照与案例
 
-使用同一 V2 算法比较 cold/warm，原版仅作为逐查询语义 reference，避免混入 V1 与最新版算法差异。
+使用同一缓存实现 算法比较 cold/warm，原版仅作为逐查询语义 reference，避免混入 V1 与最新版算法差异。
 
 1. 每查询清空、查询间保留：隔离跨查询复用。
 2. 每次编辑全清、精确通知后选择性失效：隔离失效范围。
@@ -118,7 +118,7 @@ DefinedMemo 的完成证明也具有上下文无关的复用条件，但需要�
 
 ### 本次选择性失效
 
-`JavaTypeCacheV2::invalidate(Changed)` 在变更前沿完整 SSA users 图求闭包，然后按 key 擦除。
+`JavaTypeCache::invalidate(Changed)` 在变更前沿完整 SSA users 图求闭包，然后按 key 擦除。
 该图是 Base 与证明依赖的保守超集；不要求查询时维护新的反向依赖索引，也不扫描整张缓存表。
 遍历超过 4096 个值或 16384 条 use、遇到非 Instruction/Argument 的非本地根时回退 clear。
 
@@ -177,12 +177,12 @@ LVI.clear 可能只是结果驱逐，也可能伴随语义变化，不能仅凭�
 
 因此 Facts 方案需要分别规定：结果完成性、循环依赖、预算精度契约、失效范围。
 保守精度下降与错误过窄是不同问题；若允许缓存改善低预算精度，需要显式批准这种行为差异。
-本任务保留最新版截断语义，未把这些实验性行为接入 V2。
+本任务保留最新版截断语义，未把这些实验性行为接入缓存实现。
 oracle 调用数是边界计数，本实验未测 LVI 内部新 solve 次数或 CPU 时间。
 
-## 4. Base V2 实测
+## 4. Base 缓存实测
 
-全部使用 V2 同一实现、同一查询/编辑序列，逐次比较原版 JavaType 的完整结果；编辑后验证 IR。
+全部使用 缓存实现 同一实现、同一查询/编辑序列，逐次比较原版 JavaType 的完整结果；编辑后验证 IR。
 
 | 场景 | 策略 | 入口 hit/miss | 跨查询 hits | 节点评估 | SCC steps |
 |---|---|---:|---:|---:|---:|
@@ -212,39 +212,29 @@ oracle 调用数是边界计数，本实验未测 LVI 内部新 solve 次数或 
 
 ## 5. 实现、验证与复现
 
-保留的修改：
+当时涉及的修改（链接和命令使用当前名称，历史职责与结果以当时提交为准）：
 
-- [CachedJavaTypeV2.h](../../include/llvm/Analysis/Jeandle/CachedJavaTypeV2.h)：外部持有 Base、修改前失效合同、可选诊断。
-- [CachedJavaTypeV2.cpp](../../lib/Analysis/Jeandle/CachedJavaTypeV2.cpp)：完整 users 闭包失效、Base 语义入口/输入统计；SCC 求解不变。
-- [CachedJavaTypeV2Test.cpp](../../unittests/IR/CachedJavaTypeV2Test.cpp)：原有 20 项测试覆盖冷/热、共享子图、SCC、证明链、CFG、删除、fallback 和上下文隔离；本次另增 7 项 Facts 回归。
-- [CachedJavaTypeV2DataStructures.csv](CachedJavaTypeV2DataStructures.csv)：四列记录新增、调整、复用；原版 CSV 保持原样。
+- [CachedJavaType.h](../../include/llvm/Analysis/Jeandle/CachedJavaType.h)：外部持有 Base、修改前失效合同、可选诊断。
+- [CachedJavaType.cpp](../../lib/Analysis/Jeandle/CachedJavaType.cpp)：完整 users 闭包失效、Base 语义入口/输入统计；SCC 求解不变。
+- [CachedJavaTypeTest.cpp](../../unittests/IR/CachedJavaTypeTest.cpp)：原有 20 项测试覆盖冷/热、共享子图、SCC、证明链、CFG、删除、fallback 和上下文隔离；本次另增 7 项 Facts 回归。
+- [CachedJavaTypeDataStructures.csv](CachedJavaTypeDataStructures.csv)：四列记录新增、调整、复用；原版 CSV 保持原样。
 
 ```sh
 cmake --build build/build-ninja-release --target JavaTypeQueryTests -j 2
 build/build-ninja-release/unittests/IR/JavaTypeQueryTests \
-  --gtest_filter='CachedJavaTypeV2Test.*'
+  --gtest_filter='CachedJavaTypeTest.*'
 ```
 
-相关目标编译成功，V2 20/20 通过。完整 JavaTypeQueryTests 为 66/67，通过之外的一项为旧测试
+相关目标编译成功，缓存实现 20/20 通过。完整 JavaTypeQueryTests 为 66/67，通过之外的一项为旧测试
 `JavaTypeQueryTest.CachedEntryNormalizesFreeze`：参数没有 noundef，原版 freeze 返回 unknown，
-V1 入口无条件剥 freeze 返回 22。已构建完全不链接 V2 的旧测试程序独立复现；不修改 V1 或原版来迁就此旧断言。
+V1 入口无条件剥 freeze 返回 22。已构建完全不链接缓存实现的旧测试程序独立复现；不修改 V1 或原版来迁就此旧断言。
 
-临时实验源码、逐事件记录、精确编译命令与哈希位于以下路径；它们未作为查询实现加入仓库：
-
-```sh
-# Base 固定编辑序列，57 次查询
-python3 /tmp/javatype-v2-base-replay/run.py
-# contextual 2×2，48 次查询
-python3 /tmp/javatype-v2-base-replay/run-context.py
-# Facts 方案的反例与复用机会
-python3 /tmp/javatype-facts-probe/build.py
-/tmp/javatype-facts-probe/probe
-# 不链接 V2 的旧失败用例
-/tmp/javatype-v2-legacy-baseline/JavaTypeLegacyOnlyTests \
-  --gtest_filter=JavaTypeQueryTest.CachedEntryNormalizesFreeze
-```
+临时实验覆盖 Base 固定编辑序列（57 次查询）、contextual 2×2
+（48 次查询）、Facts 反例与复用机会，以及不链接缓存实现的旧失败用例。
+这些临时源码、逐事件记录、精确编译命令和原始路径保留在对应历史提交
+的实验记录中，未作为当前查询实现或工具加入仓库。
 
 相对任务开始快照验证 `JavaType.cpp`、`JavaType.h`、原版 CSV 未变；已有 CMake 修改保持原样。
 原版 cpp 的 SHA256 为 `a32dda5470cf2f0af67558f9a3620b4058f1648fdc1cd4caafbf69ff44685b69`。
 数据结构 CSV 均符合“名字、功能、成员变量、成员函数”四列。公开 JavaType 类型与类型运算继续复用原实现。
-V2 尚未接入生产 pass；本次证明的是查询/失效机制和受控工作量收益。
+缓存实现 尚未接入生产 pass；本次证明的是查询/失效机制和受控工作量收益。

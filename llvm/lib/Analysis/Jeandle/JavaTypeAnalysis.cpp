@@ -106,7 +106,7 @@ void printJavaType(raw_ostream &OS, const JavaType &Type) {
 
 AnalysisKey JavaTypeAnalysis::Key;
 
-/// Query through the V2 caches. Each cache owns its counters; the optional
+/// Query through caller-owned caches. Each cache owns its counters; the optional
 /// observer receives only this query's deltas. Verification reruns the shared
 /// solver without external caches and compares complete types, including
 /// truncated and cyclic queries with their query-local evaluation semantics.
@@ -122,7 +122,7 @@ JavaType JavaTypeAnalysisResult::getJavaType(Value *V, Instruction *Context) {
   auto Query = [&] {
     JavaType Result = Bypassed
                           ? jeandle::getJavaType(V, &DT, Context, IsNullEdge)
-                          : getCachedJavaTypeV2(V, &DT, Context, IsNullEdge,
+                          : getCachedJavaType(V, &DT, Context, IsNullEdge,
                                                 Cache);
     if (Verified) {
       JavaType Fresh = jeandle::getJavaType(V, &DT, Context, IsNullEdge);
@@ -198,7 +198,7 @@ void JavaTypeAnalysisResult::invalidateForCFGChange(Value &Changed) {
 void JavaTypeAnalysisResult::invalidateImpl(ArrayRef<Value *> Changed,
                                             bool CFGChanged, bool ForceFull) {
   auto Start = Observer ? QueryClock::now() : QueryClock::time_point{};
-  JavaTypeCacheV2InvalidationInfo Info;
+  JavaTypeCacheInvalidationInfo Info;
   if (ForceFull) {
     Info.BaseRemoved = Cache.baseSize();
     Info.DefinedRemoved = Cache.definedSize();

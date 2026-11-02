@@ -1,3 +1,6 @@
+; RUN: opt -S -verify-each -jeandle-verify-java-type-cache -passes=copy-specialization -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog %s -o %t.cached.ll
+; RUN: opt -S -verify-each -jeandle-disable-java-type-cache -passes=copy-specialization -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog %s -o %t.uncached.ll
+; RUN: diff %t.cached.ll %t.uncached.ll
 ; RUN: opt -S -passes="function(copy-specialization),java-operation-lower<phase=1>" -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog %s 2>&1 | FileCheck %s --check-prefix=IR
 ; RUN: %if aarch64-registered-target %{ opt -S -passes="function(copy-specialization),java-operation-lower<phase=1>" -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog %s 2>&1 | llc -mtriple=aarch64-linux-gnu -O2 -o - | FileCheck %s --check-prefix=AARCH64 %}
 ; RUN: opt -S -passes="function(copy-specialization),java-operation-lower<phase=1>" -jeandle-vm-callback-log=%S/Inputs/clone-instance-gc-barrier.cblog %s 2>&1 | FileCheck %s --check-prefix=BARRIER

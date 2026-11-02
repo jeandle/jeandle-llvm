@@ -74,7 +74,7 @@ target_link_libraries(VMCallbackLogRecordReplayTests PRIVATE LLVMTestingSupport)
 
 add_llvm_unittest(JavaTypeQueryTests
   PARTIAL_SOURCES_INTENDED
-  CachedJavaTypeV2Test.cpp
+  CachedJavaTypeTest.cpp
   JavaTypeQueryTest.cpp
   )
 

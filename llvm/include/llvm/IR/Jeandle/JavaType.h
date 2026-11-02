@@ -32,7 +32,7 @@ class Value;
 
 namespace jeandle {
 
-class JavaTypeCacheV2;
+class JavaTypeCache;
 
 /// Represents the Java type of an LLVM IR value, including both positive
 /// type knowledge and negative constraints (excluded classes).
@@ -139,7 +139,7 @@ JavaType getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
 /// Facts storage; Final lookup/publication and the cache lifecycle belong to
 /// the caller. Recursive state stays local. Cache must be bound to the function.
 JavaType getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
-                     IsNullEdgeOracle IsNullEdge, JavaTypeCacheV2 &Cache);
+                     IsNullEdgeOracle IsNullEdge, JavaTypeCache &Cache);
 
 /// Compute the type constraints that CFG edge guards imply for V at Context.
 /// Returns ONLY check-derived constraints (a positive klass when a passing

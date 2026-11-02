@@ -1,3 +1,7 @@
+; RUN: opt -disable-output -verify-each -jeandle-java-type-stats -passes="copy-specialization,print<java-type-analysis>" -jeandle-vm-callback-log=%S/Inputs/integer-width.cblog %s 2>&1 | FileCheck %s --check-prefix=CACHE-STATS
+; RUN: opt -S -verify-each -jeandle-verify-java-type-cache -passes=copy-specialization -jeandle-vm-callback-log=%S/Inputs/integer-width.cblog %s -o %t.cached.ll
+; RUN: opt -S -verify-each -jeandle-disable-java-type-cache -passes=copy-specialization -jeandle-vm-callback-log=%S/Inputs/integer-width.cblog %s -o %t.uncached.ll
+; RUN: diff %t.cached.ll %t.uncached.ll
 ; RUN: opt -S -verify-each -passes='copy-specialization' -jeandle-vm-callback-log=%S/Inputs/integer-width.cblog %s | FileCheck %s
 ; RUN: opt -S -verify-each -passes='copy-specialization' -mattr=+avx512bw,+avx512vl -jeandle-vm-callback-log=%S/Inputs/integer-width.cblog %s | FileCheck %s --check-prefix=PARTIAL
 ; REQUIRES: x86-registered-target
@@ -95,3 +99,16 @@ attributes #3 = { "jeandle.copy.kind"="clone-array" }
 !0 = !{!"r15"}
 
 ; PARTIAL: [[INLINE_WEIGHTS]] = !{!"branch_weights", i32 999999, i32 1}
+
+; Both arraycopy operands must query the managed analysis. Payload array
+; cloning does not need JavaType and must not add a query.
+; CACHE-STATS-LABEL: JavaTypeAnalysis for function: large_long_index
+; CACHE-STATS:         queries: 2
+; CACHE-STATS:         final type hits: 0
+; CACHE-STATS:         final type misses: 2
+; CACHE-STATS-LABEL: JavaTypeAnalysis for function: dynamic_char_copy
+; CACHE-STATS:         queries: 2
+; CACHE-STATS:         final type hits: 0
+; CACHE-STATS:         final type misses: 2
+; CACHE-STATS-LABEL: JavaTypeAnalysis for function: legacy_primitive_clone
+; CACHE-STATS:         queries: 0

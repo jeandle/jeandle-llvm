@@ -186,7 +186,7 @@ void JavaTypeStatsAnalysis::Result::onQuery(const JavaTypeQueryEvent &Event) {
 /// @brief accumulate one invalidation notification
 void JavaTypeStatsAnalysis::Result::onInvalidation(
     const JavaTypeInvalidationEvent &Event) {
-  const JavaTypeCacheV2InvalidationInfo &Info = Event.Info;
+  const JavaTypeCacheInvalidationInfo &Info = Event.Info;
 
   ++Stats.Invalidations;
   ++TotalInvalidations;

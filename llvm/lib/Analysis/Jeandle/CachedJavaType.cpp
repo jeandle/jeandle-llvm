@@ -1,4 +1,4 @@
-//===- CachedJavaTypeV2.cpp - Cached Java type query entry ------------------===//
+//===- CachedJavaType.cpp - Cached Java type query entry ------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,17 +6,17 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Analysis/Jeandle/CachedJavaTypeV2.h"
+#include "llvm/Analysis/Jeandle/CachedJavaType.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/IR/Instructions.h"
 
 using namespace llvm;
 using namespace llvm::jeandle;
 
-JavaType jeandle::getCachedJavaTypeV2(Value *V, DominatorTree *DT,
+JavaType jeandle::getCachedJavaType(Value *V, DominatorTree *DT,
                                      Instruction *Context,
                                      IsNullEdgeOracle IsNullEdge,
-                                     JavaTypeCacheV2 &Cache) {
+                                     JavaTypeCache &Cache) {
   if (Context)
     Cache.bind(*Context->getFunction());
   else if (auto *I = dyn_cast<Instruction>(V))

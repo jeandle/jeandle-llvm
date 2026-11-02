@@ -1,4 +1,4 @@
-//===- JavaTypeCacheV2.cpp - Owned Java type query caches -------------------===//
+//===- JavaTypeCache.cpp - Owned Java type query caches -------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Analysis/Jeandle/JavaTypeCacheV2.h"
+#include "llvm/Analysis/Jeandle/JavaTypeCache.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
@@ -43,7 +43,7 @@ size_t invalidateValues(MapT &Memo, ArrayRef<Value *> Affected,
 
 } // namespace
 
-void JavaTypeBaseCacheV2::beginQuery() {
+void JavaTypeBaseCache::beginQuery() {
   InitialSize = Memo.size();
   PriorKeys.clear();
   if (StatsEnabled && DetailedStats)
@@ -51,14 +51,14 @@ void JavaTypeBaseCacheV2::beginQuery() {
       PriorKeys.insert(E.first);
 }
 
-void JavaTypeBaseCacheV2::endQuery() {
+void JavaTypeBaseCache::endQuery() {
   assert(Memo.size() >= InitialSize && "cache invalidated during query");
   if (StatsEnabled)
     Counters.EntriesAdded += Memo.size() - InitialSize;
   PriorKeys.clear();
 }
 
-void JavaTypeBaseCacheV2::recordReuse(Value *V) {
+void JavaTypeBaseCache::recordReuse(Value *V) {
   if (StatsEnabled && DetailedStats) {
     if (PriorKeys.contains(V))
       ++Counters.PriorQueryHits;
@@ -67,23 +67,23 @@ void JavaTypeBaseCacheV2::recordReuse(Value *V) {
   }
 }
 
-void JavaTypeBaseCacheV2::recordHit(Value *V) {
+void JavaTypeBaseCache::recordHit(Value *V) {
   if (StatsEnabled)
     ++Counters.Hits;
   recordReuse(V);
 }
 
-void JavaTypeBaseCacheV2::recordMiss() {
+void JavaTypeBaseCache::recordMiss() {
   if (StatsEnabled)
     ++Counters.Misses;
 }
 
-void JavaTypeBaseCacheV2::recordNode() {
+void JavaTypeBaseCache::recordNode() {
   if (StatsEnabled)
     ++Counters.NodesEvaluated;
 }
 
-void JavaTypeBaseCacheV2::recordInputHit(Value *V) {
+void JavaTypeBaseCache::recordInputHit(Value *V) {
   if (StatsEnabled) {
     ++Counters.InputHits;
     ++Counters.InputEdgesVisited;
@@ -91,31 +91,31 @@ void JavaTypeBaseCacheV2::recordInputHit(Value *V) {
   recordReuse(V);
 }
 
-void JavaTypeBaseCacheV2::recordInputMiss() {
+void JavaTypeBaseCache::recordInputMiss() {
   if (StatsEnabled) {
     ++Counters.InputMisses;
     ++Counters.InputEdgesVisited;
   }
 }
 
-void JavaTypeBaseCacheV2::recordOpenEdge() {
+void JavaTypeBaseCache::recordOpenEdge() {
   if (StatsEnabled) {
     ++Counters.OpenNodeEdges;
     ++Counters.InputEdgesVisited;
   }
 }
 
-void JavaTypeBaseCacheV2::recordCycle() {
+void JavaTypeBaseCache::recordCycle() {
   if (StatsEnabled)
     ++Counters.CyclicSCCs;
 }
 
-void JavaTypeBaseCacheV2::recordRefinement() {
+void JavaTypeBaseCache::recordRefinement() {
   if (StatsEnabled)
     ++Counters.RefinementSteps;
 }
 
-void JavaTypeBaseCacheV2::clear() {
+void JavaTypeBaseCache::clear() {
   if (StatsEnabled) {
     ++Counters.Clears;
     Counters.EntriesRemoved += Memo.size();
@@ -124,7 +124,7 @@ void JavaTypeBaseCacheV2::clear() {
   PriorKeys.clear();
 }
 
-size_t JavaTypeBaseCacheV2::invalidate(ArrayRef<Value *> Affected,
+size_t JavaTypeBaseCache::invalidate(ArrayRef<Value *> Affected,
                                      bool CFGChanged,
                                      JavaTypeBaseInvalidationMode Mode,
                                      size_t &SlotsScanned) {
@@ -141,27 +141,27 @@ size_t JavaTypeBaseCacheV2::invalidate(ArrayRef<Value *> Affected,
   return Removed;
 }
 
-void JavaTypeDefinedCacheV2::recordHit() {
+void JavaTypeDefinedCache::recordHit() {
   if (StatsEnabled)
     ++Counters.Hits;
 }
 
-void JavaTypeDefinedCacheV2::recordMiss() {
+void JavaTypeDefinedCache::recordMiss() {
   if (StatsEnabled)
     ++Counters.Misses;
 }
 
-void JavaTypeDefinedCacheV2::recordNode() {
+void JavaTypeDefinedCache::recordNode() {
   if (StatsEnabled)
     ++Counters.NodesEvaluated;
 }
 
-void JavaTypeDefinedCacheV2::recordInsertion(size_t Count) {
+void JavaTypeDefinedCache::recordInsertion(size_t Count) {
   if (StatsEnabled)
     Counters.EntriesAdded += Count;
 }
 
-void JavaTypeDefinedCacheV2::clear() {
+void JavaTypeDefinedCache::clear() {
   if (StatsEnabled) {
     ++Counters.Clears;
     Counters.EntriesRemoved += Memo.size();
@@ -169,7 +169,7 @@ void JavaTypeDefinedCacheV2::clear() {
   Memo.clear();
 }
 
-size_t JavaTypeDefinedCacheV2::invalidate(ArrayRef<Value *> Affected,
+size_t JavaTypeDefinedCache::invalidate(ArrayRef<Value *> Affected,
                                         bool CFGChanged,
                                         JavaTypeBaseInvalidationMode Mode,
                                         size_t &SlotsScanned) {
@@ -185,55 +185,55 @@ size_t JavaTypeDefinedCacheV2::invalidate(ArrayRef<Value *> Affected,
   return Removed;
 }
 
-void JavaTypeFactsCacheV2::bind(Function &F) {
+void JavaTypeFactsCache::bind(Function &F) {
   assert((!Owner || Owner == &F) && "cache belongs to another function");
   Owner = &F;
 }
 
-void JavaTypeFactsCacheV2::recordNullRequest() {
+void JavaTypeFactsCache::recordNullRequest() {
   if (StatsEnabled)
     ++Counters.NullRequests;
 }
 
-void JavaTypeFactsCacheV2::recordNullHit() {
+void JavaTypeFactsCache::recordNullHit() {
   if (StatsEnabled) {
     ++Counters.Hits;
     ++Counters.NullHits;
   }
 }
 
-void JavaTypeFactsCacheV2::recordNullComputed() {
+void JavaTypeFactsCache::recordNullComputed() {
   if (StatsEnabled) {
     ++Counters.Misses;
     ++Counters.NullComputed;
   }
 }
 
-void JavaTypeFactsCacheV2::recordGuardRequest() {
+void JavaTypeFactsCache::recordGuardRequest() {
   if (StatsEnabled)
     ++Counters.GuardRequests;
 }
 
-void JavaTypeFactsCacheV2::recordGuardHit() {
+void JavaTypeFactsCache::recordGuardHit() {
   if (StatsEnabled) {
     ++Counters.Hits;
     ++Counters.GuardHits;
   }
 }
 
-void JavaTypeFactsCacheV2::recordGuardComputed() {
+void JavaTypeFactsCache::recordGuardComputed() {
   if (StatsEnabled) {
     ++Counters.Misses;
     ++Counters.GuardComputed;
   }
 }
 
-void JavaTypeFactsCacheV2::recordGuardBypass() {
+void JavaTypeFactsCache::recordGuardBypass() {
   if (StatsEnabled)
     ++Counters.GuardBypasses;
 }
 
-void JavaTypeFactsCacheV2::recordNull(bool Hit) {
+void JavaTypeFactsCache::recordNull(bool Hit) {
   recordNullRequest();
   if (Hit)
     recordNullHit();
@@ -241,7 +241,7 @@ void JavaTypeFactsCacheV2::recordNull(bool Hit) {
     recordNullComputed();
 }
 
-void JavaTypeFactsCacheV2::recordGuard(bool Hit, bool Bypass) {
+void JavaTypeFactsCache::recordGuard(bool Hit, bool Bypass) {
   recordGuardRequest();
   if (Hit)
     recordGuardHit();
@@ -251,12 +251,12 @@ void JavaTypeFactsCacheV2::recordGuard(bool Hit, bool Bypass) {
     recordGuardBypass();
 }
 
-void JavaTypeFactsCacheV2::recordInsertion(size_t Count) {
+void JavaTypeFactsCache::recordInsertion(size_t Count) {
   if (StatsEnabled)
     Counters.EntriesAdded += Count;
 }
 
-bool JavaTypeFactsCacheV2::getNullEdge(Value *V, BasicBlock *From, BasicBlock *To,
+bool JavaTypeFactsCache::getNullEdge(Value *V, BasicBlock *From, BasicBlock *To,
                                      function_ref<bool()> Compute) {
   assert(Owner == From->getParent() && Owner == To->getParent() &&
          "wrong facts cache owner");
@@ -278,7 +278,7 @@ bool JavaTypeFactsCacheV2::getNullEdge(Value *V, BasicBlock *From, BasicBlock *T
   return Result;
 }
 
-JavaType JavaTypeFactsCacheV2::getGuard(Value *V, BasicBlock *From, BasicBlock *To,
+JavaType JavaTypeFactsCache::getGuard(Value *V, BasicBlock *From, BasicBlock *To,
                                       unsigned ConditionDepth,
                                       function_ref<JavaType()> Compute) {
   assert(Owner == From->getParent() && Owner == To->getParent() &&
@@ -300,7 +300,7 @@ JavaType JavaTypeFactsCacheV2::getGuard(Value *V, BasicBlock *From, BasicBlock *
   return Result;
 }
 
-void JavaTypeFactsCacheV2::clear() {
+void JavaTypeFactsCache::clear() {
   if (StatsEnabled) {
     ++Counters.Clears;
     Counters.EntriesRemoved += size();
@@ -309,7 +309,7 @@ void JavaTypeFactsCacheV2::clear() {
   Guards.clear();
 }
 
-size_t JavaTypeFactsCacheV2::invalidate() {
+size_t JavaTypeFactsCache::invalidate() {
   size_t Removed = size();
   if (StatsEnabled)
     ++Counters.Invalidations;
@@ -317,29 +317,29 @@ size_t JavaTypeFactsCacheV2::invalidate() {
   return Removed;
 }
 
-JavaType *JavaTypeFinalCacheV2::lookup(Value *V, BasicBlock *BB) {
+JavaType *JavaTypeFinalCache::lookup(Value *V, BasicBlock *BB) {
   auto It = Memo.find(Key{V, BB});
   return It == Memo.end() ? nullptr : &It->second;
 }
 
-bool JavaTypeFinalCacheV2::insert(Value *V, BasicBlock *BB, const JavaType &Type) {
+bool JavaTypeFinalCache::insert(Value *V, BasicBlock *BB, const JavaType &Type) {
   bool Inserted = Memo.try_emplace(Key{V, BB}, Type).second;
   if (Inserted && StatsEnabled)
     ++Counters.EntriesAdded;
   return Inserted;
 }
 
-void JavaTypeFinalCacheV2::recordHit() {
+void JavaTypeFinalCache::recordHit() {
   if (StatsEnabled)
     ++Counters.Hits;
 }
 
-void JavaTypeFinalCacheV2::recordMiss() {
+void JavaTypeFinalCache::recordMiss() {
   if (StatsEnabled)
     ++Counters.Misses;
 }
 
-void JavaTypeFinalCacheV2::clear() {
+void JavaTypeFinalCache::clear() {
   if (StatsEnabled) {
     ++Counters.Clears;
     Counters.EntriesRemoved += Memo.size();
@@ -347,11 +347,11 @@ void JavaTypeFinalCacheV2::clear() {
   Memo.clear();
 }
 
-void JavaTypeFinalCacheV2::notifyOracleChanged() {
+void JavaTypeFinalCache::notifyOracleChanged() {
   invalidate();
 }
 
-size_t JavaTypeFinalCacheV2::invalidate() {
+size_t JavaTypeFinalCache::invalidate() {
   size_t Removed = Memo.size();
   if (StatsEnabled)
     ++Counters.Invalidations;
@@ -359,42 +359,42 @@ size_t JavaTypeFinalCacheV2::invalidate() {
   return Removed;
 }
 
-void JavaTypeCacheV2::bind(Function &F) {
+void JavaTypeCache::bind(Function &F) {
   assert((!Owner || Owner == &F) && "cache belongs to another function");
   Owner = &F;
   Facts.bind(F);
 }
 
-void JavaTypeCacheV2::setStatsEnabled(bool Enabled) {
+void JavaTypeCache::setStatsEnabled(bool Enabled) {
   Base.setStatsEnabled(Enabled);
   Defined.setStatsEnabled(Enabled);
   Facts.setStatsEnabled(Enabled);
   Final.setStatsEnabled(Enabled);
 }
 
-void JavaTypeCacheV2::resetStats() {
+void JavaTypeCache::resetStats() {
   Base.resetStats();
   Defined.resetStats();
   Facts.resetStats();
   Final.resetStats();
 }
 
-void JavaTypeCacheV2::clear() {
+void JavaTypeCache::clear() {
   Base.clear();
   Defined.clear();
   Facts.clear();
   Final.clear();
 }
 
-void JavaTypeCacheV2::notifyOracleChanged() {
+void JavaTypeCache::notifyOracleChanged() {
   Facts.invalidate();
   Final.notifyOracleChanged();
 }
 
-JavaTypeCacheV2InvalidationInfo
-JavaTypeCacheV2::invalidate(ArrayRef<Value *> Changed, bool CFGChanged,
+JavaTypeCacheInvalidationInfo
+JavaTypeCache::invalidate(ArrayRef<Value *> Changed, bool CFGChanged,
                             JavaTypeBaseInvalidationMode Mode) {
-  JavaTypeCacheV2InvalidationInfo Info;
+  JavaTypeCacheInvalidationInfo Info;
   size_t OldBase = Base.size();
   size_t OldDefined = Defined.size();
   size_t OldFacts = Facts.size();

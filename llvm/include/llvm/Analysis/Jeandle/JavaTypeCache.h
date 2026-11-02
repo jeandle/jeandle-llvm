@@ -1,4 +1,4 @@
-//===- JavaTypeCacheV2.h - Owned Java type query caches ---------*- C++ -*-===//
+//===- JavaTypeCache.h - Owned Java type query caches ---------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,8 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_ANALYSIS_JEANDLE_JAVATYPECACHEV2_H
-#define LLVM_ANALYSIS_JEANDLE_JAVATYPECACHEV2_H
+#ifndef LLVM_ANALYSIS_JEANDLE_JAVATYPECACHE_H
+#define LLVM_ANALYSIS_JEANDLE_JAVATYPECACHE_H
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
@@ -29,7 +29,7 @@ using JavaTypeDefinedMemo = DenseMap<Value *, bool>;
 
 /// Counters belong to the cache being observed and survive clear(). They are
 /// disabled by default; enable them before the measured queries/notifications.
-struct JavaTypeCacheV2Stats {
+struct JavaTypeCacheStats {
   uint64_t Hits = 0;
   uint64_t Misses = 0;
   uint64_t EntriesAdded = 0;
@@ -44,7 +44,7 @@ enum class JavaTypeBaseInvalidationMode {
 };
 
 /// Work performed by one invalidation. Counts are entries, not bytes.
-struct JavaTypeCacheV2InvalidationInfo {
+struct JavaTypeCacheInvalidationInfo {
   size_t BaseRemoved = 0;
   size_t DefinedRemoved = 0;
   size_t FactsRemoved = 0;
@@ -60,9 +60,9 @@ struct JavaTypeCacheV2InvalidationInfo {
 
 /// Completed context-independent bounds. The solver also uses this storage
 /// while closing an SCC: never invalidate or evict during a running query.
-class LLVM_ABI JavaTypeBaseCacheV2 {
+class LLVM_ABI JavaTypeBaseCache {
 public:
-  struct Stats : JavaTypeCacheV2Stats {
+  struct Stats : JavaTypeCacheStats {
     uint64_t InputHits = 0;
     uint64_t InputMisses = 0;
     uint64_t PriorQueryHits = 0;
@@ -75,7 +75,7 @@ public:
   };
 
 private:
-  friend class JavaTypeCacheV2;
+  friend class JavaTypeCache;
   JavaTypeBaseMemo Memo;
   Stats Counters;
   bool StatsEnabled = false;
@@ -111,14 +111,14 @@ public:
 
 /// Completed context-independent definedness proofs, including negative proofs
 /// ("not proven defined"). No worklist or unfinished proof survives a query.
-class LLVM_ABI JavaTypeDefinedCacheV2 {
+class LLVM_ABI JavaTypeDefinedCache {
 public:
-  struct Stats : JavaTypeCacheV2Stats {
+  struct Stats : JavaTypeCacheStats {
     uint64_t NodesEvaluated = 0;
   };
 
 private:
-  friend class JavaTypeCacheV2;
+  friend class JavaTypeCache;
   JavaTypeDefinedMemo Memo;
   Stats Counters;
   bool StatsEnabled = false;
@@ -140,11 +140,11 @@ public:
 
 /// Complete root edge guards and optional null-edge decisions. This cache has
 /// a deliberately separate invalidation policy from Base and Defined.
-class LLVM_ABI JavaTypeFactsCacheV2 {
+class LLVM_ABI JavaTypeFactsCache {
 public:
   enum class Mode { GuardOnly, StableOracleEpoch };
   using Key = std::pair<Value *, std::pair<BasicBlock *, BasicBlock *>>;
-  struct Stats : JavaTypeCacheV2Stats {
+  struct Stats : JavaTypeCacheStats {
     uint64_t NullRequests = 0;
     uint64_t NullHits = 0;
     uint64_t NullComputed = 0;
@@ -155,7 +155,7 @@ public:
   };
 
 private:
-  friend class JavaTypeCacheV2;
+  friend class JavaTypeCache;
   Function *Owner;
   Mode CacheMode;
   DenseMap<Key, bool> NullEdges;
@@ -164,11 +164,11 @@ private:
   bool StatsEnabled = false;
 
 public:
-  explicit JavaTypeFactsCacheV2(Function *F = nullptr,
+  explicit JavaTypeFactsCache(Function *F = nullptr,
                               Mode M = Mode::GuardOnly)
       : Owner(F), CacheMode(M) {}
-  explicit JavaTypeFactsCacheV2(Function &F, Mode M = Mode::GuardOnly)
-      : JavaTypeFactsCacheV2(&F, M) {}
+  explicit JavaTypeFactsCache(Function &F, Mode M = Mode::GuardOnly)
+      : JavaTypeFactsCache(&F, M) {}
   void bind(Function &F);
   Function *getFunction() const { return Owner; }
   Mode getMode() const { return CacheMode; }
@@ -204,13 +204,13 @@ public:
 /// budgets limit solving work, not reuse of a valid result. Recursive facts/value
 /// results never enter this cache. IR and oracle notifications clear the entire
 /// table, so publication needs no dependency tracking or later revalidation.
-class LLVM_ABI JavaTypeFinalCacheV2 {
+class LLVM_ABI JavaTypeFinalCache {
 public:
   using Key = std::pair<Value *, BasicBlock *>;
-  using Stats = JavaTypeCacheV2Stats;
+  using Stats = JavaTypeCacheStats;
 
 private:
-  friend class JavaTypeCacheV2;
+  friend class JavaTypeCache;
   DenseMap<Key, JavaType> Memo;
 
   Stats Counters;
@@ -239,23 +239,23 @@ public:
 /// Oracle maintenance requires notifyOracleChanged(), even without IR changes.
 /// A StableOracleEpoch permits skipping repeat oracle calls between such
 /// notifications; arbitrary changing callbacks must use GuardOnly.
-class LLVM_ABI JavaTypeCacheV2 {
+class LLVM_ABI JavaTypeCache {
   Function *Owner;
   bool EnableFinal;
 
 public:
-  using Mode = JavaTypeFactsCacheV2::Mode;
-  JavaTypeBaseCacheV2 Base;
-  JavaTypeDefinedCacheV2 Defined;
-  JavaTypeFactsCacheV2 Facts;
-  JavaTypeFinalCacheV2 Final;
+  using Mode = JavaTypeFactsCache::Mode;
+  JavaTypeBaseCache Base;
+  JavaTypeDefinedCache Defined;
+  JavaTypeFactsCache Facts;
+  JavaTypeFinalCache Final;
 
-  explicit JavaTypeCacheV2(Function *F = nullptr, Mode M = Mode::GuardOnly,
+  explicit JavaTypeCache(Function *F = nullptr, Mode M = Mode::GuardOnly,
                            bool EnableFinal = true)
       : Owner(F), EnableFinal(EnableFinal), Facts(F, M) {}
-  explicit JavaTypeCacheV2(Function &F, Mode M = Mode::GuardOnly,
+  explicit JavaTypeCache(Function &F, Mode M = Mode::GuardOnly,
                            bool EnableFinal = true)
-      : JavaTypeCacheV2(&F, M, EnableFinal) {}
+      : JavaTypeCache(&F, M, EnableFinal) {}
   void bind(Function &F);
   Function *getFunction() const { return Owner; }
   Mode getMode() const { return Facts.getMode(); }
@@ -274,7 +274,7 @@ public:
   size_t definedSize() const { return Defined.size(); }
   size_t pathFactsSize() const { return Facts.size(); }
   size_t finalTypesSize() const { return Final.size(); }
-  JavaTypeCacheV2InvalidationInfo
+  JavaTypeCacheInvalidationInfo
   invalidate(ArrayRef<Value *> Changed, bool CFGChanged = false,
              JavaTypeBaseInvalidationMode Mode =
                  JavaTypeBaseInvalidationMode::SelectiveKeys);
@@ -282,4 +282,4 @@ public:
 
 } // namespace llvm::jeandle
 
-#endif // LLVM_ANALYSIS_JEANDLE_JAVATYPECACHEV2_H
+#endif // LLVM_ANALYSIS_JEANDLE_JAVATYPECACHE_H

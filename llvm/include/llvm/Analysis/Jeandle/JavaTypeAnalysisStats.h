@@ -44,7 +44,7 @@ LLVM_ABI bool javaTypeStatsEnabled();
 /// proof entry probes. Each cache owns the source counters; this observer only
 /// aggregates emitted deltas across analysis lifetimes.
 /// Current*/Peak* come from the cache sizes reported by the observer, so
-/// printing never has to reach into JavaTypeCacheV2.
+/// printing never has to reach into JavaTypeCache.
 struct JavaTypeQueryStats {
   uint64_t Queries = 0;
   uint64_t FactsHits = 0;

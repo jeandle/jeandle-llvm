@@ -1,4 +1,4 @@
-//===- CachedJavaTypeV2.h - Cached current Java type queries ----*- C++ -*-===//
+//===- CachedJavaType.h - Cached current Java type queries ----*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,10 +6,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_ANALYSIS_JEANDLE_CACHEDJAVATYPEV2_H
-#define LLVM_ANALYSIS_JEANDLE_CACHEDJAVATYPEV2_H
+#ifndef LLVM_ANALYSIS_JEANDLE_CACHEDJAVATYPE_H
+#define LLVM_ANALYSIS_JEANDLE_CACHEDJAVATYPE_H
 
-#include "llvm/Analysis/Jeandle/JavaTypeCacheV2.h"
+#include "llvm/Analysis/Jeandle/JavaTypeCache.h"
 
 namespace llvm::jeandle {
 
@@ -18,11 +18,11 @@ namespace llvm::jeandle {
 /// and definedness share completed value results; Facts shares edge work;
 /// Final shares complete top-level queries until an IR/oracle notification.
 /// Cache classes own their counters. No query stacks or budgets persist.
-LLVM_ABI JavaType getCachedJavaTypeV2(Value *V, DominatorTree *DT,
+LLVM_ABI JavaType getCachedJavaType(Value *V, DominatorTree *DT,
                                      Instruction *Context,
                                      IsNullEdgeOracle IsNullEdge,
-                                     JavaTypeCacheV2 &Cache);
+                                     JavaTypeCache &Cache);
 
 } // namespace llvm::jeandle
 
-#endif // LLVM_ANALYSIS_JEANDLE_CACHEDJAVATYPEV2_H
+#endif // LLVM_ANALYSIS_JEANDLE_CACHEDJAVATYPE_H

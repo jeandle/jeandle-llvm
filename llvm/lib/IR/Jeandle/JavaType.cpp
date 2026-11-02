@@ -14,7 +14,7 @@
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/Analysis/Jeandle/JavaTypeCacheV2.h"
+#include "llvm/Analysis/Jeandle/JavaTypeCache.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
@@ -448,9 +448,9 @@ using BaseMemo = DenseMap<Value *, JavaType>;
 /// the existing Defined cache. Freeze/condition helpers share this one handle.
 struct DefinedMemo {
   DenseMap<Value *, bool> Local;
-  JavaTypeDefinedCacheV2 *Shared;
+  JavaTypeDefinedCache *Shared;
 
-  explicit DefinedMemo(JavaTypeDefinedCacheV2 *Shared = nullptr)
+  explicit DefinedMemo(JavaTypeDefinedCache *Shared = nullptr)
       : Shared(Shared) {}
 
   DenseMap<Value *, bool> &storage() {
@@ -792,7 +792,7 @@ struct BaseTypeNode {
 /// uses the C++ call stack.
 static JavaType getBaseJavaType(Value *V, BaseMemo *Memo = nullptr,
                                 DefinedMemo *Defined = nullptr,
-                                JavaTypeBaseCacheV2 *Base = nullptr) {
+                                JavaTypeBaseCache *Base = nullptr) {
   BaseMemo LocalMemo;
   BaseMemo &Cache = Memo ? *Memo : LocalMemo;
   if (auto It = Cache.find(V); It != Cache.end()) {
@@ -994,14 +994,14 @@ namespace {
 /// value/block evaluation state and budgets retain their per-query lifetime.
 struct JavaTypeQueryContext {
   JavaTypeQueryContext(DominatorTree &DT, IsNullEdgeOracle NullOracle,
-                       JavaTypeCacheV2 *Cache = nullptr)
+                       JavaTypeCache *Cache = nullptr)
       : DT(DT), NullOracle(NullOracle), Cache(Cache),
         BaseTypes(Cache ? Cache->Base.storage() : LocalBaseTypes),
         DefinedValues(Cache ? &Cache->Defined : nullptr) {}
 
   DominatorTree &DT;
   IsNullEdgeOracle NullOracle;
-  JavaTypeCacheV2 *Cache;
+  JavaTypeCache *Cache;
   /// PHI cycle-detection set for the value dimension (phiValueType): a
   /// re-encountered PHI contributes nothing. Base-type queries detect
   /// cycles with their own SCC state and do not use this set.
@@ -2317,7 +2317,7 @@ static JavaType edgeGuard(BasicBlock *From, BasicBlock *To, Value *V,
 
 JavaType jeandle::getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
                               IsNullEdgeOracle IsNullEdge,
-                              JavaTypeCacheV2 &Cache) {
+                              JavaTypeCache &Cache) {
   assert(getVMCallbacks() && getVMCallbacks()->IsSubtype &&
          "VMCallbacks must be set");
   if (!DT || !Context) {
