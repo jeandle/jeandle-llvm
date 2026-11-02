@@ -83,7 +83,6 @@ struct JavaTypeQueryStats {
   uint64_t FinalRetained = 0;
   uint64_t InvalidationTimeNanoseconds = 0;
   uint64_t Verifications = 0;
-  uint64_t VerificationSkips = 0;
   uint64_t TotalQueryTimeNanoseconds = 0;
   size_t CurrentBaseEntries = 0;
   size_t CurrentDefinedEntries = 0;

@@ -36,7 +36,6 @@ entry:
 ; STATS:         invalidation requests: 0
 ; STATS:         bypasses: 0
 ; STATS:         verifications: 2
-; STATS:         verification skips: 0
 
 attributes #0 = { "java-method"="0" }
 

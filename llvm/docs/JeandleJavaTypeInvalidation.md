@@ -1,5 +1,7 @@
 # JavaType 缓存选择性失效设计与实验报告
 
+> 历史实验报告：本文对应 2026-10-15 的 V1 实现。当前分支已移除该查询器及专属测试工具，原始结果和逐次计时数据仍保留；复现请使用下文记录的历史提交。当前设计见 [JavaTypeCacheV2Design.md](JeandleJavaTypeInvalidation/JavaTypeCacheV2Design.md)。
+
 本次将 `JavaTypeAnalysis` 原有的三层缓存全量清空，改为修改前通知、沿 SSA 使用关系传播、按依赖范围失效。TCE 和 CHA 已接入，RecoverTypeInfo 与 ConstantFieldFolding 随后也改用该接口。在指定 pass 的生成式 IR 实验中，复杂基础表达式复用场景的 `opt` 总耗时中位数相对同一二进制的全量清空模式下降 17.57%，TCE→CHA 场景下降 16.42%；简单叶子类型场景没有测得稳定收益。
 
 最终实验时间为 2026 年 10 月 15 日，开发分支为 `feat/javatype-selective-invalidation`，实现提交为 `14058bf207de68fdfbfa09eaa985dddd9983f340`（主体实现 `34cdbcf19`，LVI 内存访问依赖补强 `14058bf20`）。实验前已有的工作区修改独立保存为 `ab6902023`；本次未修改原始 `IR/Jeandle/JavaType.cpp` 查询算法。本文是新实验报告，原工作报告保留。

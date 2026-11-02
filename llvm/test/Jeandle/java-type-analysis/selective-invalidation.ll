@@ -23,7 +23,6 @@
 ; FULL: base entries retained: 0
 ;
 ; VERIFY: verifications: 3
-; VERIFY: verification skips: 0
 ; VERIFY-LABEL: define hotspotcc ptr addrspace(1) @caller0(
 ; VERIFY-NOT: call hotspotcc i1 @jeandle.check_instanceof
 ; VERIFY: invoke hotspotcc ptr addrspace(1) @Optimized_target

@@ -27,11 +27,20 @@ class Value;
 
 namespace jeandle {
 
+/// Hit/miss observations reported by the analysis when statistics are enabled.
+struct JavaTypeQueryInfo {
+  uint64_t BaseHits = 0;
+  uint64_t BaseMisses = 0;
+  uint64_t FactsHits = 0;
+  uint64_t FactsMisses = 0;
+  uint64_t FinalHits = 0;
+  uint64_t FinalMisses = 0;
+};
+
 /// Optional observations of one query, only built and reported when statistics
-/// are enabled. Info retains the shared hit/miss payload shape; V2 never sets
-/// its legacy SkipVerification flag. Insertions count new cache entries.
+/// are enabled. Insertions count new cache entries.
 struct JavaTypeQueryEvent {
-  CachedJavaTypeQueryInfo Info;
+  JavaTypeQueryInfo Info;
   /// Top-level query keys. These pointers are valid while the observer runs;
   /// diagnostic consumers must not retain them across IR mutation.
   Value *QueryValue = nullptr;
@@ -51,7 +60,6 @@ struct JavaTypeQueryEvent {
   size_t FinalEntries = 0;
   bool Bypassed = false;
   bool Verified = false;
-  bool VerificationSkipped = false;
 };
 
 /// Optional observations of one invalidation notification.

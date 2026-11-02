@@ -14,17 +14,6 @@ add_benchmark(MustacheBench Mustache.cpp PARTIAL_SOURCES_INTENDED)
 add_benchmark(SpecialCaseListBM SpecialCaseListBM.cpp PARTIAL_SOURCES_INTENDED)
 
 add_benchmark(RuntimeLibcallsBench RuntimeLibcalls.cpp PARTIAL_SOURCES_INTENDED)
-add_benchmark(
-  JeandleJavaTypeCacheInvalidation
-  JeandleJavaTypeCacheInvalidation.cpp
-  PARTIAL_SOURCES_INTENDED
-  )
-target_link_libraries(
-  JeandleJavaTypeCacheInvalidation
-  PRIVATE
-  LLVMAnalysis
-  )
-
 if(NOT LLVM_TOOL_LLVM_DRIVER_BUILD)
   # TODO: Check if the tools are in LLVM_DISTRIBUTION_COMPONENTS with
   # the driver build. Also support the driver build by invoking the

@@ -1,6 +1,6 @@
 # JavaType V2：第一阶段复用实验记录
 
-> 本文保留第一阶段的实验条件和结果。当前四类缓存、统一接口及 Analysis 接入见 [JavaTypeCacheV2Design.md](JavaTypeCacheV2Design.md)；下面的旧接口和“尚未接入”描述仅对应当时状态。
+> 本文保留第一阶段的实验条件和结果。当前四类缓存、统一接口及 Analysis 接入见 [JavaTypeCacheV2Design.md](JavaTypeCacheV2Design.md)；V1 专属实现及测试已移除，下面的旧接口、历史路径和“尚未接入”描述仅对应当时状态。
 
 本次以工作区最新版 `JavaType.cpp` 为语义基准，按
 `/home/zjj/.codex/skills/jeandle-javatype-cache/SKILL.md` 开发。

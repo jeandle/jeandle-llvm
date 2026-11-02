@@ -9,10 +9,14 @@
 #ifndef LLVM_ANALYSIS_JEANDLE_JAVATYPECACHEV2_H
 #define LLVM_ANALYSIS_JEANDLE_JAVATYPECACHEV2_H
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/Analysis/Jeandle/CachedJavaType.h"
+#include "llvm/IR/Jeandle/JavaType.h"
+#include <cstddef>
+#include <cstdint>
+#include <utility>
 
 namespace llvm {
 class Function;
@@ -34,9 +38,24 @@ struct JavaTypeCacheV2Stats {
   uint64_t Clears = 0;
 };
 
-struct JavaTypeCacheV2InvalidationInfo : JavaTypeCacheInvalidationInfo {
+enum class JavaTypeBaseInvalidationMode {
+  SelectiveKeys,
+  Scan,
+};
+
+/// Work performed by one invalidation. Counts are entries, not bytes.
+struct JavaTypeCacheV2InvalidationInfo {
+  size_t BaseRemoved = 0;
   size_t DefinedRemoved = 0;
+  size_t FactsRemoved = 0;
+  size_t FinalRemoved = 0;
+  size_t ValuesVisited = 0;
+  size_t UsesVisited = 0;
+  size_t BaseSlotsScanned = 0;
   size_t DefinedSlotsScanned = 0;
+  size_t PathFactsSlotsScanned = 0;
+  size_t FinalTypesSlotsScanned = 0;
+  bool FullClear = false;
 };
 
 /// Completed context-independent bounds. The solver also uses this storage

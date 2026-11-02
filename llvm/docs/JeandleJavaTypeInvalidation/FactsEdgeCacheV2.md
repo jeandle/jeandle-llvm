@@ -1,5 +1,7 @@
 # JavaType V2 的 Facts 边缓存
 
+> 本文保留 Facts 边缓存阶段的设计和验证记录。V1 专属实现及测试已移除，下面的旧路径、接口和测试数量对应当时提交；当前实现以 [JavaTypeCacheV2Design.md](JavaTypeCacheV2Design.md) 为准。
+
 这个方案在 Facts 求解过程中复用两类边信息：完整根调用的 `edgeGuard` 结果，以及满足稳定 oracle 契约时的完整 `isNullEdge` 判断。它保持 `factsAt` 的遍历、查询内 memo、预算和循环处理方式，避免直接把依赖当前查询状态的 `(Value, BasicBlock)` 完整 Facts 结果跨查询发布。
 
 实现位于独立的 [CachedJavaTypeV2.cpp](../../lib/Analysis/Jeandle/CachedJavaTypeV2.cpp) 和 [CachedJavaTypeV2.h](../../include/llvm/Analysis/Jeandle/CachedJavaTypeV2.h)。原版 [JavaType.cpp](../../lib/IR/Jeandle/JavaType.cpp) 和公共 `JavaType` 定义保持不变。缓存由调用方持有并通过聚合对象传入；当前通过 JavaTypeAnalysis 接入消费者 pass。

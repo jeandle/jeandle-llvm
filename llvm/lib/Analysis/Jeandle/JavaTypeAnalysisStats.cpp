@@ -82,8 +82,6 @@ ALWAYS_ENABLED_STATISTIC(TotalClears,
                         "Java type cache clears");
 ALWAYS_ENABLED_STATISTIC(TotalVerifications,
                         "Java type cache verification queries");
-ALWAYS_ENABLED_STATISTIC(TotalVerificationSkips,
-                        "Java type verification comparisons skipped");
 
 /// Prints a cache hit rate; prints n/a when there is no sample yet so that we
 /// never divide by zero.
@@ -105,7 +103,7 @@ bool jeandle::javaTypeStatsEnabled() { return CollectJavaTypeStats; }
 /// The default query path never touches an atomic.
 /// @brief accumulate one query
 void JavaTypeStatsAnalysis::Result::onQuery(const JavaTypeQueryEvent &Event) {
-  const CachedJavaTypeQueryInfo &Info = Event.Info;
+  const JavaTypeQueryInfo &Info = Event.Info;
 
   const uint64_t QueryOrdinal = ++Stats.Queries;
   ++TotalQueries;
@@ -181,11 +179,6 @@ void JavaTypeStatsAnalysis::Result::onQuery(const JavaTypeQueryEvent &Event) {
     ++Stats.Verifications;
     ++TotalVerifications;
   }
-  if (Event.VerificationSkipped) {
-    ++Stats.VerificationSkips;
-    ++TotalVerificationSkips;
-  }
-
   Stats.TotalQueryTimeNanoseconds += Event.ElapsedNanoseconds;
   TotalQueryTimeNanoseconds += Event.ElapsedNanoseconds;
 }
@@ -312,7 +305,6 @@ void JavaTypeStatsAnalysis::Result::print(raw_ostream &OS) const {
   OS << "  total invalidation time (ns): " << Stats.InvalidationTimeNanoseconds << '\n';
   OS << "  bypasses: " << Stats.Bypasses << '\n';
   OS << "  verifications: " << Stats.Verifications << '\n';
-  OS << "  verification skips: " << Stats.VerificationSkips << '\n';
   OS << "  total query time (ns): " << Stats.TotalQueryTimeNanoseconds << '\n';
 }
 
@@ -390,6 +382,5 @@ JavaTypeAnalysisSummaryPrinterPass::run(Module &M, ModuleAnalysisManager &) {
   OS << "  total query time (ns): " << TotalQueryTimeNanoseconds.getValue() << '\n';
   OS << "  bypasses: " << TotalBypasses.getValue() << '\n';
   OS << "  verifications: " << TotalVerifications.getValue() << '\n';
-  OS << "  verification skips: " << TotalVerificationSkips.getValue() << '\n';
   return PreservedAnalyses::all();
 }

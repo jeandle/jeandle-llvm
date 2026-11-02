@@ -52,7 +52,6 @@ entry:
 ; STATS:         final type entries invalidated: 2
 ; STATS:         bypasses: 0
 ; STATS:         verifications: 6
-; STATS:         verification skips: 0
 
 attributes #0 = { "java-method"="0" }
 

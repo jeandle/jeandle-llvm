@@ -208,8 +208,8 @@ def main():
                 raise RuntimeError(f'{kind}/{mode}: only {actual} sites transformed')
         if len(set(outputs.values())) != 1:
             raise RuntimeError(f'Output IR differs for {kind}; inspect check-*.stdout')
-        if correctness['verify'].get('verification skips') != 0:
-            raise RuntimeError(f'{kind}: benchmark must not skip differential verification')
+        if correctness['verify'].get('verifications', 0) <= 0:
+            raise RuntimeError(f'{kind}: benchmark must execute differential verification')
         rows = []
         for iteration in range(-2, args.repeats):
             order = list(modes)
