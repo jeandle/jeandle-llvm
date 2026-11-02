@@ -190,6 +190,12 @@ public:
   void recordNull(bool Hit);
   void recordGuard(bool Hit, bool Bypass = false);
   void recordInsertion(size_t Count = 1);
+
+  bool getNullEdge(Value *V, BasicBlock *From, BasicBlock *To,
+                   function_ref<bool()> Compute);
+  JavaType getGuard(Value *V, BasicBlock *From, BasicBlock *To,
+                    unsigned ConditionDepth, function_ref<JavaType()> Compute);
+
   void clear();
   size_t invalidate();
 };

@@ -235,6 +235,127 @@ TEST_F(CachedJavaTypeV2Test, FreezeOfDefinedOperandRetainsType) {
             getJavaType(V, &DT, F.back().getTerminator(), noNullEdge));
 }
 
+TEST_F(CachedJavaTypeV2Test, SharedEngineKeepsFreezeProofsWithoutPublishingFinal) {
+  auto M = parse(R"IR(
+    define void @test(ptr "java-klass"="9" %maybe,
+                      ptr noundef "java-klass"="22" %defined) {
+      %uncertain = freeze ptr %maybe
+      %stable = freeze ptr %defined
+      ret void
+    }
+  )IR");
+  ASSERT_NE(M, nullptr);
+  Function &F = *M->getFunction("test");
+  DominatorTree DT(F);
+  Instruction *Uncertain = &F.front().front();
+  Instruction *Stable = Uncertain->getNextNode();
+  Instruction *At = F.front().getTerminator();
+  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  Cache.setStatsEnabled(true);
+
+  EXPECT_TRUE(getJavaType(Uncertain, &DT, At, noNullEdge).isUnknown());
+  EXPECT_TRUE(getJavaType(Uncertain, &DT, At, noNullEdge, Cache).isUnknown());
+  EXPECT_EQ(Cache.finalTypesSize(), 0U);
+  EXPECT_TRUE(getCachedJavaTypeV2(Uncertain, &DT, At, noNullEdge, Cache)
+                  .isUnknown());
+  // The possibly-poison input retains its own type, not the frozen result's
+  // unknown answer. The shared solver leaves Final publication to the wrapper.
+  EXPECT_EQ(getJavaType(F.getArg(0), &DT, At, noNullEdge, Cache),
+            JavaType(9, false));
+  EXPECT_EQ(Cache.finalTypesSize(), 1U);
+  EXPECT_EQ(getCachedJavaTypeV2(F.getArg(0), &DT, At, noNullEdge, Cache),
+            JavaType(9, false));
+  EXPECT_EQ(getJavaType(Stable, &DT, At, noNullEdge), JavaType(22, false));
+  EXPECT_EQ(getJavaType(Stable, &DT, At, noNullEdge, Cache),
+            JavaType(22, false));
+  EXPECT_EQ(Cache.finalTypesSize(), 2U);
+  EXPECT_EQ(getCachedJavaTypeV2(Stable, &DT, At, noNullEdge, Cache),
+            JavaType(22, false));
+  EXPECT_EQ(getCachedJavaTypeV2(Stable, &DT, At, noNullEdge, Cache),
+            JavaType(22, false));
+  EXPECT_TRUE(getCachedJavaTypeV2(Uncertain, &DT, At, noNullEdge, Cache)
+                  .isUnknown());
+  EXPECT_EQ(Cache.finalTypesSize(), 3U);
+  EXPECT_EQ(Cache.Final.getStats().Hits, 2U);
+  EXPECT_EQ(Cache.Final.getStats().Misses, 3U);
+}
+
+TEST_F(CachedJavaTypeV2Test, SharedEngineLeavesContextFinalsToCachedWrapper) {
+  auto M = parse(R"IR(
+    declare i1 @jeandle.check_instanceof(ptr, ptr nonnull)
+    define void @test(ptr %obj) {
+    entry:
+      %check = call i1 @jeandle.check_instanceof(
+          ptr inttoptr(i64 9 to ptr), ptr %obj)
+      br i1 %check, label %accepted, label %rejected
+    accepted:
+      ret void
+    rejected:
+      ret void
+    }
+  )IR");
+  ASSERT_NE(M, nullptr);
+  Function &F = *M->getFunction("test");
+  DominatorTree DT(F);
+  Value *Obj = F.getArg(0);
+  Instruction *BeforeGuard = F.front().getTerminator();
+  Instruction *Accepted = std::next(F.begin())->getTerminator();
+  JavaTypeCacheV2 Cache(F, JavaTypeCacheV2::Mode::StableOracleEpoch);
+  Cache.setStatsEnabled(true);
+
+  EXPECT_TRUE(getJavaType(Obj, &DT, BeforeGuard, noNullEdge).isUnknown());
+  EXPECT_EQ(getJavaType(Obj, &DT, Accepted, noNullEdge), JavaType(9, false));
+  EXPECT_EQ(Cache.finalTypesSize(), 0U);
+  EXPECT_TRUE(getJavaType(Obj, &DT, BeforeGuard, noNullEdge, Cache).isUnknown());
+  EXPECT_EQ(Cache.finalTypesSize(), 0U);
+  EXPECT_EQ(getCachedJavaTypeV2(Obj, &DT, Accepted, noNullEdge, Cache),
+            JavaType(9, false));
+  EXPECT_EQ(getJavaType(Obj, &DT, Accepted, noNullEdge, Cache),
+            JavaType(9, false));
+  EXPECT_EQ(Cache.finalTypesSize(), 1U);
+  EXPECT_EQ(Cache.Final.getStats().Hits, 0U);
+  EXPECT_EQ(Cache.Final.getStats().Misses, 1U);
+  EXPECT_TRUE(getCachedJavaTypeV2(Obj, &DT, BeforeGuard, noNullEdge, Cache)
+                  .isUnknown());
+  EXPECT_EQ(getCachedJavaTypeV2(Obj, &DT, Accepted, noNullEdge, Cache),
+            JavaType(9, false));
+  EXPECT_TRUE(getCachedJavaTypeV2(Obj, &DT, BeforeGuard, noNullEdge, Cache)
+                  .isUnknown());
+  EXPECT_EQ(Cache.finalTypesSize(), 2U);
+  EXPECT_EQ(Cache.Final.getStats().Hits, 2U);
+  EXPECT_EQ(Cache.Final.getStats().Misses, 2U);
+}
+
+TEST_F(CachedJavaTypeV2Test, UncachedEntryIgnoresExternalMemoAfterMetadataEdit) {
+  auto M = parse(R"IR(
+    define ptr @test(ptr %slot) {
+      %loaded = load ptr, ptr %slot, !java-klass !0
+      ret ptr %loaded
+    }
+    !0 = !{i64 9}
+  )IR");
+  ASSERT_NE(M, nullptr);
+  Function &F = *M->getFunction("test");
+  auto *Loaded = cast<LoadInst>(&F.front().front());
+  JavaTypeCacheV2 Cache(F);
+  EXPECT_EQ(getJavaType(Loaded, nullptr, nullptr, noNullEdge, Cache),
+            JavaType(9, false));
+  ASSERT_TRUE(Cache.Base.storage().contains(Loaded));
+
+  // Deliberately leave the external memo untouched. Only uncached queries
+  // are allowed after this edit until invalidate() below.
+  Loaded->setMetadata(
+      "java-klass",
+      MDNode::get(Context, ConstantAsMetadata::get(
+                               ConstantInt::get(Type::getInt64Ty(Context), 22))));
+  EXPECT_EQ(getJavaType(Loaded, nullptr, nullptr, noNullEdge),
+            JavaType(22, false));
+  EXPECT_EQ(Cache.Base.storage().lookup(Loaded), JavaType(9, false));
+  Cache.invalidate({Loaded});
+  EXPECT_EQ(getCachedJavaTypeV2(Loaded, nullptr, nullptr, noNullEdge, Cache),
+            JavaType(22, false));
+}
+
 TEST_F(CachedJavaTypeV2Test, ReturnedCallKeepsItsIndependentTypeSeed) {
   auto M = parse(R"IR(
     declare ptr addrspace(1) @identity(ptr addrspace(1) returned)

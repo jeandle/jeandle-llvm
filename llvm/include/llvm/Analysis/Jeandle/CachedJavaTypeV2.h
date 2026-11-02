@@ -13,7 +13,7 @@
 
 namespace llvm::jeandle {
 
-/// Query the isolated copy of the current JavaType algorithm. The caller owns
+/// Query the shared JavaType algorithm with caches. The caller owns
 /// all four caches and maintains their invalidation before IR changes. Base
 /// and definedness share completed value results; Facts shares edge work;
 /// Final shares complete top-level queries until an IR/oracle notification.

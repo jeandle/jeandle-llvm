@@ -256,6 +256,50 @@ void JavaTypeFactsCacheV2::recordInsertion(size_t Count) {
     Counters.EntriesAdded += Count;
 }
 
+bool JavaTypeFactsCacheV2::getNullEdge(Value *V, BasicBlock *From, BasicBlock *To,
+                                     function_ref<bool()> Compute) {
+  assert(Owner == From->getParent() && Owner == To->getParent() &&
+         "wrong facts cache owner");
+  if (CacheMode == Mode::GuardOnly) {
+    recordNull(false);
+    return Compute();
+  }
+  // Preserve the actual incoming value, including identity wrappers whose
+  // oracle answers can differ from those of their underlying operands.
+  Key K{V, {From, To}};
+  if (auto It = NullEdges.find(K); It != NullEdges.end()) {
+    recordNull(true);
+    return It->second;
+  }
+  recordNull(false);
+  bool Result = Compute();
+  if (NullEdges.try_emplace(K, Result).second)
+    recordInsertion();
+  return Result;
+}
+
+JavaType JavaTypeFactsCacheV2::getGuard(Value *V, BasicBlock *From, BasicBlock *To,
+                                      unsigned ConditionDepth,
+                                      function_ref<JavaType()> Compute) {
+  assert(Owner == From->getParent() && Owner == To->getParent() &&
+         "wrong facts cache owner");
+  // Nested condition traces must keep their original depth allowance.
+  if (ConditionDepth != 0) {
+    recordGuard(false, true);
+    return Compute();
+  }
+  Key K{V, {From, To}};
+  if (auto It = Guards.find(K); It != Guards.end()) {
+    recordGuard(true);
+    return It->second;
+  }
+  recordGuard(false);
+  JavaType Result = Compute();
+  if (Guards.try_emplace(K, Result).second)
+    recordInsertion();
+  return Result;
+}
+
 void JavaTypeFactsCacheV2::clear() {
   if (StatsEnabled) {
     ++Counters.Clears;

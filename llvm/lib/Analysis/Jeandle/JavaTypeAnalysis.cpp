@@ -107,9 +107,9 @@ void printJavaType(raw_ostream &OS, const JavaType &Type) {
 AnalysisKey JavaTypeAnalysis::Key;
 
 /// Query through the V2 caches. Each cache owns its counters; the optional
-/// observer receives only this query's deltas. Verification uses the untouched
-/// original engine and compares complete types, including truncated and cyclic
-/// queries: V2 preserves their original query-local evaluation semantics.
+/// observer receives only this query's deltas. Verification reruns the shared
+/// solver without external caches and compares complete types, including
+/// truncated and cyclic queries with their query-local evaluation semantics.
 JavaType JavaTypeAnalysisResult::getJavaType(Value *V, Instruction *Context) {
   assert(V && "cannot query the Java type of a null Value");
   assert((!Context || Context->getFunction() == &F) &&
