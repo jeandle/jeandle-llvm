@@ -30,6 +30,7 @@
 #include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
+#include "llvm/IR/Jeandle/VMConstants.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/Support/Debug.h"
@@ -613,8 +614,10 @@ bool specializeConstantClassCheck(CallInst *CI,
   return true;
 }
 
-std::optional<int> classQueryForConstantMirror(int OopId, ClassQueryKind Kind,
-                                               const jeandle::VMCallbacks &CB) {
+std::optional<int>
+classQueryForConstantMirror(int OopId, ClassQueryKind Kind,
+                            const jeandle::VMCallbacks &CB,
+                            const jeandle::VMConstants &VMC) {
   uintptr_t Klass = CB.GetMirrorKlass(OopId);
   if (Klass == jeandle::MirrorKlassUnavailable)
     return std::nullopt;
@@ -623,7 +626,9 @@ std::optional<int> classQueryForConstantMirror(int OopId, ClassQueryKind Kind,
       return 1;
     if (Kind == ClassQueryKind::GetModifiers ||
         Kind == ClassQueryKind::GetAccessFlags)
-      return 1041; // JVM_ACC_PUBLIC | JVM_ACC_FINAL | JVM_ACC_ABSTRACT.
+      // java.lang.Class reports these modifiers for primitive mirrors.
+      return static_cast<int>(VMC.jvmAccPublic() | VMC.jvmAccFinal() |
+                              VMC.jvmAccAbstract());
     return 0;
   }
   switch (Kind) {
@@ -652,12 +657,11 @@ std::optional<int> classQueryForConstantMirror(int OopId, ClassQueryKind Kind,
 // unknown results per query. An empty entry also breaks cycles conservatively.
 // Count every operand visit, including cache hits, so wide PHIs have a bounded
 // cost.
-std::optional<int>
-classQueryForMirror(Value *Mirror, ClassQueryKind Kind,
-                    const jeandle::VMCallbacks &CB,
-                    const DenseMap<Value *, int> &ConstOops,
-                    DenseMap<Value *, std::optional<int>> &Results,
-                    unsigned &RemainingVisits, unsigned Depth = 0) {
+std::optional<int> classQueryForMirror(
+    Value *Mirror, ClassQueryKind Kind, const jeandle::VMCallbacks &CB,
+    const jeandle::VMConstants &VMC, const DenseMap<Value *, int> &ConstOops,
+    DenseMap<Value *, std::optional<int>> &Results, unsigned &RemainingVisits,
+    unsigned Depth = 0) {
   if (RemainingVisits == 0)
     return std::nullopt;
   --RemainingVisits;
@@ -670,22 +674,23 @@ classQueryForMirror(Value *Mirror, ClassQueryKind Kind,
   Results.try_emplace(Mirror, std::nullopt);
   std::optional<int> Result;
   if (std::optional<int> OopId = lookupConstOop(Mirror, ConstOops)) {
-    Result = classQueryForConstantMirror(*OopId, Kind, CB);
+    Result = classQueryForConstantMirror(*OopId, Kind, CB, VMC);
   } else if (auto *SI = dyn_cast<SelectInst>(Mirror)) {
     std::optional<int> True =
-        classQueryForMirror(SI->getTrueValue(), Kind, CB, ConstOops, Results,
-                            RemainingVisits, Depth + 1);
+        classQueryForMirror(SI->getTrueValue(), Kind, CB, VMC, ConstOops,
+                            Results, RemainingVisits, Depth + 1);
     if (True) {
       std::optional<int> False =
-          classQueryForMirror(SI->getFalseValue(), Kind, CB, ConstOops, Results,
-                              RemainingVisits, Depth + 1);
+          classQueryForMirror(SI->getFalseValue(), Kind, CB, VMC, ConstOops,
+                              Results, RemainingVisits, Depth + 1);
       if (False && *True == *False)
         Result = *True;
     }
   } else if (auto *PN = dyn_cast<PHINode>(Mirror)) {
     for (Value *Incoming : PN->incoming_values()) {
-      std::optional<int> Next = classQueryForMirror(
-          Incoming, Kind, CB, ConstOops, Results, RemainingVisits, Depth + 1);
+      std::optional<int> Next =
+          classQueryForMirror(Incoming, Kind, CB, VMC, ConstOops, Results,
+                              RemainingVisits, Depth + 1);
       if (!Next || (Result && *Result != *Next)) {
         Result = std::nullopt;
         break;
@@ -700,6 +705,7 @@ classQueryForMirror(Value *Mirror, ClassQueryKind Kind,
 
 bool foldClassQueryCall(CallInst *CI, ClassQueryKind Kind,
                         const jeandle::VMCallbacks &CB,
+                        const jeandle::VMConstants &VMC,
                         const DenseMap<Value *, int> &ConstOops) {
   if (!CI->getType()->isIntegerTy(32) || !CB.GetMirrorKlass ||
       (Kind == ClassQueryKind::IsArray && !CB.GetKlassLayoutHelper) ||
@@ -712,7 +718,7 @@ bool foldClassQueryCall(CallInst *CI, ClassQueryKind Kind,
   DenseMap<Value *, std::optional<int>> Results;
   unsigned RemainingVisits = 256;
   std::optional<int> Result = classQueryForMirror(
-      CI->getArgOperand(0), Kind, CB, ConstOops, Results, RemainingVisits);
+      CI->getArgOperand(0), Kind, CB, VMC, ConstOops, Results, RemainingVisits);
   if (!Result)
     return false;
 
@@ -958,6 +964,10 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
   const jeandle::VMCallbacks *CB = jeandle::getVMCallbacks();
   assert(CB && CB->GetConstantField && "VMCallbacks must be set");
 
+  // The runtime-defined flag globals keep a constant initializer for the
+  // whole compilation, so read them back once instead of per folding round.
+  const jeandle::VMConstants VMC = jeandle::VMConstants::fromModule(*M);
+
   const DataLayout &DL = M->getDataLayout();
 
   constexpr unsigned MaxRounds = 64;
@@ -1060,7 +1070,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (auto [CI, Kind] : ClassQueryCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldClassQueryCall(CI, Kind, *CB, ConstOops)) {
+      if (foldClassQueryCall(CI, Kind, *CB, VMC, ConstOops)) {
         RoundChanged = true;
         Changed = true;
       }

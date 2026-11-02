@@ -113,6 +113,19 @@ struct VMConstants {
   int64_t ArrayOperationPartialInlineSize = 0;
   int64_t ArrayCopyLoadStoreMaxElem = 8;
 
+  // JVM access flag bits from HotSpot's accessFlags.hpp. The template's
+  // class_* JavaOps test them through the runtime-defined globals, and
+  // ConstantFieldFolding composes the primitive-mirror modifier default
+  // (JVM_ACC_PUBLIC | JVM_ACC_FINAL | JVM_ACC_ABSTRACT, what
+  // java.lang.Class.getModifiers returns for primitive mirrors) from them.
+  // Defaults mirror a stock 64-bit build so standalone opt-based lit tests
+  // keep working.
+  int64_t JvmAccPublic = 0x0001;
+  int64_t JvmAccFinal = 0x0010;
+  int64_t JvmAccAbstract = 0x0400;
+  int64_t JvmAccInterface = 0x0200;
+  int64_t JvmAccIsHiddenClass = 0x04000000;
+
   // Convenience accessors.
   int64_t arrayLengthOffset() const { return ArrayLengthOffset; }
   int64_t klassOffset() const { return KlassOffset; }
@@ -125,6 +138,11 @@ struct VMConstants {
   int64_t arrayCopyLoadStoreMaxElem() const {
     return ArrayCopyLoadStoreMaxElem;
   }
+  int64_t jvmAccPublic() const { return JvmAccPublic; }
+  int64_t jvmAccFinal() const { return JvmAccFinal; }
+  int64_t jvmAccAbstract() const { return JvmAccAbstract; }
+  int64_t jvmAccInterface() const { return JvmAccInterface; }
+  int64_t jvmAccIsHiddenClass() const { return JvmAccIsHiddenClass; }
   bool reduceBulkZeroing() const { return ReduceBulkZeroing; }
   bool reduceInitialCardMarks() const { return ReduceInitialCardMarks; }
 
