@@ -47,9 +47,6 @@ ALWAYS_ENABLED_STATISTIC(TotalDefinedInsertions, "Java type definedness cache in
 ALWAYS_ENABLED_STATISTIC(TotalDefinedRemoved, "Java type definedness entries invalidated");
 ALWAYS_ENABLED_STATISTIC(TotalDefinedRetained, "Java type definedness entries retained");
 ALWAYS_ENABLED_STATISTIC(TotalDefinedSlotsScanned, "Java type invalidation definedness slots scanned");
-ALWAYS_ENABLED_STATISTIC(TotalFinalValidations, "Java type final cache revalidations");
-ALWAYS_ENABLED_STATISTIC(TotalFinalValidationFailures, "Java type final cache revalidation failures");
-ALWAYS_ENABLED_STATISTIC(TotalFinalBypasses, "Java type final cache bypasses");
 ALWAYS_ENABLED_STATISTIC(TotalGuardHits, "Java type guard edge cache hits");
 ALWAYS_ENABLED_STATISTIC(TotalGuardMisses, "Java type guard edge computations");
 ALWAYS_ENABLED_STATISTIC(TotalNullHits, "Java type null edge cache hits");
@@ -161,13 +158,6 @@ void JavaTypeStatsAnalysis::Result::onQuery(const JavaTypeQueryEvent &Event) {
   Stats.NullMisses += Event.NullMisses;
   TotalNullMisses += Event.NullMisses;
 
-  Stats.FinalValidations += Event.FinalValidations;
-  TotalFinalValidations += Event.FinalValidations;
-  Stats.FinalValidationFailures += Event.FinalValidationFailures;
-  TotalFinalValidationFailures += Event.FinalValidationFailures;
-  Stats.FinalBypasses += Event.FinalBypasses;
-  TotalFinalBypasses += Event.FinalBypasses;
-
   Stats.BaseInsertions += Event.BaseInsertions;
   TotalBaseInsertions += Event.BaseInsertions;
 
@@ -278,9 +268,6 @@ void JavaTypeStatsAnalysis::Result::print(raw_ostream &OS) const {
   OS << "  final type hit rate: ";
   printRate(OS, Stats.FinalHits, Stats.FinalMisses);
   OS << '\n';
-  OS << "  final validations: " << Stats.FinalValidations << '\n';
-  OS << "  final validation failures: " << Stats.FinalValidationFailures << '\n';
-  OS << "  final bypasses: " << Stats.FinalBypasses << '\n';
   OS << "  base query hits: " << Stats.BaseHits << '\n';
   OS << "  base query misses: " << Stats.BaseMisses << '\n';
   OS << "  base query hit rate: ";
@@ -372,9 +359,6 @@ JavaTypeAnalysisSummaryPrinterPass::run(Module &M, ModuleAnalysisManager &) {
   OS << "  null edge computations: " << TotalNullMisses.getValue() << '\n';
   OS << "  final type hits: " << TotalFinalHits.getValue() << '\n';
   OS << "  final type misses: " << TotalFinalMisses.getValue() << '\n';
-  OS << "  final validations: " << TotalFinalValidations.getValue() << '\n';
-  OS << "  final validation failures: " << TotalFinalValidationFailures.getValue() << '\n';
-  OS << "  final bypasses: " << TotalFinalBypasses.getValue() << '\n';
   OS << "  base query hits: " << TotalBaseHits.getValue() << '\n';
   OS << "  base query misses: " << TotalBaseMisses.getValue() << '\n';
   OS << "  defined hits: " << TotalDefinedHits.getValue() << '\n';

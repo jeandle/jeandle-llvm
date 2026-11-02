@@ -44,9 +44,6 @@ struct JavaTypeQueryEvent {
   uint64_t GuardMisses = 0;
   uint64_t NullHits = 0;
   uint64_t NullMisses = 0;
-  uint64_t FinalValidations = 0;
-  uint64_t FinalValidationFailures = 0;
-  uint64_t FinalBypasses = 0;
   uint64_t ElapsedNanoseconds = 0;
   size_t BaseEntries = 0;
   size_t DefinedEntries = 0;

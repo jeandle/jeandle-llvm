@@ -61,9 +61,6 @@ struct JavaTypeQueryStats {
   uint64_t GuardMisses = 0;
   uint64_t NullHits = 0;
   uint64_t NullMisses = 0;
-  uint64_t FinalValidations = 0;
-  uint64_t FinalValidationFailures = 0;
-  uint64_t FinalBypasses = 0;
   uint64_t Bypasses = 0;
   uint64_t Clears = 0;
   uint64_t Invalidations = 0;

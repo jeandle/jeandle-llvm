@@ -158,10 +158,6 @@ JavaType JavaTypeAnalysisResult::getJavaType(Value *V, Instruction *Context) {
   Event.GuardMisses = Facts.GuardComputed - OldFacts.GuardComputed;
   Event.NullHits = Facts.NullHits - OldFacts.NullHits;
   Event.NullMisses = Facts.NullComputed - OldFacts.NullComputed;
-  Event.FinalValidations = Final.Validations - OldFinal.Validations;
-  Event.FinalValidationFailures =
-      Final.ValidationFailures - OldFinal.ValidationFailures;
-  Event.FinalBypasses = Final.Bypasses - OldFinal.Bypasses;
   Event.QueryValue = V;
   Event.Context = ContextBB;
   Event.BaseInsertions = Base.EntriesAdded - OldBase.EntriesAdded;
@@ -218,8 +214,8 @@ void JavaTypeAnalysisResult::invalidateImpl(ArrayRef<Value *> Changed,
             : JavaTypeBaseInvalidationMode::SelectiveKeys);
   }
   // Even an unrelated instruction edit can change LVI's bounded reasoning.
-  // Drop its old results before mutation. Final entries retained by the cache
-  // must revalidate their observed null-edge answers before reuse.
+  // Drop its old results before mutation; Facts and Final have also been
+  // cleared, so no result depending on the old oracle state is retained.
   LVI.clear();
   if (!Observer)
     return;

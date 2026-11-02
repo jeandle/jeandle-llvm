@@ -663,7 +663,7 @@ namespace {
 /// for the lifetime of one query and safely memoized here.
 ///
 /// This V2-local context borrows the caller-owned caches. Block/value memos,
-/// recursion state, observations for a new Final entry and budgets stay local.
+/// recursion state and budgets stay local.
 struct JavaTypeQueryContext {
   JavaTypeQueryContext(DominatorTree &DT, IsNullEdgeOracle NullOracle,
                        JavaTypeCacheV2 &Cache)
@@ -677,7 +677,6 @@ struct JavaTypeQueryContext {
   /// cycles with their own SCC state and do not use this set.
   SmallPtrSet<const PHINode *, 8> PhiVisited;
   JavaTypeCacheV2 &Cache;
-  SmallVector<JavaTypeFinalCacheV2::NullObservation, 16> NullEdges;
   /// Completed value-dimension results. Nested PHIs can depend on the active
   /// PHI stack, so only evaluations outside that stack enter this cache.
   DenseMap<Value *, JavaType> ValueTypes;
@@ -767,14 +766,9 @@ static bool isNullEdge(Value *V, BasicBlock *From, BasicBlock *To,
   auto &C = Q.Cache.Facts;
   assert(C.getFunction() == From->getParent() &&
          C.getFunction() == To->getParent() && "wrong facts cache owner");
-  auto Remember = [&](bool Result) {
-    if (Q.Cache.finalEnabled())
-      Q.NullEdges.push_back({V, From, To, Result});
-    return Result;
-  };
   if (C.getMode() == JavaTypeFactsCacheV2::Mode::GuardOnly) {
     C.recordNull(false);
-    return Remember(computeNullEdge(V, From, To, Q));
+    return computeNullEdge(V, From, To, Q);
   }
 
   // Keep the actual helper argument, including when PHI incoming values have
@@ -783,13 +777,13 @@ static bool isNullEdge(Value *V, BasicBlock *From, BasicBlock *To,
   auto &Memo = C.nullStorage();
   if (auto It = Memo.find(K); It != Memo.end()) {
     C.recordNull(true);
-    return Remember(It->second);
+    return It->second;
   }
   C.recordNull(false);
   bool Result = computeNullEdge(V, From, To, Q);
   if (Memo.try_emplace(K, Result).second)
     C.recordInsertion();
-  return Remember(Result);
+  return Result;
 }
 
 // Condition tracing: trace from a branch condition to a check_instanceof call
@@ -1993,33 +1987,16 @@ JavaType jeandle::getCachedJavaTypeV2(Value *V, DominatorTree *DT,
     return getBaseJavaType(V, Cache.Base, Cache.Defined);
   }
 
-  JavaTypeQueryContext Q{*DT, IsNullEdge, Cache};
   BasicBlock *BB = Context->getParent();
   if (Cache.finalEnabled()) {
-    if (auto *Entry = Cache.Final.lookup(V, BB)) {
-      bool Valid = true;
-      if (Entry->NeedsValidation) {
-        // IR dependencies have survived selective invalidation, but an oracle
-        // reset can change precision. Recheck exactly the null-edge decisions
-        // used by this top-level query before reusing its final result.
-        for (const auto &Observation : Entry->NullEdges)
-          if (computeNullEdge(Observation.V, Observation.From, Observation.To,
-                              Q) != Observation.Result) {
-            Valid = false;
-            break;
-          }
-        Cache.Final.recordValidation(Valid);
-      }
-      if (Valid) {
-        Entry->NeedsValidation = false;
-        Cache.Final.recordHit();
-        return Entry->Type;
-      }
-      Cache.Final.erase(V, BB);
+    if (auto *Type = Cache.Final.lookup(V, BB)) {
+      Cache.Final.recordHit();
+      return *Type;
     }
     Cache.Final.recordMiss();
   }
 
+  JavaTypeQueryContext Q{*DT, IsNullEdge, Cache};
   Cache.Base.beginQuery();
   auto Finish = make_scope_exit([&] { Cache.Base.endQuery(); });
   JavaType T = valueDimension(V, Q);
@@ -2027,6 +2004,6 @@ JavaType jeandle::getCachedJavaTypeV2(Value *V, DominatorTree *DT,
   // This is the only publication/read point for Final. Never replace a
   // recursive valueDimension/factsAt evaluation with a top-level result.
   if (Cache.finalEnabled())
-    Cache.Final.insert(V, BB, Result, Q.NullEdges);
+    Cache.Final.insert(V, BB, Result);
   return Result;
 }

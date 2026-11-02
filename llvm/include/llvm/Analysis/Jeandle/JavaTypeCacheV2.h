@@ -10,7 +10,6 @@
 #define LLVM_ANALYSIS_JEANDLE_JAVATYPECACHEV2_H
 
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/Jeandle/CachedJavaType.h"
@@ -178,61 +177,34 @@ public:
 
 /// A completed top-level query only, keyed by value and context block. Query
 /// budgets limit solving work, not reuse of a valid result. Recursive facts/value
-/// results never enter this cache. Dependencies cover a
-/// conservative region independently of the warm state of the other caches.
-/// Null observations are retained in call order. After an oracle notification,
-/// they must be revalidated before reusing the result.
+/// results never enter this cache. IR and oracle notifications clear the entire
+/// table, so publication needs no dependency tracking or later revalidation.
 class LLVM_ABI JavaTypeFinalCacheV2 {
 public:
   using Key = std::pair<Value *, BasicBlock *>;
-  struct NullObservation {
-    Value *V;
-    BasicBlock *From;
-    BasicBlock *To;
-    bool Result;
-  };
-  struct Entry {
-    JavaType Type;
-    SmallVector<NullObservation, 8> NullEdges;
-    bool NeedsValidation = false;
-    SmallVector<Value *, 8> Values;
-    SmallVector<BasicBlock *, 8> Blocks;
-  };
-  struct Stats : JavaTypeCacheV2Stats {
-    uint64_t Validations = 0;
-    uint64_t ValidationFailures = 0;
-    uint64_t Bypasses = 0;
-  };
+  using Stats = JavaTypeCacheV2Stats;
 
 private:
   friend class JavaTypeCacheV2;
-  DenseMap<Key, Entry> Memo;
-  DenseMap<Value *, DenseSet<Key>> ByValue;
-  DenseMap<BasicBlock *, DenseSet<Key>> ByBlock;
+  DenseMap<Key, JavaType> Memo;
+
   Stats Counters;
   bool StatsEnabled = false;
 
-  void erase(Key K);
-
 public:
   size_t size() const { return Memo.size(); }
+
   const Stats &getStats() const { return Counters; }
   void resetStats() { Counters = {}; }
   void setStatsEnabled(bool Enabled) { StatsEnabled = Enabled; }
-  Entry *lookup(Value *V, BasicBlock *BB);
-  bool insert(Value *V, BasicBlock *BB, const JavaType &Type,
-              ArrayRef<NullObservation> Observations);
-  void erase(Value *V, BasicBlock *BB) { erase(Key{V, BB}); }
   void recordHit();
   void recordMiss();
-  void recordValidation();
-  void recordValidation(bool Success);
-  void recordValidationFailure();
-  void recordBypass();
+
+  JavaType *lookup(Value *V, BasicBlock *BB);
+  bool insert(Value *V, BasicBlock *BB, const JavaType &Type);
   void clear();
   void notifyOracleChanged();
-  size_t invalidate(ArrayRef<Value *> Affected,
-                    ArrayRef<BasicBlock *> AffectedBlocks, bool CFGChanged);
+  size_t invalidate();
 };
 
 /// Function-owned aggregate; each kind of cache keeps its own memo, counters

@@ -14,7 +14,7 @@
 | `Base` / `JavaTypeBaseCacheV2` | `Value* → JavaType` 的基础类型结果 | 相同 IR、VM 类型环境；修改后可保留不受影响的值 |
 | `Defined` / `JavaTypeDefinedCacheV2` | `Value* → bool` 的完成 definedness 证明 | 同上；`false` 表示未能证明 defined |
 | `Facts` / `JavaTypeFactsCacheV2` | `(V, From, To)` 的根 guard 和完整 null-edge 判断 | 本次有效期内跨查询复用；IR 修改后清空 |
-| `Final` / `JavaTypeFinalCacheV2` | `(V, ContextBB)` 的完整顶层查询结果 | 依赖未变，且所需 oracle 判断仍有效 |
+| `Final` / `JavaTypeFinalCacheV2` | `(V, ContextBB)` 的完整顶层查询结果 | 通知之间复用；IR 修改或 oracle 维护后整体清空 |
 
 最外层只传入一个缓存引用：
 
@@ -41,7 +41,8 @@ Facts 计数衡量 helper 请求/计算，不能直接解释为 LVI 内部求解
 ## Base 与 Defined：共享修改前的 users 闭包
 
 聚合类在 IR 修改前，从通知的值出发收集完整旧 SSA users 闭包，
-再分别调用 Base、Defined 和 Final 的失效方法。遍历不因值不是指针、
+供 Base、Defined 选择性失效；Facts 和 Final 无需闭包，直接整体清空。
+遍历不因值不是指针、
 或值没有缓存条目而停止；整数条件和 poison 相关 flag 修改也会传播。
 Base 为空时仍处理 Defined。
 
@@ -67,34 +68,28 @@ Defined 的冻结结果等是否为叶子，按其自身证明规则判断。
 才启用 null 表和 Final。IR 修改时 Facts 整体清空。只维护/重置 oracle、
 IR 不变时，也必须调用聚合类 `notifyOracleChanged()`。
 
-## Final：独立依赖区域、反向索引与重验证
+## Final：轻量结果表，通知时整体清空
 
-Final 发布时单独收集依赖，不能依赖本次实际的 memo miss：
-Base / Defined / Facts 已热时，miss 轨迹会漏掉依赖。
+保留 V2 的独立 Final 类、外部持有方式和统计开关，内部沿用 V1 的
+`DenseMap<(Value*, ContextBB*), JavaType>` 结果表。只有完整顶层查询读写
+Final；递归求解继续使用 V2 当前算法，不引入 V1 的递归 Final 复用。
+命中直接返回结果，未命中完成求解后插入，插入不再遍历操作数或 CFG
+前驱来收集依赖，也不维护 `ByValue` / `ByBlock` 反向索引。
 
-依赖包含查询值和本次所有 null 判断值的传递操作数、定义块、PHI 入边块、
-Context 块、null 判断的 From / To，以及这些块的完整 CFG 前驱闭包。
-块依赖覆盖块内所有指令，也覆盖当前不存在有效 guard、LVI 隐式扫描
-同块指令等情况。修改点的旧 users 闭包把区域外的 SSA 修改传播到区域内。
-不进入全局变量初始值或被调函数体；这类非局部变化要求全清。
+任意 IR 修改通知都整体清空 Final，包括普通指令修改和 CFG 结构修改。
+`notifyOracleChanged()` 同样清空 Final 与 Facts。Final 不再保存 null-edge
+观察或待验证标记，也不在命中时调用 oracle 重验证。Base / Defined 的
+选择性失效和 Facts 的现有策略保持不变。
 
-`ByValue` 和 `ByBlock` 是依赖到 Final 键的反向索引。普通修改只删除
-与受影响值/块相交的 Final 条目，无关分支可以保留。依赖超过
-4096 个值/块或 16384 条边时，只放弃发布这个 Final 条目，查询照常返回。
-CFG 结构变化可能引入旧区域外的新前驱，当前通知协议无法完整描述新拓扑，
-因此 CFG 修改保守清空 Final。
+这是轻量存储与保守失效的取舍：减少每次发布结果的依赖收集、索引写入
+和观察记录，代价是不能跨修改保留无关 Final 项。相同有效期内仍可跨
+查询、跨正确保留分析的 pass 复用。该实现不复制 V1 根据修改种类决定
+保留部分上下文项的规则，因为 V2 的修改通知同时清理 LVI；移除重验证
+后整体丢弃 Final，避免复用依赖旧 oracle 状态的结果。
 
-每个 Final 条目还按调用顺序保存完整 `isNullEdge` 决策，包括从 Facts
-命中的决策。IR 修改通知会将幸存条目标记为需要重验证；单独的 oracle
-维护通知也如此。下次命中时绕过 Facts 表重新计算这些 null 判断：
-
-- 全部相同：复用 Final，并清除重验证标记。
-- 任一不同：删除 Final，按原查询算法重新计算。
-
-这是为了处理 LVI 清理/维护后的精度变化。一个结果的 IR 依赖未变，
-不等于 LVI 在不同缓存状态下必然给出相同判断。重验证失败统计与
-普通 Final miss 分开记录。当前仍需遍历幸存 Final 标记重验证，
-并非失效成本完全与幸存条目数量无关。
+Final 只记录共性的命中、未命中、插入、删除、失效和清空计数，不再
+提供重验证、验证失败或依赖收集超限旁路计数。失效返回被清除的项数；
+不再扫描幸存项标记验证，因此 `FinalTypesSlotsScanned` 不再增加。
 
 ## Analysis、PassManager 与调用方职责
 
@@ -109,7 +104,8 @@ DT 仍由调用方在下一次查询前更新。完整 `clear()` 清四类缓存
 普通 IR API 不会自动调用 JavaType 的失效方法。这里有两种不同入口：
 
 1. `Result.invalidate(Changed)`：pass 主动调用，在修改前读取旧依赖图，
-   选择性处理缓存。修改后在同一 pass 内再次查询需要这条路径。
+   选择性处理 Base / Defined，整体清空 Facts / Final。修改后在同一
+   pass 内再次查询需要这条路径。
 2. `Result.invalidate(F, PA, Inv)`：PassManager 在 pass 返回后，依据
    `PreservedAnalyses` 判断整个分析结果是否应丢弃；JavaType、DT 或 LVI
    未被有效保留时，Result 失效。该回调不会从 IR 自动推导修改集。
@@ -136,30 +132,34 @@ Result.invalidate(Changed);
 
 ## 验证与限制
 
-四类缓存的语义回归覆盖 Defined 正/负证明复用及失效、Base 为空时的
-Defined 处理、Final 跨预算复用同一条目和顶层发布、热子缓存下的依赖、无关分支
-保留、oracle 维护重验证、真实 LVI 的 assume 修改和 Analysis 生命周期。
-原版 JavaType、原版结构 CSV、直接 V1 实现保持不变。
+本次调整需要验证 Final 在相同有效期内命中、不同上下文分别缓存、
+普通修改与 CFG 修改后清空、oracle 维护后清空，以及修改后冷重算与
+原版完整结果一致。原有依赖索引、选择性保留、重验证和依赖超限旁路
+测试应改为覆盖新的失效契约。Base / Defined / Facts 及 Analysis
+生命周期的回归继续保留。原版 JavaType、原版结构 CSV 和直接 V1 实现
+保持不变。
 
-验证结果：
+历史基线（调整前的依赖索引版本，并非本次验证结果）：
+
+- `JavaTypeQueryTests` 共 83 项，82 项通过；V2 的 36 项全部通过。
+  唯一失败是既有直接 V1 `JavaTypeQueryTest.CachedEntryNormalizesFreeze`。
+- `llvm/test/Jeandle` 的 lit 回归：807 项，782 通过、25 unsupported，
+  0 失败。
+- 历史原版对照测试观察到 LVI 清理或预热能改变查询精度。这一行为仍
+  是 oracle 维护后丢弃 Facts / Final 的原因，但当前不再通过重验证处理。
+
+本次轻量 Final 验证（2026-11-02）：
 
 - `cmake --build build/build-ninja-release --target JavaTypeQueryTests opt -j 2`
   构建通过。
-- `JavaTypeQueryTests` 共 83 项，82 项通过；其中 V2 的 36 项全部通过，
-  包含本次新增 9 项。唯一失败是既有直接 V1
-  `JavaTypeQueryTest.CachedEntryNormalizesFreeze`，其测试及 V1 实现未改动。
-- 全 `llvm/test/Jeandle` 的 lit 回归：807 项，782 通过、25 unsupported、
-  0 失败。统计断言更新为边 Facts 双表计数及 Final 选择性保留行为。
-- 真实 LVI 测试在同一 IR 上观察到冷查询 unknown，清理并分段预热后
-  为 klass 9，再次清理后回到 unknown；Final 两次重验证失败均触发重算。
-- Final 的 4100 值依赖测试只旁路该条目的发布，原版与 V2 查询结果相同，
-  已有无关 Final 仍可命中。
-- 以任务开始时 `e2d4a5a43` 及文件 SHA256 为基线审计。原版两文件、
-  原版 CSV、V1 两文件和直接 V1 freeze 测试均未改动。
-  `factsAt`、`phiValueType`、`computeEdgeGuard`、`computeNullEdge` 等
-  12 个核心辅助函数体与任务基线逐字相同；Base/Defined 求解改动为
-  缓存借用及统计接入，保留原求解与传播算法。
+- `JavaTypeQueryTests` 共 84 项，83 项通过；V2 的 37 项全部通过。
+  唯一失败仍是既有直接 V1 `JavaTypeQueryTest.CachedEntryNormalizesFreeze`。
+- `llvm/test/Jeandle` 的 lit 回归共 808 项，783 通过、25 unsupported，
+  0 失败。TCE 的统计断言已同步为修改后清空全部 Final 项。
+- 原版 JavaType 两文件、直接 V1 两文件和原版结构 CSV 与任务起点
+  `79258fc1a` 一致；Cached CSV 保持四列。
 
-这里不宣称性能提升：Final 依赖
-收集、反向索引、重验证及 Analysis 的 LVI 清理都有成本，需要真实负载
-分阶段测量；目前也没有增加全局容量上限或基于访问频次的逐出机制。
+这里不宣称性能提升；应比较原版、依赖索引版本、关闭 Final 的 V2 和
+轻量 Final 的 V2，并在相同求解器、Base / Defined / Facts 配置下测量
+总耗时和修改后的重算成本。
+当前没有增加全局容量上限或基于访问频次的逐出机制。

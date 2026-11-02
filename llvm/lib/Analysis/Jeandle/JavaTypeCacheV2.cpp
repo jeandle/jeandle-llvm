@@ -7,7 +7,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Analysis/Jeandle/JavaTypeCacheV2.h"
-#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
@@ -40,72 +39,6 @@ size_t invalidateValues(MapT &Memo, ArrayRef<Value *> Affected,
     }
   }
   return OldSize - Memo.size();
-}
-
-/// This is a conservative dependency region, not a second JavaType solver.
-/// Start from the query and all observed oracle values, walk their operand
-/// graphs, then close every definition/context/oracle block over predecessors.
-/// Blocks represent *all* their instructions, including negative guards and
-/// instructions read implicitly by LVI. Invalidation expands changed values
-/// through users, so an operand defined outside this region still reaches its
-/// dependent instruction's block. No warm memo can hide this dependency walk.
-bool collectFinalDependencies(Value *V, BasicBlock *BB,
-                              ArrayRef<JavaTypeFinalCacheV2::NullObservation> Obs,
-                              JavaTypeFinalCacheV2::Entry &Entry) {
-  SmallPtrSet<Value *, 32> Values;
-  SmallPtrSet<BasicBlock *, 32> Blocks;
-  SmallVector<Value *, 32> ValueWork{V};
-  SmallVector<BasicBlock *, 32> BlockWork;
-  if (BB)
-    BlockWork.push_back(BB);
-  for (const auto &O : Obs) {
-    ValueWork.push_back(O.V);
-    BlockWork.push_back(O.From);
-    BlockWork.push_back(O.To);
-  }
-  unsigned Edges = 0;
-  while (!ValueWork.empty()) {
-    Value *Current = ValueWork.pop_back_val();
-    if (!Current || !Values.insert(Current).second)
-      continue;
-    if (Values.size() > MaxDependencyValues)
-      return false;
-    Entry.Values.push_back(Current);
-    if (auto *I = dyn_cast<Instruction>(Current)) {
-      BlockWork.push_back(I->getParent());
-      if (auto *PN = dyn_cast<PHINode>(I))
-        for (BasicBlock *Incoming : PN->blocks()) {
-          if (++Edges > MaxDependencyEdges)
-            return false;
-          BlockWork.push_back(Incoming);
-        }
-    }
-    // Do not traverse into a callee/global initializer or follow terminator
-    // successor operands. Nonlocal mutations require aggregate clear().
-    if (isa<GlobalValue>(Current))
-      continue;
-    if (auto *U = dyn_cast<User>(Current))
-      for (Value *Operand : U->operands()) {
-        if (++Edges > MaxDependencyEdges)
-          return false;
-        if (!isa<BasicBlock>(Operand))
-          ValueWork.push_back(Operand);
-      }
-  }
-  while (!BlockWork.empty()) {
-    BasicBlock *Current = BlockWork.pop_back_val();
-    if (!Current || !Blocks.insert(Current).second)
-      continue;
-    if (Values.size() + Blocks.size() > MaxDependencyValues)
-      return false;
-    Entry.Blocks.push_back(Current);
-    for (BasicBlock *Pred : predecessors(Current)) {
-      if (++Edges > MaxDependencyEdges)
-        return false;
-      BlockWork.push_back(Pred);
-    }
-  }
-  return true;
 }
 
 } // namespace
@@ -340,54 +273,16 @@ size_t JavaTypeFactsCacheV2::invalidate() {
   return Removed;
 }
 
-JavaTypeFinalCacheV2::Entry *
-JavaTypeFinalCacheV2::lookup(Value *V, BasicBlock *BB) {
+JavaType *JavaTypeFinalCacheV2::lookup(Value *V, BasicBlock *BB) {
   auto It = Memo.find(Key{V, BB});
   return It == Memo.end() ? nullptr : &It->second;
 }
 
-bool JavaTypeFinalCacheV2::insert(Value *V, BasicBlock *BB, const JavaType &Type,
-                                ArrayRef<NullObservation> Observations) {
-  Entry NewEntry;
-  NewEntry.Type = Type;
-  NewEntry.NullEdges.append(Observations.begin(), Observations.end());
-  if (!collectFinalDependencies(V, BB, Observations, NewEntry)) {
-    recordBypass();
-    return false;
-  }
-  Key K{V, BB};
-  erase(K);
-  for (Value *Dependency : NewEntry.Values)
-    ByValue[Dependency].insert(K);
-  for (BasicBlock *Dependency : NewEntry.Blocks)
-    ByBlock[Dependency].insert(K);
-  Memo.try_emplace(K, std::move(NewEntry));
-  if (StatsEnabled)
+bool JavaTypeFinalCacheV2::insert(Value *V, BasicBlock *BB, const JavaType &Type) {
+  bool Inserted = Memo.try_emplace(Key{V, BB}, Type).second;
+  if (Inserted && StatsEnabled)
     ++Counters.EntriesAdded;
-  return true;
-}
-
-void JavaTypeFinalCacheV2::erase(Key K) {
-  auto It = Memo.find(K);
-  if (It == Memo.end())
-    return;
-  for (Value *V : It->second.Values) {
-    auto Index = ByValue.find(V);
-    assert(Index != ByValue.end() && "missing final value dependency");
-    Index->second.erase(K);
-    if (Index->second.empty())
-      ByValue.erase(Index);
-  }
-  for (BasicBlock *BB : It->second.Blocks) {
-    auto Index = ByBlock.find(BB);
-    assert(Index != ByBlock.end() && "missing final block dependency");
-    Index->second.erase(K);
-    if (Index->second.empty())
-      ByBlock.erase(Index);
-  }
-  Memo.erase(It);
-  if (StatsEnabled)
-    ++Counters.EntriesRemoved;
+  return Inserted;
 }
 
 void JavaTypeFinalCacheV2::recordHit() {
@@ -400,67 +295,24 @@ void JavaTypeFinalCacheV2::recordMiss() {
     ++Counters.Misses;
 }
 
-void JavaTypeFinalCacheV2::recordValidation() {
-  if (StatsEnabled)
-    ++Counters.Validations;
-}
-
-void JavaTypeFinalCacheV2::recordValidationFailure() {
-  if (StatsEnabled)
-    ++Counters.ValidationFailures;
-}
-
-void JavaTypeFinalCacheV2::recordValidation(bool Success) {
-  recordValidation();
-  if (!Success)
-    recordValidationFailure();
-}
-
-void JavaTypeFinalCacheV2::recordBypass() {
-  if (StatsEnabled)
-    ++Counters.Bypasses;
-}
-
 void JavaTypeFinalCacheV2::clear() {
   if (StatsEnabled) {
     ++Counters.Clears;
     Counters.EntriesRemoved += Memo.size();
   }
   Memo.clear();
-  ByValue.clear();
-  ByBlock.clear();
 }
 
 void JavaTypeFinalCacheV2::notifyOracleChanged() {
-  for (auto &E : Memo)
-    E.second.NeedsValidation |= !E.second.NullEdges.empty();
+  invalidate();
 }
 
-size_t JavaTypeFinalCacheV2::invalidate(
-    ArrayRef<Value *> Affected, ArrayRef<BasicBlock *> AffectedBlocks,
-    bool CFGChanged) {
-  size_t OldSize = Memo.size();
+size_t JavaTypeFinalCacheV2::invalidate() {
+  size_t Removed = Memo.size();
   if (StatsEnabled)
     ++Counters.Invalidations;
-  if (CFGChanged) {
-    // A source-only pre-mutation notification cannot identify a newly added
-    // destination that was outside every previously recorded region.
-    clear();
-    return OldSize;
-  }
-  DenseSet<Key> Removed;
-  for (Value *V : Affected)
-    if (auto It = ByValue.find(V); It != ByValue.end())
-      Removed.insert(It->second.begin(), It->second.end());
-  for (BasicBlock *BB : AffectedBlocks)
-    if (auto It = ByBlock.find(BB); It != ByBlock.end())
-      Removed.insert(It->second.begin(), It->second.end());
-  for (Key K : Removed)
-    erase(K);
-  // The owner may maintain/clear LVI after this notification. Unaffected IR
-  // dependencies survive, but their null decisions must be checked again.
-  notifyOracleChanged();
-  return OldSize - Memo.size();
+  clear();
+  return Removed;
 }
 
 void JavaTypeCacheV2::bind(Function &F) {
@@ -504,14 +356,8 @@ JavaTypeCacheV2::invalidate(ArrayRef<Value *> Changed, bool CFGChanged,
   size_t OldFacts = Facts.size();
   size_t OldFinal = Final.size();
   SmallPtrSet<Value *, 32> Seen;
-  SmallPtrSet<BasicBlock *, 32> SeenBlocks;
   SmallVector<Value *, 32> Affected;
-  SmallVector<BasicBlock *, 16> Blocks;
   SmallVector<Value *, 32> Pending(Changed.begin(), Changed.end());
-  auto AddBlock = [&](BasicBlock *BB) {
-    if (SeenBlocks.insert(BB).second)
-      Blocks.push_back(BB);
-  };
   while (!Pending.empty()) {
     Value *V = Pending.pop_back_val();
     if (!V || !Seen.insert(V).second)
@@ -525,7 +371,6 @@ JavaTypeCacheV2::invalidate(ArrayRef<Value *> Changed, bool CFGChanged,
         Info.FullClear = true;
         break;
       }
-      AddBlock(BB);
       // Block notifications also cover values about to be erased with a
       // block. For insertion/movement this is conservative but keeps one
       // notification contract for both block contents and their users.
@@ -536,7 +381,6 @@ JavaTypeCacheV2::invalidate(ArrayRef<Value *> Changed, bool CFGChanged,
     Function *ValueOwner = nullptr;
     if (auto *I = dyn_cast<Instruction>(V)) {
       ValueOwner = I->getFunction();
-      AddBlock(I->getParent());
     } else if (auto *A = dyn_cast<Argument>(V)) {
       ValueOwner = A->getParent();
     } else {
@@ -579,8 +423,6 @@ JavaTypeCacheV2::invalidate(ArrayRef<Value *> Changed, bool CFGChanged,
   Info.DefinedRemoved = Defined.invalidate(Affected, CFGChanged, Mode,
                                            Info.DefinedSlotsScanned);
   Info.FactsRemoved = Facts.invalidate();
-  Info.FinalRemoved = Final.invalidate(Affected, Blocks, CFGChanged);
-  // The remaining entries were visited to mark oracle observations stale.
-  Info.FinalTypesSlotsScanned = CFGChanged ? 0 : Final.size();
+  Info.FinalRemoved = Final.invalidate();
   return Info;
 }

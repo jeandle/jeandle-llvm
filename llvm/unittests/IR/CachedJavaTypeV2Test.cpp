@@ -1437,7 +1437,7 @@ TEST_F(CachedJavaTypeV2Test, FinalReuseIgnoresBudgetAndOnlyPublishesTopLevelResu
   }
 }
 
-TEST_F(CachedJavaTypeV2Test, FinalDependenciesSurviveWarmSubcachesAndKeepOtherBranch) {
+TEST_F(CachedJavaTypeV2Test, FinalInvalidationClearsAllContextsWithWarmSubcaches) {
   auto M = parse(R"IR(
     declare i1 @jeandle.check_instanceof(ptr, ptr nonnull)
     define void @test(ptr noundef %obj, i1 %choose) {
@@ -1490,22 +1490,77 @@ TEST_F(CachedJavaTypeV2Test, FinalDependenciesSurviveWarmSubcachesAndKeepOtherBr
   auto *Check = cast<CallInst>(findV2BaseTestInstruction(F, "leftcheck"));
   auto Removed = Cache.invalidate({Check});
   EXPECT_FALSE(Removed.FullClear);
-  EXPECT_EQ(Removed.FinalRemoved, 1U);
-  EXPECT_EQ(Cache.finalTypesSize(), 1U);
+  EXPECT_EQ(Removed.FinalRemoved, 2U);
+  EXPECT_EQ(Removed.FinalTypesSlotsScanned, 0U);
+  EXPECT_EQ(Cache.finalTypesSize(), 0U);
   EXPECT_EQ(Cache.pathFactsSize(), 0U);
   Check->setArgOperand(
       0, ConstantExpr::getIntToPtr(ConstantInt::get(Type::getInt64Ty(Context), 22),
                                   PointerType::get(Context, 0)));
 
   uint64_t Hits = Cache.Final.getStats().Hits;
+  uint64_t Misses = Cache.Final.getStats().Misses;
+  // A modification clears every Final context, including the unchanged arm.
+  EXPECT_EQ(Query(Right), JavaType(22, false));
+  EXPECT_EQ(Query(Left), JavaType(22, false));
+  EXPECT_EQ(Cache.Final.getStats().Hits, Hits);
+  EXPECT_EQ(Cache.Final.getStats().Misses, Misses + 2);
   EXPECT_EQ(Query(Right), JavaType(22, false));
   EXPECT_EQ(Cache.Final.getStats().Hits, Hits + 1);
-  EXPECT_GT(Cache.Final.getStats().Validations, 0U);
-  EXPECT_EQ(Query(Left), JavaType(22, false));
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_F(CachedJavaTypeV2Test, FinalRevalidatesOracleAfterExplicitMaintenance) {
+TEST_F(CachedJavaTypeV2Test, FinalClearsForUnrelatedEditsAndCFGChanges) {
+  auto M = parse(R"IR(
+    define ptr @test(ptr noundef "java-klass"="9" %obj, i1 %choose, i32 %n) {
+    entry:
+      %sum = add i32 %n, 1
+      %wrapped = freeze ptr %obj
+      br i1 %choose, label %left, label %right
+    left:
+      ret ptr %wrapped
+    right:
+      ret ptr %wrapped
+    }
+  )IR");
+  ASSERT_NE(M, nullptr);
+  Function &F = *M->getFunction("test");
+  DominatorTree DT(F);
+  Instruction *Wrapped = findV2BaseTestInstruction(F, "wrapped");
+  Instruction *At = findV2FactsTestBlock(F, "left")->getTerminator();
+  auto *Sum = findV2BaseTestInstruction(F, "sum");
+  auto *Branch = cast<BranchInst>(F.front().getTerminator());
+  for (bool CFGChanged : {false, true}) {
+    SCOPED_TRACE(CFGChanged);
+    JavaTypeCacheV2 Cache(F, FactsCacheMode::StableOracleEpoch);
+    Cache.setStatsEnabled(true);
+    EXPECT_EQ(getCachedJavaTypeV2(Wrapped, &DT, At, noNullEdge, Cache),
+              JavaType(9, false));
+    ASSERT_GT(Cache.baseSize(), 0U);
+    ASSERT_GT(Cache.definedSize(), 0U);
+    ASSERT_EQ(Cache.finalTypesSize(), 1U);
+
+    auto Removed = Cache.invalidate({CFGChanged ? F.front().getTerminator()
+                                                : Sum}, CFGChanged);
+    EXPECT_EQ(Removed.FinalRemoved, 1U);
+    EXPECT_EQ(Cache.finalTypesSize(), 0U);
+    EXPECT_TRUE(Cache.Base.storage().contains(F.getArg(0)));
+    EXPECT_TRUE(Cache.Defined.storage().contains(F.getArg(0)));
+    if (CFGChanged) {
+      Branch->swapSuccessors();
+      DT.recalculate(F);
+    } else {
+      Sum->setOperand(1, ConstantInt::get(Type::getInt32Ty(Context), 2));
+    }
+    EXPECT_EQ(getCachedJavaTypeV2(Wrapped, &DT, At, noNullEdge, Cache),
+              getJavaType(Wrapped, &DT, At, noNullEdge));
+    EXPECT_EQ(Cache.Final.getStats().Hits, 0U);
+    EXPECT_EQ(Cache.Final.getStats().Misses, 2U);
+  }
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_F(CachedJavaTypeV2Test, FinalClearsAfterExplicitOracleMaintenance) {
   auto M = parse(R"IR(
     declare i1 @jeandle.check_instanceof(ptr, ptr nonnull)
     define ptr @test(ptr %arg, i1 %choose_null) {
@@ -1563,13 +1618,19 @@ TEST_F(CachedJavaTypeV2Test, FinalRevalidatesOracleAfterExplicitMaintenance) {
 
   Cache.notifyOracleChanged();
   Enhanced = true;
-  EXPECT_EQ(Cache.finalTypesSize(), 1U);
+  EXPECT_EQ(Cache.finalTypesSize(), 0U);
+  EXPECT_EQ(Cache.pathFactsSize(), 0U);
   JavaType Actual =
       getCachedJavaTypeV2(Obj, &DT, Join->getTerminator(), Oracle, Cache);
   EXPECT_EQ(Actual, getJavaType(Obj, &DT, Join->getTerminator(), Oracle));
   EXPECT_EQ(Actual, JavaType(9, false));
-  EXPECT_GT(Cache.Final.getStats().Validations, 0U);
-  EXPECT_EQ(Cache.Final.getStats().ValidationFailures, 1U);
+  EXPECT_EQ(Cache.Final.getStats().Misses, 2U);
+  EXPECT_GT(Calls, ColdCalls);
+  unsigned CallsAfterRefresh = Calls;
+  EXPECT_EQ(getCachedJavaTypeV2(Obj, &DT, Join->getTerminator(), Oracle, Cache),
+            Actual);
+  EXPECT_EQ(Cache.Final.getStats().Hits, 2U);
+  EXPECT_EQ(Calls, CallsAfterRefresh);
 }
 
 TEST_F(CachedJavaTypeV2Test, AnalysisInvalidationRefreshesNonSSAOracleDependency) {
@@ -1691,7 +1752,7 @@ TEST_F(CachedJavaTypeV2Test, AnalysisMaintainsAllFourCachesBeforeRAUWAndDeletion
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_F(CachedJavaTypeV2Test, FinalRevalidatesRealLVIColdAndPrewarmedAnswers) {
+TEST_F(CachedJavaTypeV2Test, FinalClearsAcrossRealLVIColdAndPrewarmedEpochs) {
   auto M = parse(R"IR(
     define ptr @test(ptr "java-klass"="9" %typed, i1 noundef %choose) {
     entry:
@@ -1746,24 +1807,25 @@ TEST_F(CachedJavaTypeV2Test, FinalRevalidatesRealLVIColdAndPrewarmedAnswers) {
   // predecessor result for the next prefix. The IR itself has not changed.
   for (Value *V : Checkpoints)
     EXPECT_TRUE(LVINullEdgeOracle{LVI}(V, NullPath, Merge));
-  EXPECT_EQ(Cache.finalTypesSize(), 1U);
+  EXPECT_EQ(Cache.finalTypesSize(), 0U);
   EXPECT_EQ(getCachedJavaTypeV2(Phi, &DT, At, Oracle, Cache),
             JavaType(9, false));
-  EXPECT_EQ(Cache.Final.getStats().ValidationFailures, 1U);
+  EXPECT_EQ(Cache.Final.getStats().Misses, 2U);
   EXPECT_EQ(getJavaType(Phi, &DT, At, LVINullEdgeOracle{LVI}),
             JavaType(9, false));
 
   Cache.notifyOracleChanged();
   LVI.clear();
+  EXPECT_EQ(Cache.finalTypesSize(), 0U);
   EXPECT_TRUE(getCachedJavaTypeV2(Phi, &DT, At, Oracle, Cache).isUnknown());
-  EXPECT_EQ(Cache.Final.getStats().ValidationFailures, 2U);
+  EXPECT_EQ(Cache.Final.getStats().Misses, 3U);
   AssumptionCache FreshAC(F);
   LazyValueInfo FreshLVI(&FreshAC, &M->getDataLayout());
   EXPECT_TRUE(getJavaType(Phi, &DT, At, LVINullEdgeOracle{FreshLVI})
                   .isUnknown());
 }
 
-TEST_F(CachedJavaTypeV2Test, OversizedFinalDependenciesBypassOnlyThatEntry) {
+TEST_F(CachedJavaTypeV2Test, FinalCachesDeepIdentityChainsWithoutDependencyLimit) {
   auto M = parse(R"IR(
     define ptr @test(ptr "java-klass"="9" "java-klass-exact" %obj) {
       ret ptr %obj
@@ -1790,13 +1852,13 @@ TEST_F(CachedJavaTypeV2Test, OversizedFinalDependenciesBypassOnlyThatEntry) {
   for (unsigned I = 0; I < 2; ++I) {
     EXPECT_EQ(getCachedJavaTypeV2(Previous, &DT, At, noNullEdge, Cache),
               Expected);
-    EXPECT_EQ(Cache.finalTypesSize(), 1U);
-    EXPECT_EQ(Cache.Final.getStats().Bypasses, I + 1U);
-    EXPECT_EQ(Cache.Final.getStats().Hits, 0U);
+    EXPECT_EQ(Cache.finalTypesSize(), 2U);
+    EXPECT_EQ(Cache.Final.getStats().Misses, 2U);
+    EXPECT_EQ(Cache.Final.getStats().Hits, I);
   }
   EXPECT_EQ(getCachedJavaTypeV2(F.getArg(0), &DT, At, noNullEdge, Cache),
             JavaType(9, true));
-  EXPECT_EQ(Cache.Final.getStats().Hits, 1U);
+  EXPECT_EQ(Cache.Final.getStats().Hits, 2U);
 }
 
 } // namespace
