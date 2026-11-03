@@ -2151,6 +2151,9 @@ static JavaType factsAt(Value *V, BasicBlock *BB, JavaTypeQueryContext &Q) {
     JavaType E = factsAt(V, P, Q);
     mergePathFacts(E, edgeGuard(P, BB, V, Q));
     joinArm(Joined, First, std::move(E));
+    // Unknown absorbs every remaining arm of the union.
+    if (Joined.isUnknown())
+      break;
   }
 
   // The join loop above recursed through factsAt, which may have rehashed

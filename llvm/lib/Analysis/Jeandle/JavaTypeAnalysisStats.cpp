@@ -51,6 +51,12 @@ ALWAYS_ENABLED_STATISTIC(TotalGuardHits, "Java type guard edge cache hits");
 ALWAYS_ENABLED_STATISTIC(TotalGuardMisses, "Java type guard edge computations");
 ALWAYS_ENABLED_STATISTIC(TotalNullHits, "Java type null edge cache hits");
 ALWAYS_ENABLED_STATISTIC(TotalNullMisses, "Java type null edge computations");
+ALWAYS_ENABLED_STATISTIC(TotalOracleCalls, "Java type OracleCalls");
+ALWAYS_ENABLED_STATISTIC(TotalOracleStructural, "Java type OracleStructural");
+ALWAYS_ENABLED_STATISTIC(TotalOracleFiltered, "Java type OracleFiltered");
+ALWAYS_ENABLED_STATISTIC(TotalOracleLVICalls, "Java type OracleLVICalls");
+ALWAYS_ENABLED_STATISTIC(TotalOracleFilterFallbacks,
+                         "Java type OracleFilterFallbacks");
 ALWAYS_ENABLED_STATISTIC(TotalBaseRemoved, "Java type base entries invalidated");
 ALWAYS_ENABLED_STATISTIC(TotalFactsRemoved, "Java type edge facts entries invalidated");
 ALWAYS_ENABLED_STATISTIC(TotalFinalRemoved, "Java type final type entries invalidated");
@@ -155,6 +161,16 @@ void JavaTypeStatsAnalysis::Result::onQuery(const JavaTypeQueryEvent &Event) {
   TotalNullHits += Event.NullHits;
   Stats.NullMisses += Event.NullMisses;
   TotalNullMisses += Event.NullMisses;
+  Stats.OracleCalls += Event.OracleCalls;
+  TotalOracleCalls += Event.OracleCalls;
+  Stats.OracleStructural += Event.OracleStructural;
+  TotalOracleStructural += Event.OracleStructural;
+  Stats.OracleFiltered += Event.OracleFiltered;
+  TotalOracleFiltered += Event.OracleFiltered;
+  Stats.OracleLVICalls += Event.OracleLVICalls;
+  TotalOracleLVICalls += Event.OracleLVICalls;
+  Stats.OracleFilterFallbacks += Event.OracleFilterFallbacks;
+  TotalOracleFilterFallbacks += Event.OracleFilterFallbacks;
 
   Stats.BaseInsertions += Event.BaseInsertions;
   TotalBaseInsertions += Event.BaseInsertions;
@@ -256,6 +272,12 @@ void JavaTypeStatsAnalysis::Result::print(raw_ostream &OS) const {
   OS << "  guard edge computations: " << Stats.GuardMisses << '\n';
   OS << "  null edge hits: " << Stats.NullHits << '\n';
   OS << "  null edge computations: " << Stats.NullMisses << '\n';
+  OS << "  null oracle requests: " << Stats.OracleCalls << '\n';
+  OS << "  null oracle structural answers: " << Stats.OracleStructural << '\n';
+  OS << "  null oracle filtered: " << Stats.OracleFiltered << '\n';
+  OS << "  null oracle LVI calls: " << Stats.OracleLVICalls << '\n';
+  OS << "  null oracle filter fallbacks: " << Stats.OracleFilterFallbacks
+     << '\n';
   OS << "  final type hits: " << Stats.FinalHits << '\n';
   OS << "  final type misses: " << Stats.FinalMisses << '\n';
   OS << "  final type hit rate: ";
@@ -349,6 +371,13 @@ JavaTypeAnalysisSummaryPrinterPass::run(Module &M, ModuleAnalysisManager &) {
   OS << "  guard edge computations: " << TotalGuardMisses.getValue() << '\n';
   OS << "  null edge hits: " << TotalNullHits.getValue() << '\n';
   OS << "  null edge computations: " << TotalNullMisses.getValue() << '\n';
+  OS << "  null oracle requests: " << TotalOracleCalls.getValue() << '\n';
+  OS << "  null oracle structural answers: " << TotalOracleStructural.getValue()
+     << '\n';
+  OS << "  null oracle filtered: " << TotalOracleFiltered.getValue() << '\n';
+  OS << "  null oracle LVI calls: " << TotalOracleLVICalls.getValue() << '\n';
+  OS << "  null oracle filter fallbacks: "
+     << TotalOracleFilterFallbacks.getValue() << '\n';
   OS << "  final type hits: " << TotalFinalHits.getValue() << '\n';
   OS << "  final type misses: " << TotalFinalMisses.getValue() << '\n';
   OS << "  base query hits: " << TotalBaseHits.getValue() << '\n';

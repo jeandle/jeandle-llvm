@@ -116,7 +116,8 @@ JavaType JavaTypeAnalysisResult::getJavaType(Value *V, Instruction *Context) {
          "context must belong to the analyzed Function");
 
   BasicBlock *ContextBB = Context ? Context->getParent() : nullptr;
-  LVINullEdgeOracle IsNullEdge{LVI};
+  LVINullEdgeQuery OracleQuery(Observer != nullptr);
+  LVINullEdgeOracle IsNullEdge{LVI, &OracleQuery};
   const bool Bypassed = DisableJavaTypeCache;
   const bool Verified = VerifyJavaTypeCache && !Bypassed;
   auto Query = [&] {
@@ -125,7 +126,8 @@ JavaType JavaTypeAnalysisResult::getJavaType(Value *V, Instruction *Context) {
                           : getCachedJavaType(V, &DT, Context, IsNullEdge,
                                                 Cache);
     if (Verified) {
-      JavaType Fresh = jeandle::getJavaType(V, &DT, Context, IsNullEdge);
+      LVINullEdgeOracle ReferenceOracle{LVI};
+      JavaType Fresh = jeandle::getJavaType(V, &DT, Context, ReferenceOracle);
       if (Result != Fresh)
         reportVerificationFailure(F, V, ContextBB, Result, Fresh);
     }
@@ -158,6 +160,11 @@ JavaType JavaTypeAnalysisResult::getJavaType(Value *V, Instruction *Context) {
   Event.GuardMisses = Facts.GuardComputed - OldFacts.GuardComputed;
   Event.NullHits = Facts.NullHits - OldFacts.NullHits;
   Event.NullMisses = Facts.NullComputed - OldFacts.NullComputed;
+  Event.OracleCalls = OracleQuery.getStats().Requests;
+  Event.OracleStructural = OracleQuery.getStats().Structural;
+  Event.OracleFiltered = OracleQuery.getStats().Filtered;
+  Event.OracleLVICalls = OracleQuery.getStats().LVICalls;
+  Event.OracleFilterFallbacks = OracleQuery.getStats().FilterFallbacks;
   Event.QueryValue = V;
   Event.Context = ContextBB;
   Event.BaseInsertions = Base.EntriesAdded - OldBase.EntriesAdded;

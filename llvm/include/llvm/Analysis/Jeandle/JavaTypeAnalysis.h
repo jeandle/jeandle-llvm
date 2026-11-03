@@ -53,6 +53,11 @@ struct JavaTypeQueryEvent {
   uint64_t GuardMisses = 0;
   uint64_t NullHits = 0;
   uint64_t NullMisses = 0;
+  uint64_t OracleCalls = 0;
+  uint64_t OracleStructural = 0;
+  uint64_t OracleFiltered = 0;
+  uint64_t OracleLVICalls = 0;
+  uint64_t OracleFilterFallbacks = 0;
   uint64_t ElapsedNanoseconds = 0;
   size_t BaseEntries = 0;
   size_t DefinedEntries = 0;

@@ -61,6 +61,11 @@ struct JavaTypeQueryStats {
   uint64_t GuardMisses = 0;
   uint64_t NullHits = 0;
   uint64_t NullMisses = 0;
+  uint64_t OracleCalls = 0;
+  uint64_t OracleStructural = 0;
+  uint64_t OracleFiltered = 0;
+  uint64_t OracleLVICalls = 0;
+  uint64_t OracleFilterFallbacks = 0;
   uint64_t Bypasses = 0;
   uint64_t Clears = 0;
   uint64_t Invalidations = 0;

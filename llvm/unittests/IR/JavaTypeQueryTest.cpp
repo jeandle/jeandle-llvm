@@ -1432,4 +1432,222 @@ TEST_F(JavaTypeQueryTest, StatisticsAreOptIn) {
     EXPECT_NE(Text.find(Zero.str()), std::string::npos) << Text;
 }
 
+TEST_F(JavaTypeQueryTest, NullPrefilterSkipsLVIForArgumentsAndEntrySelects) {
+  std::string IR = "declare void @consume(ptr)\ndefine ptr @test(ptr %a, ptr "
+                   "%b, i1 %pick) {\nentry:\n";
+  std::string Previous = "%a";
+  for (unsigned I = 0; I < 64; ++I) {
+    std::string Name = "%s" + std::to_string(I);
+    IR += Name + " = select i1 %pick, ptr " + Previous + ", ptr %b\n";
+    Previous = Name;
+  }
+  IR += "call void @consume(ptr " + Previous +
+        ")\nbr label %next\nnext:\nbr label %exit\nexit:\nret ptr " + Previous +
+        "\n}\n";
+  Function *F = parse(IR);
+  ASSERT_NE(F, nullptr);
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+  auto &LVI = FAM.getResult<LazyValueAnalysis>(*F);
+  LVINullEdgeQuery Query(true);
+  LVINullEdgeOracle Filtered{LVI, &Query}, Reference{LVI};
+  Value *Root =
+      cast<ReturnInst>(block(*F, "exit")->getTerminator())->getReturnValue();
+  for (Value *V : SmallVector<Value *, 2>{F->getArg(0), Root})
+    for (BasicBlock *From : {&F->getEntryBlock(), block(*F, "next")}) {
+      BasicBlock *To =
+          From == &F->getEntryBlock() ? block(*F, "next") : block(*F, "exit");
+      EXPECT_EQ(Filtered(V, From, To), Reference(V, From, To));
+    }
+  EXPECT_EQ(Query.getStats().Filtered, 4U);
+  EXPECT_EQ(Query.getStats().LVICalls, 0U);
+}
+
+TEST_F(JavaTypeQueryTest, NullPrefilterKeepsSelectAndPhiFallbacks) {
+  Function *F = parse(R"(
+    define ptr @test(ptr %obj) {
+    entry:
+      %check = icmp eq ptr %obj, null
+      br i1 %check, label %nullarm, label %other
+    nullarm:
+      br label %join
+    other:
+      %selected = select i1 true, ptr null, ptr %obj
+      br label %join
+    join:
+      %merged = phi ptr [ %obj, %nullarm ], [ %selected, %other ]
+      br label %exit
+    exit:
+      ret ptr %merged
+    }
+  )");
+  ASSERT_NE(F, nullptr);
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+  auto &LVI = FAM.getResult<LazyValueAnalysis>(*F);
+  LVINullEdgeQuery Query(true);
+  LVINullEdgeOracle Filtered{LVI, &Query}, Reference{LVI};
+  EXPECT_TRUE(
+      Filtered(F->getArg(0), &F->getEntryBlock(), block(*F, "nullarm")));
+  EXPECT_FALSE(Filtered(F->getArg(0), &F->getEntryBlock(), block(*F, "other")));
+  for (StringRef Name : {"other", "join"}) {
+    BasicBlock *From = block(*F, Name);
+    Value *V = &From->front();
+    BasicBlock *To = Name == "other" ? block(*F, "join") : block(*F, "exit");
+    bool Expected = Reference(V, From, To);
+    EXPECT_EQ(Filtered(V, From, To), Expected);
+  }
+  EXPECT_TRUE(Reference(F->getArg(0), block(*F, "nullarm"), block(*F, "join")));
+  EXPECT_TRUE(Filtered(F->getArg(0), block(*F, "nullarm"), block(*F, "join")));
+  EXPECT_EQ(Query.getStats().Structural, 2U);
+  EXPECT_EQ(Query.getStats().LVICalls, 3U);
+  EXPECT_EQ(Query.getStats().Filtered, 0U);
+}
+
+TEST_F(JavaTypeQueryTest, NullPrefilterKeepsReturnedAliasesAndIntegerTests) {
+  Function *F = parse(R"(
+    declare ptr @identity(ptr returned)
+    define ptr @test(ptr %obj) {
+    entry:
+      %alias = call ptr @identity(ptr %obj)
+      %bits = ptrtoint ptr %alias to i64
+      %check = icmp eq i64 %bits, 0
+      br i1 %check, label %next, label %other
+    next:
+      br label %exit
+    exit:
+      ret ptr %alias
+    other:
+      ret ptr %obj
+    }
+  )");
+  ASSERT_NE(F, nullptr);
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+  auto &LVI = FAM.getResult<LazyValueAnalysis>(*F);
+  LVINullEdgeQuery Query(true);
+  LVINullEdgeOracle Filtered{LVI, &Query}, Reference{LVI};
+  auto *From = block(*F, "next");
+  auto *To = block(*F, "exit");
+  for (Value *V :
+       SmallVector<Value *, 2>{F->getArg(0), &F->getEntryBlock().front()})
+    EXPECT_EQ(Filtered(V, From, To), Reference(V, From, To));
+  EXPECT_EQ(Query.getStats().Filtered, 0U);
+  EXPECT_EQ(Query.getStats().LVICalls, 2U);
+}
+
+TEST_F(JavaTypeQueryTest, NullPrefilterDoesNotStripUnprovenFreeze) {
+  Function *F = parse(R"(
+    define ptr @test() {
+    entry:
+      %frozen = freeze ptr poison
+      br label %next
+    next:
+      ret ptr %frozen
+    }
+  )");
+  ASSERT_NE(F, nullptr);
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+  auto &LVI = FAM.getResult<LazyValueAnalysis>(*F);
+  LVINullEdgeQuery Query(true);
+  LVINullEdgeOracle Filtered{LVI, &Query}, Reference{LVI};
+  auto *V = &F->getEntryBlock().front();
+  EXPECT_EQ(Filtered(V, &F->getEntryBlock(), block(*F, "next")),
+            Reference(V, &F->getEntryBlock(), block(*F, "next")));
+  EXPECT_EQ(Query.getStats().Filtered, 0U);
+  EXPECT_EQ(Query.getStats().LVICalls, 1U);
+}
+
+TEST_F(JavaTypeQueryTest, NullPrefilterWorkLimitFallsBackToLVI) {
+  std::string IR =
+      "declare void @consume(ptr)\ndefine ptr @test(ptr %obj) {\nentry:\n";
+  for (unsigned I = 0; I < 300; ++I)
+    IR += "call void @consume(ptr %obj)\n";
+  IR += "br label %next\nnext:\nret ptr %obj\n}\n";
+  Function *F = parse(IR);
+  ASSERT_NE(F, nullptr);
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+  auto &LVI = FAM.getResult<LazyValueAnalysis>(*F);
+  LVINullEdgeQuery Query(true);
+  LVINullEdgeOracle Filtered{LVI, &Query}, Reference{LVI};
+  EXPECT_EQ(Filtered(F->getArg(0), &F->getEntryBlock(), block(*F, "next")),
+            Reference(F->getArg(0), &F->getEntryBlock(), block(*F, "next")));
+  EXPECT_EQ(Query.getStats().Filtered, 0U);
+  EXPECT_EQ(Query.getStats().LVICalls, 1U);
+  EXPECT_EQ(Query.getStats().FilterFallbacks, 1U);
+}
+
+TEST_F(JavaTypeQueryTest, NullPrefilterNewQueryRefreshesAfterIRMaintenance) {
+  Function *F = parse(R"(
+    define ptr @test(ptr %obj) {
+    entry:
+      br label %next
+    next:
+      br label %exit
+    exit:
+      ret ptr %obj
+    other:
+      ret ptr null
+    }
+  )");
+  ASSERT_NE(F, nullptr);
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+  auto &LVI = FAM.getResult<LazyValueAnalysis>(*F);
+  LVINullEdgeQuery BeforeQuery(true);
+  LVINullEdgeOracle Before{LVI, &BeforeQuery};
+  EXPECT_FALSE(Before(F->getArg(0), block(*F, "next"), block(*F, "exit")));
+  EXPECT_EQ(BeforeQuery.getStats().Filtered, 1U);
+  Instruction *Old = F->getEntryBlock().getTerminator();
+  auto *Test = new ICmpInst(
+      Old->getIterator(), ICmpInst::ICMP_EQ, F->getArg(0),
+      ConstantPointerNull::get(cast<PointerType>(F->getArg(0)->getType())));
+  BranchInst::Create(block(*F, "next"), block(*F, "other"), Test,
+                     Old->getIterator());
+  Old->eraseFromParent();
+  LVI.clear();
+  LVINullEdgeQuery AfterQuery(true);
+  LVINullEdgeOracle After{LVI, &AfterQuery}, Reference{LVI};
+  bool Expected = Reference(F->getArg(0), block(*F, "next"), block(*F, "exit"));
+  EXPECT_TRUE(Expected);
+  EXPECT_EQ(After(F->getArg(0), block(*F, "next"), block(*F, "exit")),
+            Expected);
+  EXPECT_EQ(AfterQuery.getStats().Filtered, 0U);
+  EXPECT_EQ(AfterQuery.getStats().LVICalls, 1U);
+}
+
+TEST_F(JavaTypeQueryTest, NullPrefilterDepthLimitFallsBackToLVI) {
+  std::string IR = "define ptr @test(ptr %a, ptr %b, i1 %pick) {\nentry:\n";
+  std::string Previous = "%a";
+  for (unsigned I = 0; I < 80; ++I) {
+    std::string Name = "%s" + std::to_string(I);
+    IR += Name + " = select i1 %pick, ptr " + Previous + ", ptr %b\n";
+    Previous = Name;
+  }
+  IR += "br label %next\nnext:\nret ptr " + Previous + "\n}\n";
+  Function *F = parse(IR);
+  ASSERT_NE(F, nullptr);
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+  auto &LVI = FAM.getResult<LazyValueAnalysis>(*F);
+  Value *V =
+      cast<ReturnInst>(block(*F, "next")->getTerminator())->getReturnValue();
+  LVINullEdgeQuery Query(true);
+  LVINullEdgeOracle Filtered{LVI, &Query}, Reference{LVI};
+  EXPECT_EQ(Filtered(V, &F->getEntryBlock(), block(*F, "next")),
+            Reference(V, &F->getEntryBlock(), block(*F, "next")));
+  EXPECT_EQ(Query.getStats().Filtered, 0U);
+  EXPECT_EQ(Query.getStats().LVICalls, 1U);
+  EXPECT_EQ(Query.getStats().FilterFallbacks, 1U);
+}
+
 } // namespace
