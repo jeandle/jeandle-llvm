@@ -465,6 +465,10 @@ public:
   ObjectState &getObjectStateForModification(ObjectID ID);
   const ObjectState *getObjectStateOptional(ObjectID ID) const;
 
+  unsigned getStateCount() const {
+    return ObjectStates ? static_cast<unsigned>(ObjectStates->size()) : 0u;
+  }
+
   // CFG liveness is target-specific rather than part of the shared virtual
   // object state. The analyzer's BlockExitInfo and EdgeContribution classify
   // structural predecessor inputs as Unseen, Dead, or Live.

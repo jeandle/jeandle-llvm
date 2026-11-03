@@ -75,6 +75,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -1892,6 +1893,14 @@ private:
   // The generic escape path: materialize every distinct virtual operand of I
   // at I (skipping described deopt-bundle operands).
   void materializeAllVirtualOperands(Instruction *I);
+  // Preserve inter-thread release-fence publication semantics. Virtual field
+  // stores are normally delayed until the object's first escape; if that
+  // escape is after a publishing fence, replaying the stores there would move
+  // initialization to the wrong side of the fence. Drain every live VO
+  // immediately before such a fence so any later publication still observes
+  // the original ordering. Single-thread compiler fences are deliberately not
+  // publication points; see processInstruction's FenceInst handling.
+  void materializeBeforePublishingFence(FenceInst *FI);
 #ifndef NDEBUG
   // Debug-only reachability check backing the invariant assert in
   // materializeOperandsAtStore. Returns true if V's pointer-derivation def
@@ -5211,6 +5220,37 @@ void Analyzer::processInstruction(Instruction *I) {
   } else if (auto *LI = dyn_cast<LoadInst>(I)) {
     processLoad(LI);
     return;
+  } else if (auto *FI = dyn_cast<FenceInst>(I)) {
+    // A system (or conservatively, target-specific) release fence can publish
+    // initialization that originally preceded it. PEA must not eliminate
+    // those stores and replay them only at a later escape, on the far side of
+    // the fence. FenceInst has no object operand, so this ordering boundary
+    // must be handled outside the virtual-input gate.
+    //
+    // Producer-side convention (src/hotspot/share/jeandle/
+    // jeandleIntrinsicLowering.cpp):
+    //   JeandleIntrinsicLowering::lower_object_clone()
+    // It explicitly emits
+    // CreateFence(SequentiallyConsistent, SyncScope::SingleThread) for C2's
+    // MemBarCPUOrder. LLVM prints that exact pair as a seq_cst singlethread
+    // fence.
+    // It is a compiler ordering point, not an inter-thread publication event:
+    // a still-virtual object has no memory location that another thread (or a
+    // same-thread signal handler) can name. Keep the fence in IR, but let
+    // scalar replacement span it. If the object's identity is consumed later,
+    // the ordinary escape path still materializes it at that consumer. This
+    // matches C2, where MemBarCPUOrder does not make unrelated allocations
+    // escape. Recognize only the exact encoding Jeandle uses for CPUOrder.
+    // Other singlethread orderings and unknown target scopes remain
+    // conservative.
+    bool IsCPUOrderFence =
+        FI->getSyncScopeID() == SyncScope::SingleThread &&
+        FI->getOrdering() == AtomicOrdering::SequentiallyConsistent;
+    if (!IsCPUOrderFence && isReleaseOrStronger(FI->getOrdering()))
+      materializeBeforePublishingFence(FI);
+    // Acquire-only fences do not publish preceding initialization and need no
+    // PEA state change. Every fence itself remains in IR.
+    return;
   }
 
   // TODO(unsafe-inliner): see the access dispatch (processStore/processLoad).
@@ -7743,6 +7783,35 @@ void Analyzer::materializeAllVirtualOperands(Instruction *I) {
   collectDistinctVirtualOperands(I, ToMaterialize);
   for (jeandle::ObjectID ID : ToMaterialize)
     materializeAt(ID, I, MatReason::Unhandled);
+}
+
+void Analyzer::materializeBeforePublishingFence(FenceInst *FI) {
+  assert(isReleaseOrStronger(FI->getOrdering()) &&
+         "publishing fence must have release semantics");
+  assert(!(FI->getSyncScopeID() == SyncScope::SingleThread &&
+           FI->getOrdering() == AtomicOrdering::SequentiallyConsistent) &&
+         "CPUOrder fence must not force materialization");
+  SmallVector<jeandle::ObjectID, 8> LiveVirtuals;
+  for (unsigned Index = 0, End = CurrentState.getStateCount(); Index != End;
+       ++Index) {
+    jeandle::ObjectID ID = static_cast<jeandle::ObjectID>(Index);
+    const jeandle::ObjectState *State = CurrentState.getObjectStateOptional(ID);
+    if (State && State->isVirtual())
+      LiveVirtuals.push_back(ID);
+  }
+
+  // Collect object IDs before materializing because materializeAt() may
+  // recursively materialize virtual objects referenced by fields and update
+  // CurrentState. Re-check each snapshotted object before processing it: an
+  // earlier materialization may already have materialized it as part of such
+  // a cascade.
+  for (jeandle::ObjectID ID : LiveVirtuals) {
+    const jeandle::ObjectState *State = CurrentState.getObjectStateOptional(ID);
+    if (State && State->isVirtual())
+      materializeAt(ID, FI, MatReason::Unhandled);
+    if (OverflowFlag || !RetryVirtualizationAllocationSites.empty())
+      break;
+  }
 }
 
 void Analyzer::materializeVirtualCallArgs(CallBase *CB) {
