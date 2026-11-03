@@ -84,6 +84,7 @@ protected:
   static JavaType query(Value *V, DominatorTree *DT, Instruction *At,
                         IsNullEdgeOracle Oracle, JavaTypeCache &Cache) {
     Cache.setFinalEnabled(false);
+    Cache.setPathEnabled(false);
     Cache.setStatsEnabled(true);
     Cache.Base.resetStats();
     return getCachedJavaType(V, DT, At, Oracle, Cache);
@@ -811,13 +812,14 @@ TEST_F(CachedJavaTypeTest, DiagnosticsDistinguishSharedInputsFromRootHits) {
   EXPECT_EQ(D.EntriesAdded, 1U);
 
   // Contextual queries must expose Base reuse too. Non-exact base forces the
-  // value dimension to walk the forwarders, but none needs Base evaluation.
+  // value dimension to walk the GEP, but the entry select reuses Base without
+  // querying its argument again. Neither needs Base evaluation.
   DominatorTree DT(F);
   EXPECT_EQ(query(Second, &DT, F.back().getTerminator(), noNullEdge, Cache),
             getJavaType(Second, &DT, F.back().getTerminator(), noNullEdge));
-  EXPECT_EQ(Cache.Base.getStats().Hits, 3U);
+  EXPECT_EQ(Cache.Base.getStats().Hits, 2U);
   EXPECT_EQ(Cache.Base.getStats().Misses, 0U);
-  EXPECT_EQ(D.PriorQueryHits, 3U);
+  EXPECT_EQ(D.PriorQueryHits, 2U);
   EXPECT_EQ(D.NodesEvaluated, 0U);
   EXPECT_EQ(D.EntriesAdded, 0U);
 
@@ -827,9 +829,9 @@ TEST_F(CachedJavaTypeTest, DiagnosticsDistinguishSharedInputsFromRootHits) {
   EXPECT_EQ(query(Second, &DT, F.back().getTerminator(), noNullEdge, Cold),
             getJavaType(Second, &DT, F.back().getTerminator(), noNullEdge));
   EXPECT_EQ(Cold.Base.getStats().Misses, 1U);
-  EXPECT_EQ(Cold.Base.getStats().Hits, 2U);
+  EXPECT_EQ(Cold.Base.getStats().Hits, 1U);
   EXPECT_EQ(ColdStats.PriorQueryHits, 0U);
-  EXPECT_EQ(ColdStats.CurrentQueryHits, 2U);
+  EXPECT_EQ(ColdStats.CurrentQueryHits, 1U);
   EXPECT_EQ(ColdStats.NodesEvaluated, 3U);
 }
 
@@ -1980,6 +1982,211 @@ TEST_F(CachedJavaTypeTest, FinalCachesDeepIdentityChainsWithoutDependencyLimit) 
   EXPECT_EQ(getCachedJavaType(F.getArg(0), &DT, At, noNullEdge, Cache),
             JavaType(9, true));
   EXPECT_EQ(Cache.Final.getStats().Hits, 2U);
+}
+
+TEST_F(CachedJavaTypeTest, SharedPathsReusePrefixesRespectBudgetsAndEpochs) {
+  auto M = parse(R"IR(
+    declare i1 @jeandle.check_instanceof(ptr, ptr nonnull)
+    define ptr @test(ptr %obj) {
+    entry:
+      %check = call i1 @jeandle.check_instanceof(
+          ptr inttoptr(i64 9 to ptr), ptr %obj)
+      br i1 %check, label %first, label %reject
+    first:
+      br label %second
+    second:
+      br label %exit
+    exit:
+      ret ptr %obj
+    reject:
+      ret ptr null
+    }
+  )IR");
+  ASSERT_NE(M, nullptr);
+  Function &F = *M->getFunction("test");
+  DominatorTree DT(F);
+  auto *Option =
+      cl::getRegisteredOptions().lookup("jeandle-max-facts-join-blocks");
+  ASSERT_NE(Option, nullptr);
+  auto &Budget = *static_cast<cl::opt<unsigned> *>(Option);
+  unsigned Saved = Budget;
+  auto Restore = make_scope_exit([&] { Budget = Saved; });
+  Budget = 128;
+  JavaTypeCache Cache(F, FactsCacheMode::StableOracleEpoch);
+  Cache.setFinalEnabled(false);
+  Cache.setStatsEnabled(true);
+  unsigned Calls = 0;
+  auto Oracle = [&](Value *, BasicBlock *, BasicBlock *) {
+    ++Calls;
+    return false;
+  };
+  auto Query = [&](StringRef Name) {
+    Instruction *At = findFactsTestBlock(F, Name)->getTerminator();
+    JavaType Actual = getCachedJavaType(F.getArg(0), &DT, At, Oracle, Cache);
+    EXPECT_EQ(Actual, getJavaType(F.getArg(0), &DT, At, noNullEdge));
+    return Actual;
+  };
+  EXPECT_EQ(Query("first"), JavaType(9, false));
+  EXPECT_EQ(Query("second"), JavaType(9, false));
+  EXPECT_EQ(Query("exit"), JavaType(9, false));
+  EXPECT_EQ(Calls, 3U);
+  EXPECT_EQ(Cache.Facts.getStats().PathHits, 2U);
+  EXPECT_EQ(Cache.Facts.pathSize(), 3U);
+  Budget = 1;
+  EXPECT_TRUE(Query("exit").isUnknown());
+  EXPECT_EQ(Cache.Facts.getStats().PathHits, 2U);
+  Budget = 128;
+  EXPECT_EQ(Query("exit"), JavaType(9, false));
+  Cache.notifyOracleChanged();
+  EXPECT_EQ(Cache.Facts.pathSize(), 0U);
+  auto *Check = cast<CallInst>(findBaseTestInstruction(F, "check"));
+  Cache.invalidate({Check});
+  Check->setArgOperand(0, ConstantExpr::getIntToPtr(
+                              ConstantInt::get(Type::getInt64Ty(Context), 22),
+                              PointerType::get(Context, 0)));
+  EXPECT_EQ(Query("exit"), JavaType(22, false));
+  Cache.clear();
+  EXPECT_EQ(Cache.Facts.pathSize(), 0U);
+}
+
+TEST_F(CachedJavaTypeTest, SharedPathsDoNotPublishIrreducibleCycleResults) {
+  auto M = parse(R"IR(
+    declare i1 @jeandle.check_instanceof(ptr, ptr nonnull)
+    define ptr @test(ptr %obj, i1 %pick, i1 %again) {
+    entry:
+      br i1 %pick, label %a, label %b
+    a:
+      %check = call i1 @jeandle.check_instanceof(
+          ptr inttoptr(i64 9 to ptr), ptr %obj)
+      br i1 %check, label %b, label %exit
+    b:
+      br i1 %again, label %a, label %exit
+    exit:
+      ret ptr %obj
+    }
+  )IR");
+  ASSERT_NE(M, nullptr);
+  Function &F = *M->getFunction("test");
+  DominatorTree DT(F);
+  JavaTypeCache Cache(F, FactsCacheMode::StableOracleEpoch);
+  Cache.setFinalEnabled(false);
+  for (StringRef Name : {"exit", "a", "b", "b", "a", "exit"}) {
+    Instruction *At = findFactsTestBlock(F, Name)->getTerminator();
+    EXPECT_EQ(getCachedJavaType(F.getArg(0), &DT, At, noNullEdge, Cache),
+              getJavaType(F.getArg(0), &DT, At, noNullEdge));
+  }
+  EXPECT_EQ(Cache.Facts.pathSize(), 0U);
+}
+
+TEST_F(CachedJavaTypeTest, EntrySelectChainReusesBaseWithoutRewalkingInputs) {
+  std::string IR = "define ptr @test(ptr \"java-klass\"=\"9\" %a, ptr "
+                   "\"java-klass\"=\"9\" %b, i1 %c) {\nentry:\n";
+  std::string Previous = "%a";
+  for (unsigned I = 0; I < 64; ++I) {
+    std::string Name = "%s" + std::to_string(I);
+    IR += Name + " = select i1 %c, ptr " + Previous + ", ptr %b\n";
+    Previous = Name;
+  }
+  IR += "br label %exit\nexit:\nret ptr " + Previous + "\n}\n";
+  auto M = parse(IR);
+  ASSERT_NE(M, nullptr);
+  Function &F = *M->getFunction("test");
+  DominatorTree DT(F);
+  Instruction *At = F.back().getTerminator();
+  Value *V = returnedValue(F);
+  JavaTypeCache Cache(F, FactsCacheMode::StableOracleEpoch);
+  Cache.setFinalEnabled(false);
+  Cache.setStatsEnabled(true);
+  EXPECT_EQ(getCachedJavaType(V, &DT, At, noNullEdge, Cache),
+            JavaType(9, false));
+  Cache.Base.resetStats();
+  EXPECT_EQ(getCachedJavaType(V, &DT, At, noNullEdge, Cache),
+            getJavaType(V, &DT, At, noNullEdge));
+  EXPECT_EQ(Cache.Base.getStats().Hits, 1U);
+  EXPECT_EQ(Cache.Base.getStats().NodesEvaluated, 0U);
+}
+
+TEST_F(CachedJavaTypeTest, SelectOutsideEntryKeepsDefinitionPointRefinement) {
+  auto M = parse(R"IR(
+    declare i1 @jeandle.check_instanceof(ptr, ptr nonnull)
+    define ptr @test(ptr %obj, i1 %choose) {
+    entry:
+      %check = call i1 @jeandle.check_instanceof(
+          ptr inttoptr(i64 9 to ptr), ptr %obj)
+      br i1 %check, label %good, label %reject
+    good:
+      %s = select i1 %choose, ptr %obj, ptr %obj
+      br label %exit
+    exit:
+      ret ptr %s
+    reject:
+      ret ptr null
+    }
+  )IR");
+  ASSERT_NE(M, nullptr);
+  Function &F = *M->getFunction("test");
+  DominatorTree DT(F);
+  Value *V = findBaseTestInstruction(F, "s");
+  Instruction *At = findFactsTestBlock(F, "exit")->getTerminator();
+  JavaTypeCache Cache(F, FactsCacheMode::StableOracleEpoch);
+  Cache.setFinalEnabled(false);
+  for (unsigned I = 0; I < 2; ++I) {
+    EXPECT_EQ(getCachedJavaType(V, &DT, At, noNullEdge, Cache),
+              JavaType(9, false));
+    EXPECT_EQ(getCachedJavaType(V, &DT, At, noNullEdge, Cache),
+              getJavaType(V, &DT, At, noNullEdge));
+  }
+}
+
+TEST_F(CachedJavaTypeTest, SharedPathBudgetAdmissionRefreshesAfterCFGExpansion) {
+  auto M = parse(R"IR(
+    declare i1 @jeandle.check_instanceof(ptr, ptr nonnull)
+    define ptr @test(ptr %obj) {
+    entry:
+      %check = call i1 @jeandle.check_instanceof(
+          ptr inttoptr(i64 9 to ptr), ptr %obj)
+      br i1 %check, label %good, label %reject
+    good:
+      br label %exit
+    exit:
+      ret ptr %obj
+    reject:
+      ret ptr null
+    }
+  )IR");
+  ASSERT_NE(M, nullptr);
+  Function &F = *M->getFunction("test");
+  DominatorTree DT(F);
+  auto *Option = cl::getRegisteredOptions().lookup("jeandle-max-facts-join-blocks");
+  ASSERT_NE(Option, nullptr);
+  auto &Budget = *static_cast<cl::opt<unsigned> *>(Option);
+  unsigned Saved = Budget;
+  auto Restore = make_scope_exit([&] { Budget = Saved; });
+  Budget = F.size();
+  JavaTypeCache Cache(F, FactsCacheMode::StableOracleEpoch);
+  Cache.setFinalEnabled(false);
+  BasicBlock *Exit = findFactsTestBlock(F, "exit");
+  EXPECT_EQ(getCachedJavaType(F.getArg(0), &DT, Exit->getTerminator(),
+                             noNullEdge, Cache), JavaType(9, false));
+  Cache.invalidate({}, /*CFGChanged=*/true);
+  auto *Previous = cast<BranchInst>(findFactsTestBlock(F, "good")->getTerminator());
+  SmallVector<BasicBlock *, 8> Added;
+  for (unsigned I = 0; I < 6; ++I) {
+    auto *BB = BasicBlock::Create(Context, "extra" + std::to_string(I), &F, Exit);
+    BranchInst::Create(Exit, BB);
+    Previous->setSuccessor(0, BB);
+    Previous = cast<BranchInst>(BB->getTerminator());
+    Added.push_back(BB);
+  }
+  Added.push_back(Exit);
+  DT.recalculate(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+  for (unsigned I = 0; I < 2; ++I)
+    for (BasicBlock *BB : Added)
+      EXPECT_EQ(getCachedJavaType(F.getArg(0), &DT, BB->getTerminator(),
+                                 noNullEdge, Cache),
+                getJavaType(F.getArg(0), &DT, BB->getTerminator(), noNullEdge));
+  EXPECT_EQ(Cache.Facts.pathSize(), 0U);
 }
 
 } // namespace

@@ -28,7 +28,8 @@ exit:
 ; CHECK:         final type misses: 2
 ; CHECK:         base insertions: 1
 ; CHECK:         current base entries: 1
-; CHECK:         current edge facts entries: 4
+; One accumulated path entry replaces two constituent edge entries per query.
+; CHECK:         current edge facts entries: 2
 ; CHECK:         current final type entries: 2
 ; CHECK:         %l0 = load{{.*}}!java-klass
 ; CHECK:         %l1 = load{{.*}}!java-klass

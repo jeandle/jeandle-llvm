@@ -1025,6 +1025,12 @@ struct JavaTypeQueryContext {
   unsigned FactsBudget = MaxFactsJoinBlocks;
   unsigned PhiBudget = MaxFactsJoinBlocks;
   unsigned ConditionDepth = 0;
+  // Shared path reuse is restricted to a single-value block walk whose whole
+  // function fits the initial facts budget. Skipping a cached prefix therefore
+  // cannot change a later budget decision. Cycle-contaminated results never
+  // enter the shared table.
+  bool SharePaths = false;
+  unsigned FactsCycles = 0;
 };
 
 } // namespace
@@ -2114,11 +2120,15 @@ static JavaType factsAt(Value *V, BasicBlock *BB, JavaTypeQueryContext &Q) {
   if (!Q.DT.isReachableFromEntry(BB))
     return {}; // Dominance is undefined for unreachable blocks.
 
+  if (Q.SharePaths)
+    if (auto *Type = Q.Cache->Facts.lookupPath(V, BB))
+      return *Type;
   auto Key = std::make_pair(V, BB);
   auto [It, Inserted] = Q.Processed.try_emplace(Key);
   if (!Inserted) {
     if (It->second)
       return *It->second;
+    ++Q.FactsCycles;
     return {}; // On the evaluation stack: a cycle the back-edge rule cannot
                // cut (irreducible) — empty contribution to that join arm.
   }
@@ -2146,7 +2156,12 @@ static JavaType factsAt(Value *V, BasicBlock *BB, JavaTypeQueryContext &Q) {
   // The join loop above recursed through factsAt, which may have rehashed
   // Processed and invalidated It — re-look the slot up by key.
   JavaType Result = std::move(Joined);
-  Q.Processed[Key] = Result;
+  if (Q.SharePaths && Q.FactsCycles == 0) {
+    Q.Cache->Facts.insertPath(V, BB, Result);
+    Q.Processed.erase(Key);
+  } else {
+    Q.Processed[Key] = Result;
+  }
   return Result;
 }
 
@@ -2218,6 +2233,13 @@ static JavaType valueDimension(Value *V, JavaTypeQueryContext &Q) {
   SmallVector<Value *, 4> Inputs;
   if (!getBaseTypeInputs(V, Inputs, /*SkipVacuousArms=*/true) || Base.Exact)
     return Base;
+  // In valid SSA, every instruction feeding an entry-block select is also
+  // defined in entry (or is an argument/constant). Operand definition-point
+  // facts are empty there. The shared base solver already computes the same
+  // joins and definedness; recursively rebuilding them adds no refinement.
+  if (auto *SI = dyn_cast<SelectInst>(V))
+    if (SI->getParent()->isEntryBlock())
+      return Base;
   if (auto It = Q.ValueTypes.find(V); It != Q.ValueTypes.end())
     return It->second;
   if (Q.ValueVisited.contains(V)) {
@@ -2302,6 +2324,10 @@ static bool isNullEdge(Value *V, BasicBlock *From, BasicBlock *To,
                        JavaTypeQueryContext &Q) {
   if (!Q.Cache)
     return computeNullEdge(V, From, To, Q);
+  if (Q.SharePaths) {
+    Q.Cache->Facts.recordNull(false);
+    return computeNullEdge(V, From, To, Q);
+  }
   return Q.Cache->Facts.getNullEdge(
       V, From, To, [&] { return computeNullEdge(V, From, To, Q); });
 }
@@ -2310,6 +2336,10 @@ static JavaType edgeGuard(BasicBlock *From, BasicBlock *To, Value *V,
                           JavaTypeQueryContext &Q) {
   if (!Q.Cache)
     return computeEdgeGuard(From, To, V, Q);
+  if (Q.SharePaths) {
+    Q.Cache->Facts.recordGuard(false, false);
+    return computeEdgeGuard(From, To, V, Q);
+  }
   return Q.Cache->Facts.getGuard(
       V, From, To, Q.ConditionDepth,
       [&] { return computeEdgeGuard(From, To, V, Q); });
@@ -2326,6 +2356,15 @@ JavaType jeandle::getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
   }
 
   JavaTypeQueryContext Q{*DT, IsNullEdge, &Cache};
+  // Arguments and entry-block selects do not recursively request other
+  // value/block facts. Each block can consume budget at most once. Other
+  // shapes keep the original per-query memo and edge caches, including PHIs,
+  // nested forwarders, tight budgets and arbitrary changing oracles.
+  bool SingleValue = isa<Argument>(V);
+  if (auto *SI = dyn_cast<SelectInst>(V))
+    SingleValue |= SI->getParent()->isEntryBlock();
+  Q.SharePaths = Cache.pathsEnabled() && SingleValue &&
+                 Cache.Facts.fitsPathBudget(MaxFactsJoinBlocks);
   JavaType T = valueDimension(V, Q);
   return typeIntersect(T, factsAt(V, Context->getParent(), Q));
 }

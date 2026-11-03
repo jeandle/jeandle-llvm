@@ -138,13 +138,16 @@ public:
                     JavaTypeBaseInvalidationMode Mode, size_t &SlotsScanned);
 };
 
-/// Complete root edge guards and optional null-edge decisions. This cache has
+/// Complete root edge guards, optional null-edge decisions and budget-safe
+/// acyclic path results for single-value queries. This cache has
 /// a deliberately separate invalidation policy from Base and Defined.
 class LLVM_ABI JavaTypeFactsCache {
 public:
   enum class Mode { GuardOnly, StableOracleEpoch };
   using Key = std::pair<Value *, std::pair<BasicBlock *, BasicBlock *>>;
   struct Stats : JavaTypeCacheStats {
+    uint64_t PathHits = 0;
+    uint64_t PathMisses = 0;
     uint64_t NullRequests = 0;
     uint64_t NullHits = 0;
     uint64_t NullComputed = 0;
@@ -160,6 +163,8 @@ private:
   Mode CacheMode;
   DenseMap<Key, bool> NullEdges;
   DenseMap<Key, JavaType> Guards;
+  DenseMap<std::pair<Value *, BasicBlock *>, JavaType> Paths;
+  size_t PathBlockCount = 0;
   Stats Counters;
   bool StatsEnabled = false;
 
@@ -176,7 +181,11 @@ public:
   auto &guardStorage() { return Guards; }
   size_t nullSize() const { return NullEdges.size(); }
   size_t guardSize() const { return Guards.size(); }
-  size_t size() const { return nullSize() + guardSize(); }
+  size_t pathSize() const { return Paths.size(); }
+  bool fitsPathBudget(unsigned Budget);
+  size_t size() const { return nullSize() + guardSize() + pathSize(); }
+  JavaType *lookupPath(Value *V, BasicBlock *BB);
+  void insertPath(Value *V, BasicBlock *BB, const JavaType &Type);
   const Stats &getStats() const { return Counters; }
   void resetStats() { Counters = {}; }
   void setStatsEnabled(bool Enabled) { StatsEnabled = Enabled; }
@@ -197,7 +206,7 @@ public:
                     unsigned ConditionDepth, function_ref<JavaType()> Compute);
 
   void clear();
-  size_t invalidate();
+  size_t invalidate(bool CFGChanged = true);
 };
 
 /// A completed top-level query only, keyed by value and context block. Query
@@ -242,6 +251,7 @@ public:
 class LLVM_ABI JavaTypeCache {
   Function *Owner;
   bool EnableFinal;
+  bool EnablePaths = true;
 
 public:
   using Mode = JavaTypeFactsCache::Mode;
@@ -260,6 +270,10 @@ public:
   Function *getFunction() const { return Owner; }
   Mode getMode() const { return Facts.getMode(); }
   void setFinalEnabled(bool Enabled) { EnableFinal = Enabled; }
+  void setPathEnabled(bool Enabled) { EnablePaths = Enabled; }
+  bool pathsEnabled() const {
+    return EnablePaths && getMode() == Mode::StableOracleEpoch;
+  }
   bool finalEnabled() const {
     return EnableFinal && getMode() == Mode::StableOracleEpoch;
   }
