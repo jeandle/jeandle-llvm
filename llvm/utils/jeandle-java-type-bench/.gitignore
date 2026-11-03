@@ -1,0 +1,6 @@
+__pycache__/
+inputs/opt-inputs/
+results*/
+replay-*
+*.command.txt
+versions.local.json
