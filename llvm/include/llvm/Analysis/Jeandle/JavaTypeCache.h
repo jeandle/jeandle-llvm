@@ -138,9 +138,9 @@ public:
                     JavaTypeBaseInvalidationMode Mode, size_t &SlotsScanned);
 };
 
-/// Complete root edge guards, optional null-edge decisions and budget-safe
-/// acyclic path results for single-value queries. This cache has
-/// a deliberately separate invalidation policy from Base and Defined.
+/// Complete path facts during a stable oracle epoch, with edge caches for
+/// queries that do not share paths. Truncated path results stay query-local.
+/// Invalidation is deliberately separate from Base and Defined.
 class LLVM_ABI JavaTypeFactsCache {
 public:
   enum class Mode { GuardOnly, StableOracleEpoch };
@@ -164,7 +164,6 @@ private:
   DenseMap<Key, bool> NullEdges;
   DenseMap<Key, JavaType> Guards;
   DenseMap<std::pair<Value *, BasicBlock *>, JavaType> Paths;
-  size_t PathBlockCount = 0;
   Stats Counters;
   bool StatsEnabled = false;
 
@@ -182,7 +181,6 @@ public:
   size_t nullSize() const { return NullEdges.size(); }
   size_t guardSize() const { return Guards.size(); }
   size_t pathSize() const { return Paths.size(); }
-  bool fitsPathBudget(unsigned Budget);
   size_t size() const { return nullSize() + guardSize() + pathSize(); }
   JavaType *lookupPath(Value *V, BasicBlock *BB);
   void insertPath(Value *V, BasicBlock *BB, const JavaType &Type);
@@ -206,7 +204,7 @@ public:
                     unsigned ConditionDepth, function_ref<JavaType()> Compute);
 
   void clear();
-  size_t invalidate(bool CFGChanged = true);
+  size_t invalidate();
 };
 
 /// A completed top-level query only, keyed by value and context block. Query

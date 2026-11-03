@@ -1609,7 +1609,7 @@ TEST_F(CachedJavaTypeTest, FinalInvalidationClearsAllContextsWithWarmSubcaches) 
   EXPECT_EQ(Query(Left), JavaType(9, false));
   EXPECT_EQ(Query(Right), JavaType(22, false));
   ASSERT_EQ(Cache.finalTypesSize(), 2U);
-  EXPECT_GT(Cache.Facts.getStats().GuardHits, 0U);
+  EXPECT_GT(Cache.Facts.getStats().PathHits, 0U);
   auto *Check = cast<CallInst>(findBaseTestInstruction(F, "leftcheck"));
   auto Removed = Cache.invalidate({Check});
   EXPECT_FALSE(Removed.FullClear);
@@ -1851,8 +1851,7 @@ TEST_F(CachedJavaTypeTest, AnalysisMaintainsAllFourCachesBeforeRAUWAndDeletion) 
   EXPECT_EQ(Analysis.getJavaType(Wrapped, Tail), JavaType(9, false));
   EXPECT_GT(Stats.BaseHits, 0U);
   EXPECT_GT(Stats.DefinedHits, 0U);
-  EXPECT_GT(Stats.GuardHits, 0U);
-  EXPECT_GT(Stats.NullHits, 0U);
+  EXPECT_GT(Stats.FactsHits, 0U);
   EXPECT_EQ(Stats.FinalHits, 1U);
   EXPECT_GT(Stats.CurrentDefinedEntries, 0U);
   EXPECT_EQ(Stats.CurrentFinalTypeEntries, 2U);
@@ -1984,7 +1983,7 @@ TEST_F(CachedJavaTypeTest, FinalCachesDeepIdentityChainsWithoutDependencyLimit) 
   EXPECT_EQ(Cache.Final.getStats().Hits, 2U);
 }
 
-TEST_F(CachedJavaTypeTest, SharedPathsReusePrefixesRespectBudgetsAndEpochs) {
+TEST_F(CachedJavaTypeTest, SharedPathsReusePrefixesAcrossBudgetsAndEpochs) {
   auto M = parse(R"IR(
     declare i1 @jeandle.check_instanceof(ptr, ptr nonnull)
     define ptr @test(ptr %obj) {
@@ -2033,8 +2032,13 @@ TEST_F(CachedJavaTypeTest, SharedPathsReusePrefixesRespectBudgetsAndEpochs) {
   EXPECT_EQ(Cache.Facts.getStats().PathHits, 2U);
   EXPECT_EQ(Cache.Facts.pathSize(), 3U);
   Budget = 1;
-  EXPECT_TRUE(Query("exit").isUnknown());
-  EXPECT_EQ(Cache.Facts.getStats().PathHits, 2U);
+  Instruction *At = findFactsTestBlock(F, "exit")->getTerminator();
+  EXPECT_TRUE(getJavaType(F.getArg(0), &DT, At, noNullEdge).isUnknown());
+  // A complete cached path remains valid with less solving budget. Reusing it
+  // can retain facts which a cold query with that budget would not discover.
+  EXPECT_EQ(getCachedJavaType(F.getArg(0), &DT, At, Oracle, Cache),
+            JavaType(9, false));
+  EXPECT_EQ(Cache.Facts.getStats().PathHits, 3U);
   Budget = 128;
   EXPECT_EQ(Query("exit"), JavaType(9, false));
   Cache.notifyOracleChanged();
@@ -2138,7 +2142,7 @@ TEST_F(CachedJavaTypeTest, SelectOutsideEntryKeepsDefinitionPointRefinement) {
   }
 }
 
-TEST_F(CachedJavaTypeTest, SharedPathBudgetAdmissionRefreshesAfterCFGExpansion) {
+TEST_F(CachedJavaTypeTest, SharedPathsReuseSmallSlicesAfterCFGExpansion) {
   auto M = parse(R"IR(
     declare i1 @jeandle.check_instanceof(ptr, ptr nonnull)
     define ptr @test(ptr %obj) {
@@ -2162,13 +2166,16 @@ TEST_F(CachedJavaTypeTest, SharedPathBudgetAdmissionRefreshesAfterCFGExpansion) 
   auto &Budget = *static_cast<cl::opt<unsigned> *>(Option);
   unsigned Saved = Budget;
   auto Restore = make_scope_exit([&] { Budget = Saved; });
-  Budget = F.size();
+  Budget = 2;
+  ASSERT_GT(F.size(), Budget);
   JavaTypeCache Cache(F, FactsCacheMode::StableOracleEpoch);
   Cache.setFinalEnabled(false);
   BasicBlock *Exit = findFactsTestBlock(F, "exit");
   EXPECT_EQ(getCachedJavaType(F.getArg(0), &DT, Exit->getTerminator(),
                              noNullEdge, Cache), JavaType(9, false));
+  EXPECT_EQ(Cache.Facts.pathSize(), 2U);
   Cache.invalidate({}, /*CFGChanged=*/true);
+  EXPECT_EQ(Cache.Facts.pathSize(), 0U);
   auto *Previous = cast<BranchInst>(findFactsTestBlock(F, "good")->getTerminator());
   SmallVector<BasicBlock *, 8> Added;
   for (unsigned I = 0; I < 6; ++I) {
@@ -2185,8 +2192,172 @@ TEST_F(CachedJavaTypeTest, SharedPathBudgetAdmissionRefreshesAfterCFGExpansion) 
     for (BasicBlock *BB : Added)
       EXPECT_EQ(getCachedJavaType(F.getArg(0), &DT, BB->getTerminator(),
                                  noNullEdge, Cache),
-                getJavaType(F.getArg(0), &DT, BB->getTerminator(), noNullEdge));
-  EXPECT_EQ(Cache.Facts.pathSize(), 0U);
+                JavaType(9, false));
+  EXPECT_TRUE(getJavaType(F.getArg(0), &DT, Exit->getTerminator(), noNullEdge)
+                  .isUnknown());
+  EXPECT_EQ(Cache.Facts.pathSize(), Added.size() + 1);
+}
+
+TEST_F(CachedJavaTypeTest, SharedPathsDoNotPublishBudgetTruncatedParents) {
+  auto M = parse(R"IR(
+    declare i1 @jeandle.check_instanceof(ptr, ptr nonnull)
+    define ptr @test(ptr %obj) {
+    entry:
+      %check = call i1 @jeandle.check_instanceof(
+          ptr inttoptr(i64 9 to ptr), ptr %obj)
+      br i1 %check, label %good, label %reject
+    good:
+      br label %middle
+    middle:
+      br label %exit
+    exit:
+      ret ptr %obj
+    reject:
+      ret ptr null
+    }
+  )IR");
+  ASSERT_NE(M, nullptr);
+  Function &F = *M->getFunction("test");
+  DominatorTree DT(F);
+  auto *Option =
+      cl::getRegisteredOptions().lookup("jeandle-max-facts-join-blocks");
+  ASSERT_NE(Option, nullptr);
+  auto &Budget = *static_cast<cl::opt<unsigned> *>(Option);
+  unsigned Saved = Budget;
+  auto Restore = make_scope_exit([&] { Budget = Saved; });
+  JavaTypeCache Cache(F, FactsCacheMode::StableOracleEpoch);
+  Cache.setFinalEnabled(false);
+  Instruction *At = findFactsTestBlock(F, "exit")->getTerminator();
+  Budget = 1;
+  for (unsigned I = 0; I < 2; ++I) {
+    EXPECT_TRUE(getCachedJavaType(F.getArg(0), &DT, At, noNullEdge, Cache)
+                    .isUnknown());
+    EXPECT_EQ(Cache.Facts.pathSize(), 0U);
+  }
+  Budget = 128;
+  EXPECT_EQ(getCachedJavaType(F.getArg(0), &DT, At, noNullEdge, Cache),
+            JavaType(9, false));
+  EXPECT_EQ(Cache.Facts.pathSize(), 3U);
+}
+
+TEST_F(CachedJavaTypeTest, AnalysisVerifierDistinguishesTruncatedColdQueries) {
+  auto M = parse(R"IR(
+    declare i1 @jeandle.check_instanceof(ptr, ptr nonnull)
+    define ptr @test(ptr %obj) {
+    entry:
+      %check = call i1 @jeandle.check_instanceof(
+          ptr inttoptr(i64 9 to ptr), ptr %obj)
+      br i1 %check, label %good, label %reject
+    good:
+      br label %middle
+    middle:
+      br label %exit
+    exit:
+      ret ptr %obj
+    reject:
+      ret ptr null
+    }
+  )IR");
+  ASSERT_NE(M, nullptr);
+  auto &Options = cl::getRegisteredOptions();
+  auto *BudgetOption = Options.lookup("jeandle-max-facts-join-blocks");
+  auto *StatsOption = Options.lookup("jeandle-java-type-stats");
+  auto *VerifyOption = Options.lookup("jeandle-verify-java-type-cache");
+  ASSERT_NE(BudgetOption, nullptr);
+  ASSERT_NE(StatsOption, nullptr);
+  ASSERT_NE(VerifyOption, nullptr);
+  auto &Budget = *static_cast<cl::opt<unsigned> *>(BudgetOption);
+  auto &CollectStats = *static_cast<cl::opt<bool> *>(StatsOption);
+  auto &Verify = *static_cast<cl::opt<bool> *>(VerifyOption);
+  unsigned SavedBudget = Budget;
+  bool SavedStats = CollectStats;
+  bool SavedVerify = Verify;
+  auto Restore = make_scope_exit([&] {
+    Budget = SavedBudget;
+    CollectStats = SavedStats;
+    Verify = SavedVerify;
+  });
+  Budget = 128;
+  CollectStats = true;
+  Verify = true;
+
+  Function &F = *M->getFunction("test");
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+  auto &Analysis = FAM.getResult<JavaTypeAnalysis>(F);
+  const auto &Stats = FAM.getResult<JavaTypeStatsAnalysis>(F).getStats();
+  Instruction *Middle = findFactsTestBlock(F, "middle")->getTerminator();
+  Instruction *Exit = findFactsTestBlock(F, "exit")->getTerminator();
+  EXPECT_EQ(Analysis.getJavaType(F.getArg(0), Middle), JavaType(9, false));
+  EXPECT_EQ(Stats.Verifications, 1U);
+
+  Budget = 1;
+  DominatorTree DT(F);
+  EXPECT_TRUE(getJavaType(F.getArg(0), &DT, Exit, noNullEdge).isUnknown());
+  // Exit has no Final entry. Its query reuses the complete middle path,
+  // whereas the independently checked cold query cannot reach the guard.
+  EXPECT_EQ(Analysis.getJavaType(F.getArg(0), Exit), JavaType(9, false));
+  EXPECT_EQ(Stats.Queries, 2U);
+  EXPECT_EQ(Stats.FinalHits, 0U);
+  EXPECT_EQ(Stats.FinalMisses, 2U);
+  EXPECT_EQ(Stats.Verifications, 1U);
+}
+
+TEST_F(CachedJavaTypeTest, SharedPathsReuseInstructionAndPhiPrefixes) {
+  auto M = parse(R"IR(
+    declare i1 @jeandle.check_instanceof(ptr, ptr nonnull)
+    define ptr @test(ptr %slot, i1 %pick) {
+    entry:
+      %loaded = load ptr, ptr %slot
+      %check = call i1 @jeandle.check_instanceof(
+          ptr inttoptr(i64 9 to ptr), ptr %loaded)
+      br i1 %check, label %good, label %reject
+    good:
+      br i1 %pick, label %left, label %right
+    left:
+      br label %merge
+    right:
+      br label %merge
+    merge:
+      %joined = phi ptr [ %loaded, %left ], [ %loaded, %right ]
+      br label %tail
+    tail:
+      br label %exit
+    exit:
+      ret ptr %joined
+    reject:
+      ret ptr null
+    }
+  )IR");
+  ASSERT_NE(M, nullptr);
+  Function &F = *M->getFunction("test");
+  DominatorTree DT(F);
+  JavaTypeCache Cache(F, FactsCacheMode::StableOracleEpoch);
+  Cache.setFinalEnabled(false);
+  Cache.setStatsEnabled(true);
+  Value *Loaded = findBaseTestInstruction(F, "loaded");
+  Value *Joined = findBaseTestInstruction(F, "joined");
+  auto Query = [&](Value *V, StringRef Name) {
+    Instruction *At = findFactsTestBlock(F, Name)->getTerminator();
+    JavaType Actual = getCachedJavaType(V, &DT, At, noNullEdge, Cache);
+    EXPECT_EQ(Actual, getJavaType(V, &DT, At, noNullEdge));
+    EXPECT_EQ(Actual, JavaType(9, false));
+  };
+  Query(Loaded, "good");
+  EXPECT_NE(Cache.Facts.lookupPath(Loaded, findFactsTestBlock(F, "good")),
+            nullptr);
+  uint64_t Hits = Cache.Facts.getStats().PathHits;
+  Query(Loaded, "left");
+  EXPECT_GT(Cache.Facts.getStats().PathHits, Hits);
+  Query(Joined, "tail");
+  // The PHI's definition-block facts are empty, but its completed tail facts
+  // are independent of the PHI evaluation stack and can be reused at exit.
+  EXPECT_NE(Cache.Facts.lookupPath(Joined, findFactsTestBlock(F, "tail")),
+            nullptr);
+  Hits = Cache.Facts.getStats().PathHits;
+  Query(Joined, "exit");
+  EXPECT_GT(Cache.Facts.getStats().PathHits, Hits);
 }
 
 } // namespace

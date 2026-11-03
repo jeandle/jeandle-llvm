@@ -91,7 +91,7 @@ public:
 };
 
 /// 单个 Function 的分析结果，供优化 Pass 查询 JavaType 并管理缓存失效。
-/// Owns separate Base, Defined, edge Facts and top-level Final caches. Traversal
+/// Owns separate Base, Defined, path Facts and top-level Final caches. Traversal
 /// stacks and budgets remain local to each query. DT/LVI belong to the analysis
 /// manager. Notify before IR mutation; this result clears LVI and callers must
 /// update DT before querying again. External LVI maintenance without an IR
