@@ -322,6 +322,7 @@ VirtualObject::matchArrayElementGEP(GetElementPtrInst *GEP,
 
 void VirtualObject::copyStructuralFieldsFrom(const VirtualObject &O) {
   Klass = O.Klass;
+  BoxedKind = O.BoxedKind;
   SizeInBytes = O.SizeInBytes;
   ArrayLength = O.ArrayLength;
   ArrayElementType = O.ArrayElementType;

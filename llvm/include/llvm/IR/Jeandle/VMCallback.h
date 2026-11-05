@@ -210,6 +210,9 @@ enum class JeandleInlineReason : int {
   def(IsBoxed, int, Int,                                                         \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetBoxCacheStatus, int, Int,                                               \
+      (uintptr_t a1, int64_t a2), (a1, a2),                                      \
+      (VMCallbackValueType::Uintptr, VMCallbackValueType::Long), 2)              \
   def(HasFinalizer, bool, Bool,                                                  \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
@@ -359,18 +362,19 @@ enum class JeandleInlineReason : int {
 ///                         autobox wrapper classes (java.lang.Boolean,
 ///                         Byte, Character, Short, Integer, Long, Float,
 ///                         Double); returns JBasicType::Count (9) for any
-///                         other klass or null input. Currently UNUSED by
-///                         partial escape analysis (the frontend does not
-///                         inline the valueOf intrinsic that a boxing fold
-///                         would depend on, per the "no special-
-///                         optimization unsupported by the frontend" rule).
-///                         It is wired into the callback table and recorded
-///                         by the .cblog fixtures in anticipation of a
-///                         future structural icmp-eq boxed-primitive fold
-///                         mirroring Graal's VirtualBoxingNode +
-///                         ObjectEqualsNode boxed path; until that lands it
-///                         must stay conservatively "not boxed" for every
-///                         PEA query.
+///                         other klass or null input. PEA queries it lazily
+///                         when it sees a direct wrapper unboxing call whose
+///                         receiver is still virtual; ordinary allocations do
+///                         not require an IsBoxed callback entry. This keeps
+///                         callback replay compatible with compilations that
+///                         contain no boxing/unboxing operation.
+///   GetBoxCacheStatus    — For an exact wrapper klass and decoded integral
+///                         payload, returns 1 if valueOf returns an object from
+///                         the current VM's cache, 0 if it allocates a fresh
+///                         object, and -1 if the cache cannot be inspected.
+///                         Integer therefore honors AutoBoxCacheMax. PEA uses
+///                         this only for constant payloads observed by monitor
+///                         elimination; unknown results remain conservative.
 ///   HasFinalizer         — Returns true iff the klass has a non-trivial
 ///                         finalize() method (HotSpot's
 ///                         InstanceKlass::has_finalizer()). Mirrors

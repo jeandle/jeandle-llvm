@@ -110,6 +110,7 @@ bool isSemanticNoOp(
     if (Final.Origin != DeoptPoolNodeOrigin::Legacy ||
         Final.LegacySourceIndex != I || Final.WireID != Legacy.WireID ||
         Final.Klass != Legacy.Klass || Final.IsArray != Legacy.IsArray ||
+        Final.IsBoxed != Legacy.IsBoxed ||
         Final.Fields.size() != Legacy.Fields.size())
       return false;
     for (unsigned FieldIndex = 0; FieldIndex < Final.Fields.size();
@@ -359,6 +360,7 @@ llvm::jeandle::pea::planDeoptPool(const DeoptPoolPlannerInput &Input) {
     Node.WireID = LegacyFinalWire[I];
     Node.Klass = InputNode.Klass;
     Node.IsArray = InputNode.IsArray;
+    Node.IsBoxed = InputNode.IsBoxed;
     Node.Origin = DeoptPoolNodeOrigin::Legacy;
     Node.LegacySourceIndex = I;
     for (const DeoptPoolFieldInput &Field : InputNode.Fields)
@@ -377,6 +379,7 @@ llvm::jeandle::pea::planDeoptPool(const DeoptPoolPlannerInput &Input) {
     Node.WireID = CurrentFinalWire[I];
     Node.Klass = InputNode.Klass;
     Node.IsArray = InputNode.IsArray;
+    Node.IsBoxed = InputNode.IsBoxed;
     Node.Origin = DeoptPoolNodeOrigin::Current;
     Node.CurrentID = InputNode.ID;
     for (const DeoptPoolFieldInput &Field : InputNode.Fields)

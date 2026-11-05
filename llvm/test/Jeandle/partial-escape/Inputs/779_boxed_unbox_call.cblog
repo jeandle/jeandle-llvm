@@ -1,0 +1,5 @@
+# The test allocation is java.lang.Integer (klass 400).
+RequiresStrictLockOrder = 1
+HasFinalizer 400 = false
+CanVirtualize 400 = true
+IsBoxed 400 = 4

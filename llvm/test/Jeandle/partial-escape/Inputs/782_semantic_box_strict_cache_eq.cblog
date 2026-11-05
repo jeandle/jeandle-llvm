@@ -1,0 +1,13 @@
+RequiresStrictLockOrder = 1
+IsBoxed 100 = 0
+HasFinalizer 100 = false
+CanVirtualize 100 = true
+IsBoxed 200 = 1
+HasFinalizer 200 = false
+CanVirtualize 200 = true
+IsBoxed 400 = 4
+HasFinalizer 400 = false
+CanVirtualize 400 = true
+IsBoxed 500 = 5
+HasFinalizer 500 = false
+CanVirtualize 500 = true

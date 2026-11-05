@@ -1,4 +1,5 @@
 add_llvm_component_library(LLVMJeandleTransforms
+  BoxMaterializationLowering.cpp
   CopySpecialization.cpp
   CHADevirtualization.cpp
   ConstantFieldFolding.cpp

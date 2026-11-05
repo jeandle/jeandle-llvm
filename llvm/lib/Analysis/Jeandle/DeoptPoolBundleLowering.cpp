@@ -488,6 +488,7 @@ private:
         const ParsedDeoptDescriptor &Parsed =
             Source.Descriptors[Node.LegacySourceIndex];
         if (Node.Klass != Parsed.Klass || Node.IsArray != Parsed.IsArray ||
+            Node.IsBoxed != Parsed.IsBoxed ||
             Node.Fields.size() != Parsed.Fields.size())
           return fail(FinalDeoptPoolBundleErrorCode::InvalidLegacySource,
                       Node.LegacySourceIndex);
@@ -767,8 +768,10 @@ private:
         encodeDeoptValue(Node.WireID, DeoptValueEncoding::ScalarValueType,
                          Node.IsArray ? T_ARRAY : T_OBJECT)));
     appendToken(FinalDeoptPoolBundleToken::immediateI64(Node.Klass));
-    appendToken(FinalDeoptPoolBundleToken::immediateI32(
-        static_cast<uint32_t>(Node.Fields.size())));
+    uint32_t FieldCount = static_cast<uint32_t>(Node.Fields.size());
+    if (Node.IsBoxed)
+      FieldCount |= DeoptValueEncoding::BoxedDescriptorFlag;
+    appendToken(FinalDeoptPoolBundleToken::immediateI32(FieldCount));
 
     if (Node.Origin == DeoptPoolNodeOrigin::Current)
       addGeneratedOccurrence(Node.CurrentID,

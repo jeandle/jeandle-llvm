@@ -177,6 +177,10 @@ struct ParsedDeoptDescriptor {
   int32_t WireID = 0;
   // True for array VOs (header basic type T_ARRAY), false for instances.
   bool IsArray = false;
+  // True only for a semantic jeandle.box VO. This is deliberately distinct
+  // from the klass: new Integer(...) has the same klass but ordinary object
+  // identity and must be reallocated normally on deoptimization.
+  bool IsBoxed = false;
   // Klass pointer of the object, as a raw i64.
   uint64_t Klass = 0;
   // Cells of the header, klass, and field-count operands.
@@ -347,6 +351,8 @@ bool isJeandleNewInstance(const CallBase *CB);
 bool isJeandleNewArray(const CallBase *CB);
 bool isJeandleAllocation(const CallBase *CB); // either of the above
 bool isJeandleArrayLength(const CallBase *CB);
+bool isJeandleUnbox(const CallBase *CB);
+bool isJeandleBox(const CallBase *CB);
 bool isJeandleLoadKlass(const CallBase *CB);
 bool isJeandleGetClass(const CallBase *CB);
 bool isJeandleCheckInstanceOf(const CallBase *CB);

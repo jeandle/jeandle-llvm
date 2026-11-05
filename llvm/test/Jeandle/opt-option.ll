@@ -1,4 +1,5 @@
 ; RUN: opt -S --jeandle --print-pipeline-passes %s 2>&1 | FileCheck %s
+; RUN: opt -S --jeandle --jeandle-pea=false --print-pipeline-passes %s 2>&1 | FileCheck %s --check-prefix=NOPEA
 
 ; Combined pipeline: CHA devirtualization (from main) followed by the safepoint
 ; passes (Early poll elimination, strip mining, barrier insertion, loop-deletion
@@ -7,6 +8,7 @@
 ; CHECK: java-operation-lower<phase=0>
 ; CHECK-SAME: cha-devirtualization
 ; CHECK-SAME: jeandle-inline-driver
+; CHECK-SAME: box-materialization-lowering
 ; CHECK-SAME: safepoint-poll-elimination
 ; CHECK-SAME: safepoint-strip-mining
 ; CHECK-SAME: safepoint-poll-elimination
@@ -20,6 +22,8 @@
 ; CHECK-SAME: java-operation-deletion
 ; CHECK-SAME: tls-pointer-rewrite
 ; CHECK-SAME: instsimplify
+
+; NOPEA-NOT: box-materialization-lowering
 
 define hotspotcc void @opt_option() {
 entry:
