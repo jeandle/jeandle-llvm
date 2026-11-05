@@ -656,9 +656,10 @@ static bool eraseAllocation(Instruction *Target) {
     // invoke or, for NeverEscapes, never taken). Assert the analyzer's
     // NeverEscapes contract so a future misclassification of a side-effecting
     // invoke as eliminable fails loudly instead of silently miscompiling.
-    assert(jeandle::pea::isJeandleAllocation(II) &&
+    assert((jeandle::pea::isJeandleAllocation(II) ||
+            jeandle::pea::isJeandleBox(II)) &&
            "EliminateAllocation may only drop the unwind edge of a Jeandle "
-           "allocation intrinsic (OOM-only, unobservable throw)");
+           "allocation or boxing intrinsic (OOM-only, unobservable throw)");
     BasicBlock *Normal = II->getNormalDest();
     BasicBlock *Unwind = II->getUnwindDest();
     BasicBlock *Parent = II->getParent();
@@ -685,8 +686,10 @@ static bool eraseAllocation(Instruction *Target) {
     // Same NeverEscapes contract as the invoke branch above (a call-form
     // allocation has no unwind edge to drop, but the eliminability guarantee
     // is identical).
-    assert(jeandle::pea::isJeandleAllocation(CI) &&
-           "EliminateAllocation target must be a Jeandle allocation intrinsic");
+    assert((jeandle::pea::isJeandleAllocation(CI) ||
+            jeandle::pea::isJeandleBox(CI)) &&
+           "EliminateAllocation target must be a Jeandle allocation or boxing "
+           "intrinsic");
     if (!CI->use_empty())
       CI->replaceAllUsesWith(PoisonValue::get(CI->getType()));
     CI->eraseFromParent();

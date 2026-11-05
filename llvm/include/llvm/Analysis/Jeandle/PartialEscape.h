@@ -22,6 +22,7 @@
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/Jeandle/VMConstants.h"
 #include "llvm/IR/ValueHandle.h"
 
 #include <cassert>
@@ -165,6 +166,12 @@ private:
   // Instance vs array allocation.
   ClassKind Kind;
 
+  // VM classification of an autobox wrapper. Count means that this is not
+  // one of the eight primitive wrapper classes, or that the VM callback was
+  // unavailable. This is metadata only: a boxed object is still subject to
+  // the ordinary escape, identity, and deoptimization rules.
+  JBasicType BoxedKind = JBasicType::Count;
+
 public:
   // The original `jeandle.new_instance`/`jeandle.new_array` invoke emitted by
   // the JDK abstract interpreter ("OrigAlloc") — the identity token that
@@ -251,6 +258,9 @@ public:
   ClassKind getKind() const { return Kind; }
   bool isInstance() const { return Kind == Instance; }
   bool isArray() const { return Kind == Array; }
+  bool isBoxed() const { return BoxedKind != JBasicType::Count; }
+  void setBoxedKind(JBasicType Kind) { BoxedKind = Kind; }
+  JBasicType getBoxedKind() const { return BoxedKind; }
 
   // Find or create the FieldDesc slot for (Offset, Ty), keeping Fields sorted
   // by Offset. Returns the slot's index, or -1 when the field cannot be

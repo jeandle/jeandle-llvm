@@ -93,6 +93,10 @@ using namespace llvm;
 // late effect filtering can discard an effect that was already counted, so
 // these counters diagnose analysis activity rather than audit the final plan.
 STATISTIC(JeandlePEAVirtualized, "Number of virtual objects PEA created");
+STATISTIC(JeandlePEABoxedVirtualized,
+          "Number of boxed wrapper objects virtualized by PEA");
+STATISTIC(JeandlePEAUnboxFolded,
+          "Number of wrapper unboxing calls folded by PEA");
 STATISTIC(JeandlePEAEliminated,
           "Number of allocations eliminated (erased) by PEA");
 STATISTIC(JeandlePEAMaterialized, "Number of materializations emitted by PEA");
@@ -139,6 +143,13 @@ static llvm::cl::opt<bool> JeandlePEAEliminateLocks(
     "jeandle-pea-eliminate-locks", llvm::cl::init(true), llvm::cl::Hidden,
     llvm::cl::desc("PEA: eliminate balanced monitor enter/exit pairs on "
                    "virtual (non-escaping) receivers."));
+
+// Model semantic box JavaOps as virtual objects and fold unboxing operations
+// against virtual wrapper payloads. The JDK forwards its JeandleOptBoxing VM
+// flag here; opt users set it directly.
+static llvm::cl::opt<bool> JeandlePEAOptBoxing(
+    "jeandle-pea-opt-boxing", llvm::cl::init(true), llvm::cl::Hidden,
+    llvm::cl::desc("PEA: enable boxing and unboxing elimination."));
 
 // Cascade other still-locked virtuals at materialization when the target uses
 // HotSpot's lightweight locking (LM_LIGHTWEIGHT requires strict lock nesting).
@@ -596,6 +607,8 @@ struct CFGDeadnessProof {
 // the analysis attempt validates.
 struct PEAAttemptStatistics {
   uint64_t Virtualized = 0;
+  uint64_t BoxedVirtualized = 0;
+  uint64_t UnboxFolded = 0;
   uint64_t Eliminated = 0;
   uint64_t Materialized = 0;
   uint64_t MaterializedPHI = 0;
@@ -611,6 +624,8 @@ struct PEAAttemptStatistics {
 
   void publish() const {
     JeandlePEAVirtualized += Virtualized;
+    JeandlePEABoxedVirtualized += BoxedVirtualized;
+    JeandlePEAUnboxFolded += UnboxFolded;
     JeandlePEAEliminated += Eliminated;
     JeandlePEAMaterialized += Materialized;
     JeandlePEAMaterializedPHI += MaterializedPHI;
@@ -1397,6 +1412,14 @@ private:
   // intrinsics, icmps, and alias-forwarding each get a dedicated handler;
   // anything else with a virtual operand is an escape point.
   void processInstruction(Instruction *I);
+  // Virtualize a semantic jeandle.box as a wrapper VO whose value field is
+  // initialized from the primitive payload. Records the allocation-elision
+  // effect and preserves the box's full valueOf semantics for materialization.
+  void processBox(CallBase *CB);
+  // Fold a semantic jeandle.unbox, or a recognized legacy xxxValue call, to
+  // the boxed VO's tracked primitive payload. Returns false when the receiver
+  // or payload shape cannot be modeled, allowing generic materialization.
+  bool processUnbox(CallBase *CB);
 
   // Per-block state helpers.
   // Clear CurrentState and the analyzer-wide per-object maps; called at the
@@ -1847,6 +1870,11 @@ private:
   // monitorenter branch, distinct from foldMonitorEnter's elide-path
   // pre-cascade.
   void materializeVirtualLocksBefore(CallBase *MonEnter);
+  // A semantic box can use ordinary virtual-object lock elimination only
+  // when materialization is proved to allocate a fresh object. Float/Double
+  // are always fresh; integral constant payloads query the VM's live cache.
+  // Unknown values remain conservatively cacheable.
+  bool boxedValueMayUseCache(jeandle::ObjectID ID) const;
   // Fold handlers for the VM-runtime JavaOps: array-store type check,
   // value-based-class check, and finalizer registration. Each
   // returns true iff the op was folded or elided for a virtual receiver.
@@ -1861,6 +1889,10 @@ private:
   // Record a ReplaceCall effect substituting CB with Replacement (constant
   // or alias); ID owns the mutation for eligibility filtering.
   void emitReplaceCall(CallBase *CB, Value *Replacement, jeandle::ObjectID ID);
+  // Own an analysis-created instruction and schedule its placement before an
+  // in-IR target through an ownerless ordinary effect.
+  void placeInstructionBefore(Instruction *InstructionToPlace,
+                              Instruction *Target);
   // PEA deopt support. Parse the complete safepoint bundle, combine durable
   // legacy descriptors with current virtual-object state, and publish one
   // immutable whole-pool rewrite. The pure planner owns reachability, pruning,
@@ -4722,6 +4754,8 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
     jeandle::VirtualObject &VO = *Result.VirtualObjects[PerPredIDs[i]];
     if (VO.getKind() != Ref.getKind())
       return false;
+    if (VO.getBoxedKind() != Ref.getBoxedKind())
+      return false;
     if (VO.Klass != Ref.Klass)
       return false;
     if (Ref.isArray()) {
@@ -5176,6 +5210,15 @@ void Analyzer::processInstruction(Instruction *I) {
 
   // Allocation: Jeandle allocation site.
   if (auto *CB = dyn_cast<CallBase>(I)) {
+    if (JeandlePEAOptBoxing && jeandle::pea::isJeandleBox(CB)) {
+      processBox(CB);
+      // A box is an allocation-capable JavaOp and carries the call-site
+      // deopt state just like new_instance. If it remains virtual, its
+      // scalar payload is already represented in FieldStates.
+      recordDeoptBundleMappings(CB);
+      materializeAllVirtualOperands(CB);
+      return;
+    }
     if (jeandle::pea::isJeandleAllocation(CB)) {
       processAllocation(CB);
       // The allocation's OWN deopt bundle (the frontend attaches
@@ -5926,6 +5969,15 @@ bool Analyzer::processStore(StoreInst *SI) {
     return true;
   }
 
+  // The payload of a semantic box is owned by the valueOf body.
+  // An explicit field write may be observed through aliases and changes the
+  // object's real state. Materialize the operands and keep the original store
+  // instead of replaying a synthetic FieldStates update.
+  if (VObj.isBoxed()) {
+    materializeOperandsAtStore();
+    return true;
+  }
+
   if (SI->isVolatile()) {
     materializeOperandsAtStore();
     return true;
@@ -6427,6 +6479,20 @@ void Analyzer::emitReplaceCall(CallBase *CB, Value *Replacement,
     Aliases.addScalarAlias(CB, Replacement);
 }
 
+void Analyzer::placeInstructionBefore(Instruction *InstructionToPlace,
+                                      Instruction *Target) {
+  assert(InstructionToPlace && !InstructionToPlace->getParent() && Target &&
+         Target->getParent() &&
+         "analysis-created instruction must be placed at an in-IR target");
+  Result.OwnedInsts.emplace_back(InstructionToPlace);
+  auto E = std::make_unique<jeandle::PlaceInstructionEffect>();
+  E->Block = Target->getParent();
+  E->Target = Target;
+  E->InstructionToPlace = InstructionToPlace;
+  E->SeqNo = Result.nextSeqNo();
+  Result.addBlockEffect(std::move(E));
+}
+
 std::optional<bool> Analyzer::evalSubtypeRelation(uintptr_t SubKlass,
                                                   uintptr_t SuperKlass) {
   const jeandle::VMCallbacks *CB = jeandle::getVMCallbacks();
@@ -6610,6 +6676,44 @@ void Analyzer::materializeVirtualLocksBefore(CallBase *MonEnter) {
     materializeAt(OID, MonEnter, MatReason::Cascade);
 }
 
+bool Analyzer::boxedValueMayUseCache(jeandle::ObjectID ID) const {
+  const jeandle::VirtualObject &VObj = *Result.VirtualObjects[ID];
+  assert(VObj.isBoxed() && "cache query requires a semantic box");
+  jeandle::JBasicType Kind = VObj.getBoxedKind();
+  if (Kind == jeandle::JBasicType::Float ||
+      Kind == jeandle::JBasicType::Double) {
+    return false;
+  }
+  const jeandle::VMCallbacks *VMCB = jeandle::getVMCallbacks();
+  if (!VMCB || !VMCB->GetBoxCacheStatus)
+    return true;
+  ConstantInt *ConstantPayload = nullptr;
+  if (auto ValueOffset = VMConsts.boxingValueOffset(Kind)) {
+    auto ObjectIt = FieldStates.find(ID);
+    if (ObjectIt != FieldStates.end()) {
+      auto FieldIt = ObjectIt->second.find(*ValueOffset);
+      if (FieldIt != ObjectIt->second.end() && FieldIt->second.isScalar()) {
+        Value *Payload = FieldIt->second.getScalar();
+        ConstantPayload = dyn_cast<ConstantInt>(Payload);
+        if (!ConstantPayload) {
+          if (auto *PayloadInst = dyn_cast<Instruction>(Payload)) {
+            ConstantPayload = dyn_cast_or_null<ConstantInt>(
+                ConstantFoldInstruction(PayloadInst, DL));
+          }
+        }
+      }
+    }
+  }
+  if (!ConstantPayload)
+    return true;
+  // char is unsigned; the other integral wrapper payloads are signed.
+  int64_t DecodedValue = Kind == jeandle::JBasicType::Char
+                             ? static_cast<int64_t>(
+                                   ConstantPayload->getZExtValue())
+                             : ConstantPayload->getSExtValue();
+  return VMCB->GetBoxCacheStatus(VObj.Klass, DecodedValue) != 0;
+}
+
 // Fold a monitorenter against a virtual receiver: record the lock on the
 // VO's state (addLock) and emit a ReplaceCall(null) so the transform DELETES
 // the original monitorenter call. If the object later materializes, the
@@ -6646,6 +6750,17 @@ bool Analyzer::foldMonitorEnter(CallBase *CB) {
   // stack. Return false so the call survives (the generic path then
   // materializes any other virtual operand).
   if (!Eligible.lookup(*BaseID)) {
+    if (StrictLockOrder)
+      materializeVirtualLocksBefore(CB);
+    return false;
+  }
+
+  // A cache-backed valueOf result is globally shared. Preserve its real
+  // monitor operation and let the generic call path materialize the receiver.
+  // Proven cache misses and uncached Float/Double boxes are fresh allocations
+  // and can use the ordinary virtual-object lock-elimination path below.
+  if (Result.VirtualObjects[*BaseID]->isBoxed() &&
+      boxedValueMayUseCache(*BaseID)) {
     if (StrictLockOrder)
       materializeVirtualLocksBefore(CB);
     return false;
@@ -7031,6 +7146,17 @@ bool Analyzer::foldICmpEquality(ICmpInst *ICmp) {
     return false;
   bool Op0IsNull = isa<ConstantPointerNull>(Op0);
   bool Op1IsNull = isa<ConstantPointerNull>(Op1);
+  auto IsBoxedVO = [&](std::optional<jeandle::ObjectID> ID) {
+    return ID && (*ID < Result.VirtualObjects.size()) &&
+           Result.VirtualObjects[*ID] && Result.VirtualObjects[*ID]->isBoxed();
+  };
+  // Strict PR-C1: two distinct virtual boxes must be materialized because
+  // cache identity is not derivable from VO identity. A box compared with an
+  // unrelated non-null concrete value is likewise not folded speculatively.
+  if (V0 && IsBoxedVO(V0) && !V1 && !Op1IsNull)
+    return false;
+  if (V1 && IsBoxedVO(V1) && !V0 && !Op0IsNull)
+    return false;
   bool Folded = false;
   bool EqResult = false;
   jeandle::ObjectID BaseID = jeandle::InvalidObjectID;
@@ -7044,6 +7170,16 @@ bool Analyzer::foldICmpEquality(ICmpInst *ICmp) {
     BaseID = *V1;
   } else if (V0 && V1) {
     if (*V0 != *V1) {
+      // TODO(low priority): Avoid materializing two distinct semantic boxes
+      // without relaxing HotSpot identity semantics. A future fold may
+      // compare their primitive payloads together with an exact live-cache
+      // membership test (including AutoBoxCacheMax). Boolean/Byte can use
+      // payload equality directly and distinct Float/Double valueOf sites are
+      // always unequal; the remaining wrappers require their actual VM cache
+      // bounds. Keep this conservative path until the complexity has
+      // demonstrated value.
+      if (IsBoxedVO(V0) && IsBoxedVO(V1))
+        return false;
       // Allocation-site identity proves distinctness only for the two whole
       // objects. Derived/one-past addresses from different allocations can
       // have the same numeric pointer value in LLVM IR.
@@ -7103,12 +7239,402 @@ bool Analyzer::foldICmpEquality(ICmpInst *ICmp) {
   return true;
 }
 
+static std::optional<jeandle::JBasicType>
+boxedUnboxingKindForCall(const CallBase *CB) {
+  if (jeandle::pea::isJeandleUnbox(CB)) {
+    if (CB->arg_size() != 2)
+      return std::nullopt;
+    auto *Kind = dyn_cast<ConstantInt>(CB->getArgOperand(0));
+    if (!Kind)
+      return std::nullopt;
+    uint64_t RawKind = Kind->getZExtValue();
+    if (RawKind >= 8)
+      return std::nullopt;
+    return static_cast<jeandle::JBasicType>(RawKind);
+  }
+  const Function *Callee = CB->getCalledFunction();
+  if (!Callee)
+    return std::nullopt;
+
+  StringRef Name = Callee->getName();
+  auto IsMethod = [&](StringRef Method) {
+    StringRef DynamicPrefix = "__jeandle_dynamic_call.";
+    return Name.starts_with(Method) ||
+           (Name.starts_with(DynamicPrefix) &&
+            Name.substr(DynamicPrefix.size()).starts_with(Method));
+  };
+
+  if (IsMethod("java_lang_Boolean_booleanValue()Z"))
+    return jeandle::JBasicType::Boolean;
+  if (IsMethod("java_lang_Byte_byteValue()B"))
+    return jeandle::JBasicType::Byte;
+  if (IsMethod("java_lang_Character_charValue()C"))
+    return jeandle::JBasicType::Char;
+  if (IsMethod("java_lang_Short_shortValue()S"))
+    return jeandle::JBasicType::Short;
+  if (IsMethod("java_lang_Integer_intValue()I"))
+    return jeandle::JBasicType::Int;
+  if (IsMethod("java_lang_Long_longValue()J"))
+    return jeandle::JBasicType::Long;
+  if (IsMethod("java_lang_Float_floatValue()F"))
+    return jeandle::JBasicType::Float;
+  if (IsMethod("java_lang_Double_doubleValue()D"))
+    return jeandle::JBasicType::Double;
+  return std::nullopt;
+}
+
+static Type *boxedStorageType(jeandle::JBasicType Kind, LLVMContext &Ctx) {
+  switch (Kind) {
+  case jeandle::JBasicType::Boolean:
+  case jeandle::JBasicType::Byte:
+    return Type::getInt8Ty(Ctx);
+  case jeandle::JBasicType::Char:
+  case jeandle::JBasicType::Short:
+    return Type::getInt16Ty(Ctx);
+  case jeandle::JBasicType::Int:
+    return Type::getInt32Ty(Ctx);
+  case jeandle::JBasicType::Long:
+    return Type::getInt64Ty(Ctx);
+  case jeandle::JBasicType::Float:
+    return Type::getFloatTy(Ctx);
+  case jeandle::JBasicType::Double:
+    return Type::getDoubleTy(Ctx);
+  case jeandle::JBasicType::Object:
+  case jeandle::JBasicType::Count:
+    return nullptr;
+  }
+  llvm_unreachable("unknown boxed storage type");
+}
+
+static Type *boxedComputationalType(jeandle::JBasicType Kind,
+                                    LLVMContext &Ctx) {
+  switch (Kind) {
+  case jeandle::JBasicType::Boolean:
+  case jeandle::JBasicType::Byte:
+  case jeandle::JBasicType::Char:
+  case jeandle::JBasicType::Short:
+  case jeandle::JBasicType::Int:
+    return Type::getInt32Ty(Ctx);
+  case jeandle::JBasicType::Long:
+    return Type::getInt64Ty(Ctx);
+  case jeandle::JBasicType::Float:
+    return Type::getFloatTy(Ctx);
+  case jeandle::JBasicType::Double:
+    return Type::getDoubleTy(Ctx);
+  case jeandle::JBasicType::Object:
+  case jeandle::JBasicType::Count:
+    return nullptr;
+  }
+  llvm_unreachable("unknown boxed computational type");
+}
+
+void Analyzer::processBox(CallBase *CB) {
+  if (!CB || CB->arg_size() < 3 || !CB->getType()->isPointerTy())
+    return;
+  if (UnsafeCyclicBlocks.contains(CB->getParent()) ||
+      SuppressedVirtualizations.count(CB) ||
+      CurrentMode == Mode::StopNewInLoopNest)
+    return;
+
+  auto *KindConstant = dyn_cast<ConstantInt>(CB->getArgOperand(0));
+  if (!KindConstant || !KindConstant->getType()->isIntegerTy(32) ||
+      KindConstant->getZExtValue() >= 8)
+    return;
+  auto Kind = static_cast<jeandle::JBasicType>(KindConstant->getZExtValue());
+  Type *StorageTy = boxedStorageType(Kind, F.getContext());
+  if (!StorageTy)
+    return;
+
+  uintptr_t Klass = jeandle::extractKlassConstant(CB->getArgOperand(1));
+  if (Klass == 0)
+    return;
+  if (const jeandle::VMCallbacks *VMCB = jeandle::getVMCallbacks()) {
+    if (VMCB->IsBoxed && VMCB->IsBoxed(Klass) != static_cast<int>(Kind))
+      return;
+    if (VMCB->HasFinalizer && VMCB->HasFinalizer(Klass))
+      return;
+    if (VMCB->CanVirtualize && !VMCB->CanVirtualize(Klass))
+      return;
+  }
+
+  jeandle::ObjectID ExistingID = jeandle::InvalidObjectID;
+  if (auto It = AllocSiteToVO.find(CB); It != AllocSiteToVO.end()) {
+    ExistingID = It->second;
+    if (!Eligible.lookup(ExistingID))
+      return;
+  }
+
+  auto ValueOffset = VMConsts.boxingValueOffset(Kind);
+  if (!ValueOffset)
+    return;
+
+  Value *Raw = CB->getArgOperand(2);
+  Value *Payload = nullptr;
+  auto addCast = [&](Value *Input, Instruction::CastOps Op, Type *Ty,
+                     StringRef Name) -> Value * {
+    Instruction *Cast = CastInst::Create(Op, Input, Ty, Name, nullptr);
+    Cast->setDebugLoc(CB->getDebugLoc());
+    placeInstructionBefore(Cast, CB);
+    return Cast;
+  };
+  switch (Kind) {
+  case jeandle::JBasicType::Boolean: {
+    // Boolean.valueOf treats every non-zero JVM int as true. Truncating the
+    // raw value directly would miscompile non-canonical inputs such as 256,
+    // whose low byte is zero. Model the value stored in TRUE/FALSE exactly.
+    Instruction *IsTrue = new ICmpInst(
+        ICmpInst::ICMP_NE, Raw, ConstantInt::get(Raw->getType(), 0),
+        "pea.box.boolean");
+    IsTrue->setDebugLoc(CB->getDebugLoc());
+    placeInstructionBefore(IsTrue, CB);
+    Payload = addCast(IsTrue, Instruction::ZExt, StorageTy,
+                      "pea.box.boolean.storage");
+    break;
+  }
+  case jeandle::JBasicType::Byte:
+  case jeandle::JBasicType::Char:
+  case jeandle::JBasicType::Short:
+  case jeandle::JBasicType::Int:
+    Payload = addCast(Raw, Instruction::Trunc, StorageTy, "pea.box.trunc");
+    break;
+  case jeandle::JBasicType::Long:
+    Payload = Raw;
+    break;
+  case jeandle::JBasicType::Float: {
+    Value *Bits =
+        addCast(Raw, Instruction::Trunc, Type::getInt32Ty(F.getContext()),
+                "pea.box.float.bits");
+    Payload = addCast(Bits, Instruction::BitCast, StorageTy, "pea.box.float");
+    break;
+  }
+  case jeandle::JBasicType::Double:
+    Payload = addCast(Raw, Instruction::BitCast, StorageTy, "pea.box.double");
+    break;
+  default:
+    return;
+  }
+
+  if (ExistingID != jeandle::InvalidObjectID) {
+    jeandle::ObjectID ID = ExistingID;
+    if (!Aliases.getVirtualAlias(CB))
+      Aliases.addVirtualAlias(CB, ID, /*IsWholeObject=*/true);
+    if (!CurrentState.hasObjectState(ID))
+      CurrentState.addObject(ID, jeandle::ObjectState());
+    // A loop-fixpoint retry restores FieldStates to the pre-loop snapshot but
+    // deliberately keeps AllocSiteToVO so the static allocation site reuses a
+    // stable ObjectID. Re-seed the valueOf-initialized payload on every visit;
+    // unlike a plain new_instance field, a missing box payload is not Java's
+    // default zero value.
+    FieldStates[ID][*ValueOffset] = jeandle::FieldValue::scalar(Payload);
+    auto E = std::make_unique<jeandle::EliminateAllocationEffect>();
+    E->Block = CB->getParent();
+    E->Target = CB;
+    E->SeqNo = Result.nextSeqNo();
+    E->setMutationOwner(ID);
+    Result.addBlockEffect(std::move(E));
+    if (CurrentMode == Mode::MaterializeAll) {
+      BasicBlock *MatBB = CB->getParent();
+      if (auto *II = dyn_cast<InvokeInst>(CB))
+        MatBB = II->getNormalDest();
+      PendingMaterializeAllVOs[MatBB].push_back(ID);
+    }
+    return;
+  }
+
+  auto VO = std::make_unique<jeandle::VirtualObject>(
+      jeandle::InvalidObjectID, jeandle::VirtualObject::Instance, CB);
+  VO->Klass = Klass;
+  // jeandle.box owns the complete materialization layout; PEA only tracks
+  // the primitive value field, so generic layout accesses conservatively
+  // treat the zero size as unknown and materialize the box.
+  VO->SizeInBytes = 0;
+  VO->setBoxedKind(Kind);
+  if (VO->getOrCreateFieldIndex(*ValueOffset, StorageTy, DL) < 0)
+    return;
+
+  jeandle::ObjectID ID = Result.createVirtualObject(std::move(VO));
+  AllocSiteToVO[CB] = ID;
+  Aliases.addVirtualAlias(CB, ID, /*IsWholeObject=*/true);
+  CurrentState.addObject(ID, jeandle::ObjectState());
+  Eligible[ID] = true;
+  FieldStates[ID][*ValueOffset] = jeandle::FieldValue::scalar(Payload);
+
+  auto E = std::make_unique<jeandle::EliminateAllocationEffect>();
+  E->Block = CB->getParent();
+  E->Target = CB;
+  E->SeqNo = Result.nextSeqNo();
+  E->setMutationOwner(ID);
+  Result.addBlockEffect(std::move(E));
+  ++Result.VirtualizationDelta;
+  ++AttemptStats.Virtualized;
+  ++AttemptStats.BoxedVirtualized;
+
+  if (CurrentMode == Mode::MaterializeAll) {
+    BasicBlock *MatBB = CB->getParent();
+    if (auto *II = dyn_cast<InvokeInst>(CB))
+      MatBB = II->getNormalDest();
+    PendingMaterializeAllVOs[MatBB].push_back(ID);
+  }
+}
+
+bool Analyzer::processUnbox(CallBase *CB) {
+  const bool IsSemanticUnbox = jeandle::pea::isJeandleUnbox(CB);
+  if ((IsSemanticUnbox ? CB->arg_size() != 2 : CB->arg_size() != 1) ||
+      CB->getType()->isVoidTy())
+    return false;
+
+  auto Kind = boxedUnboxingKindForCall(CB);
+  if (!Kind)
+    return false;
+
+  auto BaseID = jeandle::pea::resolveVirtualRef(
+      CB->getArgOperand(CB->arg_size() - 1), CurrentState, Aliases, DL);
+  if (!BaseID || !Eligible.lookup(*BaseID))
+    return false;
+
+  jeandle::VirtualObject &VObj = *Result.VirtualObjects[*BaseID];
+  if (!VObj.isInstance())
+    return false;
+
+  if (VObj.isBoxed()) {
+    // Semantic boxes carry their primitive kind in the VO. They have no need
+    // to go through the VM's class-based legacy-wrapper query.
+    if (VObj.getBoxedKind() != *Kind)
+      return false;
+  } else {
+    // Legacy unbox calls may still observe a normal new_instance wrapper.
+    // Query the VM lazily: most virtual objects are not wrappers, and eagerly
+    // classifying every instance would make callback logs depend on IsBoxed
+    // even when no unboxing operation is present.
+    auto *Origin = dyn_cast_or_null<CallBase>((Value *)VObj.AllocationCall);
+    // Do not classify a semantic box as a legacy wrapper if its boxed marker
+    // was lost; that would hide an inconsistent VO state and could change its
+    // identity semantics.
+    if (Origin && jeandle::pea::isJeandleBox(Origin))
+      return false;
+    const jeandle::VMCallbacks *VMCB = jeandle::getVMCallbacks();
+    if (!VMCB || !VMCB->IsBoxed)
+      return false;
+    int RawKind = VMCB->IsBoxed(VObj.Klass);
+    if (RawKind < 0 || RawKind >= static_cast<int>(jeandle::JBasicType::Count))
+      return false;
+    if (static_cast<jeandle::JBasicType>(RawKind) != *Kind)
+      return false;
+  }
+
+  LLVMContext &Ctx = F.getContext();
+  Type *StorageTy = boxedStorageType(*Kind, Ctx);
+  Type *ResultTy = IsSemanticUnbox ? Type::getInt64Ty(Ctx)
+                                   : boxedComputationalType(*Kind, Ctx);
+  if (!StorageTy || !ResultTy || CB->getType() != ResultTy)
+    return false;
+
+  // HotSpot has distinct offsets for the ordinary and the 64-bit-aligned
+  // wrapper payload slots. The FieldDesc proves only that the physical slot
+  // is representable; the reaching FieldValue below is what proves the
+  // wrapper payload. Requiring both prevents an unrecognized initialization
+  // shape from being treated as a zero value.
+  auto ValueOffset = VMConsts.boxingValueOffset(*Kind);
+  if (!ValueOffset)
+    return false;
+  const jeandle::VirtualObject::FieldDesc *Field = VObj.findField(*ValueOffset);
+  if (!Field || Field->LLVMType != StorageTy)
+    return false;
+
+  const jeandle::FieldValue *Existing = nullptr;
+  auto FieldsIt = FieldStates.find(*BaseID);
+  if (FieldsIt != FieldStates.end()) {
+    auto ValueIt = FieldsIt->second.find(*ValueOffset);
+    if (ValueIt != FieldsIt->second.end())
+      Existing = &ValueIt->second;
+  }
+  if (!Existing || !Existing->isScalar()) {
+    // A missing or non-scalar reaching definition means that PEA has not
+    // proved the primitive payload. Unlike a generic field load, an unbox
+    // cannot invent Java's default value here. Keep the original call.
+    return false;
+  }
+  observeFieldDefinition(*BaseID, *ValueOffset, FieldDefinitions);
+
+  Value *StoredValue = Existing->getScalar();
+  Value *Replacement = nullptr;
+  if (IsSemanticUnbox) {
+    auto addCast = [&](Instruction::CastOps Op, Value *V, Type *Ty,
+                       StringRef Name) -> Value * {
+      Instruction *I = CastInst::Create(Op, V, Ty, Name, nullptr);
+      I->setDebugLoc(CB->getDebugLoc());
+      placeInstructionBefore(I, CB);
+      return I;
+    };
+    switch (*Kind) {
+    case jeandle::JBasicType::Boolean:
+    case jeandle::JBasicType::Char:
+      Replacement =
+          addCast(Instruction::ZExt, StoredValue, ResultTy, "pea.unbox.zext");
+      break;
+    case jeandle::JBasicType::Byte:
+    case jeandle::JBasicType::Short:
+    case jeandle::JBasicType::Int:
+      Replacement =
+          addCast(Instruction::SExt, StoredValue, ResultTy, "pea.unbox.sext");
+      break;
+    case jeandle::JBasicType::Long:
+      Replacement = StoredValue;
+      break;
+    case jeandle::JBasicType::Float: {
+      Value *Bits = addCast(Instruction::BitCast, StoredValue,
+                            Type::getInt32Ty(Ctx), "pea.unbox.float.bits");
+      Replacement =
+          addCast(Instruction::ZExt, Bits, ResultTy, "pea.unbox.float");
+      break;
+    }
+    case jeandle::JBasicType::Double:
+      Replacement = addCast(Instruction::BitCast, StoredValue, ResultTy,
+                            "pea.unbox.double");
+      break;
+    default:
+      return false;
+    }
+  } else if (StoredValue->getType() == ResultTy) {
+    Replacement = StoredValue;
+  } else {
+    const bool IsUnsignedKind = *Kind == jeandle::JBasicType::Boolean ||
+                                *Kind == jeandle::JBasicType::Char;
+    const bool IsSignedKind = *Kind == jeandle::JBasicType::Byte ||
+                              *Kind == jeandle::JBasicType::Short;
+    const bool NeedsIntegerWidening =
+        StoredValue->getType()->isIntegerTy() && ResultTy->isIntegerTy() &&
+        StoredValue->getType()->getIntegerBitWidth() <
+            ResultTy->getIntegerBitWidth();
+
+    if ((IsUnsignedKind || IsSignedKind) && NeedsIntegerWidening) {
+      Instruction::CastOps Op =
+          IsUnsignedKind ? Instruction::ZExt : Instruction::SExt;
+      Instruction *Cast =
+          CastInst::Create(Op, StoredValue, ResultTy, "pea.unbox", nullptr);
+      Cast->setDebugLoc(CB->getDebugLoc());
+      placeInstructionBefore(Cast, CB);
+      Replacement = Cast;
+    } else {
+      Replacement = coerceToType(StoredValue, ResultTy, CB);
+    }
+  }
+  if (!Replacement)
+    return false;
+  emitReplaceCall(CB, Replacement, *BaseID);
+  ++AttemptStats.UnboxFolded;
+  return true;
+}
+
 // Dispatch a recognized JavaOp on a virtual receiver to its fold. Returns
 // true iff the call was handled — folded to a constant / deleted, or a
 // known-safe non-escaping shape needing no transform; false routes the call
 // to the generic escape path.
 bool Analyzer::processJavaOp(CallBase *CB) {
   using namespace jeandle::pea;
+  if (JeandlePEAOptBoxing &&
+      (isJeandleUnbox(CB) || boxedUnboxingKindForCall(CB).has_value()))
+    return processUnbox(CB);
   if (isJeandleArrayLength(CB))
     return foldArrayLength(CB);
   if (isJeandleLoadKlass(CB))
@@ -7304,6 +7830,7 @@ void Analyzer::recordDeoptBundleMappings(CallBase *CB) {
       jeandle::VirtualObject &VObj = *Result.VirtualObjects[ID];
       Node.Klass = VObj.Klass;
       Node.IsArray = VObj.isArray();
+      Node.IsBoxed = VObj.isBoxed();
       bool HasIdentity = VObj.IsSynthetic ? VObj.SyntheticPhi != nullptr
                                           : VObj.AllocationCall != nullptr;
       Node.Describable = IsCurrentVirtual(ID) && VObj.Klass != 0 && HasIdentity;
@@ -7504,6 +8031,7 @@ void Analyzer::recordDeoptBundleMappings(CallBase *CB) {
       Node.WireID = static_cast<uint32_t>(Descriptor.WireID);
       Node.Klass = Descriptor.Klass;
       Node.IsArray = Descriptor.IsArray;
+      Node.IsBoxed = Descriptor.IsBoxed;
       for (const ParsedDeoptField &Field : Descriptor.Fields) {
         DeoptPoolSemanticCellID Cell = Field.ValueCell.OperandIndex;
         if (Field.TargetWireID) {
@@ -8535,6 +9063,11 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
     llvm::sort(Offsets); // deterministic snapshot order
     for (int64_t Off : Offsets) {
       const jeandle::FieldValue &FV = FSIt->second.lookup(Off);
+      // jeandle.box already owns the complete valueOf materialization
+      // semantics. Its synthetic payload FieldState is analysis-only and
+      // must not be replayed as a second store onto the surviving box.
+      if (VObj.isBoxed())
+        continue;
       if (FV.isUnknown())
         continue;
       const jeandle::VirtualObject::FieldDesc *FD = VObj.findField(Off);

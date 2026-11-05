@@ -131,6 +131,10 @@ VMConstants VMConstants::fromModule(const Module &M) {
     C.ArrayLengthOffset = *V;
   if (auto V = readGlobalInt(M, "instanceOopDesc.base_offset_in_bytes"))
     C.InstanceBaseOffset = *V;
+  if (auto V = readGlobalInt(M, "java_lang_boxing_object.value_offset"))
+    C.BoxingValueOffset = *V;
+  if (auto V = readGlobalInt(M, "java_lang_boxing_object.long_value_offset"))
+    C.BoxingLongValueOffset = *V;
 
   for (unsigned I = 0; I < (unsigned)JBasicType::Count; ++I) {
     const char *N = jBasicTypeName(static_cast<JBasicType>(I));

@@ -127,6 +127,10 @@ struct LegacyDeoptPoolNode {
   // Raw klass identity (InstanceKlass/ArrayKlass pointer) serialized verbatim.
   uint64_t Klass = 0;
   bool IsArray = false;
+  // Preserved only for descriptors produced from a semantic jeandle.box.
+  // Klass alone is insufficient because new Integer(...) is an ordinary
+  // identity-observing allocation of the same wrapper class.
+  bool IsBoxed = false;
   // Fields in wire order.
   SmallVector<DeoptPoolFieldInput, 8> Fields;
 };
@@ -137,6 +141,8 @@ struct CurrentDeoptPoolNode {
   CurrentDeoptNodeID ID = InvalidCurrentDeoptNodeID;
   uint64_t Klass = 0;
   bool IsArray = false;
+  // True when this current PEA node came from the semantic jeandle.box op.
+  bool IsBoxed = false;
   // False when PEA cannot describe this object on the wire (e.g. an array
   // whose element layout is not canonical). A reachable undescribable node
   // aborts planning and is reported as a fallback seed for the caller to
@@ -231,6 +237,7 @@ struct FinalDeoptPoolNode {
   uint32_t WireID = InvalidDeoptPoolWireID;
   uint64_t Klass = 0;
   bool IsArray = false;
+  bool IsBoxed = false;
   DeoptPoolNodeOrigin Origin = DeoptPoolNodeOrigin::Legacy;
   unsigned LegacySourceIndex = std::numeric_limits<unsigned>::max();
   CurrentDeoptNodeID CurrentID = InvalidCurrentDeoptNodeID;

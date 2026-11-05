@@ -90,6 +90,14 @@ bool isJeandleArrayLength(const CallBase *CB) {
   return isJeandleCallNamed(CB, "jeandle.arraylength");
 }
 
+bool isJeandleUnbox(const CallBase *CB) {
+  return isJeandleCallNamed(CB, "jeandle.unbox");
+}
+
+bool isJeandleBox(const CallBase *CB) {
+  return isJeandleCallNamed(CB, "jeandle.box");
+}
+
 bool isJeandleLoadKlass(const CallBase *CB) {
   return isJeandleCallNamed(CB, "jeandle.load_klass");
 }
@@ -1176,7 +1184,11 @@ private:
     ConstantInt *FieldCount = getIntegerConstant(Inputs[Pos], 32);
     if (!FieldCount || FieldCount->isNegative())
       return failBool(DeoptBundleParseErrorCode::InvalidSemanticValue, Pos);
-    uint64_t Count = FieldCount->getZExtValue();
+    uint32_t RawFieldCount = static_cast<uint32_t>(FieldCount->getZExtValue());
+    Descriptor.IsBoxed =
+        (RawFieldCount & DeoptValueEncoding::BoxedDescriptorFlag) != 0;
+    uint64_t Count =
+        RawFieldCount & DeoptValueEncoding::DescriptorFieldCountMask;
     Descriptor.FieldCountCell =
         recordCell(DeoptSemanticCellRole::DescriptorFieldCount, Pos, true);
     ++Pos;

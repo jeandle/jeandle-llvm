@@ -12,6 +12,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Jeandle/BoxMaterializationLowering.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
 #include "llvm/Transforms/Jeandle/CopySpecialization.h"
 #include "llvm/Transforms/Jeandle/ExpandNarrowOopCast.h"
@@ -288,6 +289,14 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     //       materializations exposed by InstCombine+SimplifyCFG+ADCE between
     //       rounds.
     PM.addPass(createModuleToFunctionPassAdaptor(PartialEscapeIterative()));
+
+    // A semantic box must remain opaque through every PEA iteration. Expand
+    // only the surviving operations once the fixpoint is complete, while the
+    // ordinary valueOf cache/allocation CFG can still benefit from field,
+    // range, and loop optimization.
+    PM.addPass(BoxMaterializationLowering());
+    PM.addPass(createModuleToFunctionPassAdaptor(InstCombinePass()));
+    PM.addPass(createModuleToFunctionPassAdaptor(SimplifyCFGPass()));
   }
   // Post-inline type recovery + TCE — unconditional. Runs for both PEA-on
   // (cleans up PEA's materializations) and PEA-off (the default config) so
@@ -345,6 +354,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   }
 
   PM.addPass(JavaOperationLower(1));
+  // Box/unbox helpers remain opaque through PEA so it can model their Java
+  // semantics. Lower every surviving phase-2 helper before the stock LLVM
+  // pipeline and before JavaOperationDeletion removes JavaOp definitions.
+  PM.addPass(JavaOperationLower(2));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(Level)));
   PM.addPass(ExpandNarrowOopCast());
   PM.addPass(RewriteStatepointsForGC());

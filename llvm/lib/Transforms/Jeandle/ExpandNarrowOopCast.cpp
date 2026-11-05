@@ -9,6 +9,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/ExpandNarrowOopCast.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -104,8 +105,52 @@ PreservedAnalyses ExpandNarrowOopCast::run(Module &M, ModuleAnalysisManager &) {
     Changed = true;
   }
 
+  // Decoding compressed oops is injective. Keep equality in the narrow
+  // domain when both operands are decoded values, matching C2's CmpN shape
+  // and avoiding two redundant decode operations.
+  SmallVector<ICmpInst *, 16> NarrowOopCmps;
+  for (Function &F : M) {
+    for (Instruction &I : instructions(F)) {
+      auto *Cmp = dyn_cast<ICmpInst>(&I);
+      if (!Cmp || !Cmp->isEquality())
+        continue;
+      auto *LHS = dyn_cast<AddrSpaceCastInst>(Cmp->getOperand(0));
+      auto *RHS = dyn_cast<AddrSpaceCastInst>(Cmp->getOperand(1));
+      if (!LHS || !RHS)
+        continue;
+      if (getPointerAddressSpace(LHS->getOperand(0)->getType()) !=
+              jeandle::AddrSpace::NarrowOopAddrSpace ||
+          getPointerAddressSpace(RHS->getOperand(0)->getType()) !=
+              jeandle::AddrSpace::NarrowOopAddrSpace ||
+          getPointerAddressSpace(LHS->getType()) !=
+              jeandle::AddrSpace::JavaHeapAddrSpace ||
+          getPointerAddressSpace(RHS->getType()) !=
+              jeandle::AddrSpace::JavaHeapAddrSpace)
+        continue;
+      NarrowOopCmps.push_back(Cmp);
+    }
+  }
+  for (ICmpInst *Cmp : NarrowOopCmps) {
+    auto *LHS = cast<AddrSpaceCastInst>(Cmp->getOperand(0));
+    auto *RHS = cast<AddrSpaceCastInst>(Cmp->getOperand(1));
+    IRBuilder<> Builder(Cmp);
+    Value *NarrowCmp = Builder.CreateICmp(Cmp->getPredicate(),
+                                          LHS->getOperand(0),
+                                          RHS->getOperand(0));
+    if (auto *NarrowCmpInst = dyn_cast<Instruction>(NarrowCmp))
+      NarrowCmpInst->setDebugLoc(Cmp->getDebugLoc());
+    Cmp->replaceAllUsesWith(NarrowCmp);
+    Cmp->eraseFromParent();
+    Changed = true;
+  }
+
   // AddrSpaceCast instruction
   for (AddrSpaceCastInst *Cast : Casts) {
+    if (Cast->use_empty()) {
+      Cast->eraseFromParent();
+      Changed = true;
+      continue;
+    }
     unsigned SrcAS = getPointerAddressSpace(Cast->getOperand(0)->getType());
     unsigned DstAS = getPointerAddressSpace(Cast->getType());
 
@@ -120,9 +165,43 @@ PreservedAnalyses ExpandNarrowOopCast::run(Module &M, ModuleAnalysisManager &) {
       continue;
     }
 
+    // If a decoded oop feeds a deopt bundle in another block, decode it at the
+    // call site instead of extending the wide oop through the intervening
+    // control flow. The narrow source dominates every use because the original
+    // cast did.
+    if (Callee == Decode) {
+      SmallVector<Use *, 4> SunkDeoptUses;
+      for (Use &U : Cast->uses()) {
+        auto *CB = dyn_cast<CallBase>(U.getUser());
+        if (CB && CB->isBundleOperand(&U) &&
+            CB->getOperandBundleForOperand(U.getOperandNo())
+                .isDeoptOperandBundle() &&
+            CB->getParent() != Cast->getParent())
+          SunkDeoptUses.push_back(&U);
+      }
+      DenseMap<CallBase *, CallInst *> SunkDecodes;
+      for (Use *U : SunkDeoptUses) {
+        auto *CB = cast<CallBase>(U->getUser());
+        CallInst *&Call = SunkDecodes[CB];
+        if (!Call) {
+          IRBuilder<> Builder(CB);
+          Call = Builder.CreateCall(Decode, {Cast->getOperand(0)});
+          Call->setCallingConv(CallingConv::Hotspot_JIT);
+          Call->setDebugLoc(Cast->getDebugLoc());
+        }
+        U->set(Call);
+        Changed = true;
+      }
+      if (Cast->use_empty()) {
+        Cast->eraseFromParent();
+        continue;
+      }
+    }
+
     IRBuilder<> Builder(Cast);
     CallInst *Call = Builder.CreateCall(Callee, {Cast->getOperand(0)});
     Call->setCallingConv(CallingConv::Hotspot_JIT);
+    Call->setDebugLoc(Cast->getDebugLoc());
     Cast->replaceAllUsesWith(Call);
     Cast->eraseFromParent();
     Changed = true;

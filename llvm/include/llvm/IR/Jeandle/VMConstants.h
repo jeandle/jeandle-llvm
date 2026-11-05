@@ -51,6 +51,7 @@
 #define LLVM_IR_JEANDLE_VMCONSTANTS_H
 
 #include <cstdint>
+#include <optional>
 
 namespace llvm {
 
@@ -89,6 +90,12 @@ struct VMConstants {
   // override this with the real first Java-field offset from HotSpot.
   int64_t InstanceBaseOffset = 0;
 
+  // java.lang primitive-wrapper payload layout. HotSpot uses a separately
+  // aligned slot for long/double when compressed class pointers make the
+  // ordinary first-field offset only four-byte aligned.
+  int64_t BoxingValueOffset = -1;
+  int64_t BoxingLongValueOffset = -1;
+
   // Per-element-type base offsets. Indexed by JBasicType.
   int64_t ArrayBaseOffset[(unsigned)JBasicType::Count] = {
       /*Boolean*/ 16, /*Byte*/ 16, /*Char*/ 16,  /*Short*/ 16,
@@ -119,6 +126,14 @@ struct VMConstants {
   int64_t markWordOffset() const { return MarkWordOffset; }
   int64_t defaultMarkWord() const { return DefaultMarkWord; }
   int64_t instanceBaseOffset() const { return InstanceBaseOffset; }
+  std::optional<int64_t> boxingValueOffset(JBasicType Kind) const {
+    int64_t Offset = Kind == JBasicType::Long || Kind == JBasicType::Double
+                         ? BoxingLongValueOffset
+                         : BoxingValueOffset;
+    if (Offset < 0)
+      return std::nullopt;
+    return Offset;
+  }
   int64_t arrayOperationPartialInlineSize() const {
     return ArrayOperationPartialInlineSize;
   }

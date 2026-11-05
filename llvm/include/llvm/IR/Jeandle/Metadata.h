@@ -34,6 +34,15 @@ public:
 
   static constexpr const char *InlineScopeID = "inline-scope-id";
 
+  // Short-lived transport from the Java frontend to
+  // BoxMaterializationLowering. The operands are the measured cache-hit and
+  // cache-miss counts from the wrapper valueOf method plus an i1 indicating
+  // that a strict-zero miss edge may become an unstable-if trap. The lowering
+  // pass consumes this node and attaches ordinary branch_weights to the
+  // generated cache range check.
+  static constexpr const char *BoxCacheBranchWeights =
+      "box-cache-branch-weights";
+
   // Set by inclusive loop versioning on the latch of the slow-path clone so the
   // later strip-mining pass skips it instead of trying to version it again.
   static constexpr const char *InclusiveSlowPath = "jeandle.inclusive.slow";

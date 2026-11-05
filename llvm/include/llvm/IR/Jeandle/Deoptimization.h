@@ -132,6 +132,13 @@ class DeoptValueEncoding {
   friend class JeandleCompiledCode;
 
 public:
+  // ScalarValueType descriptors use the high bit of their field-count word
+  // as an out-of-band marker for a semantic java.lang.* box.  The remaining
+  // 31 bits retain the ordinary non-negative i32 field count.
+  static constexpr uint32_t BoxedDescriptorFlag = 1u << 31;
+  static constexpr uint32_t DescriptorFieldCountMask =
+      ~BoxedDescriptorFlag;
+
   enum DeoptValueType {
     LocalType = 0,
     StackType = 1,

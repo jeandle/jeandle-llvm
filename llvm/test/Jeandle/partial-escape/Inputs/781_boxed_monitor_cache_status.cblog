@@ -1,0 +1,9 @@
+RequiresStrictLockOrder = 1
+IsBoxed 400 = 4
+HasFinalizer 400 = false
+CanVirtualize 400 = true
+GetBoxCacheStatus 400 0 = 1
+GetBoxCacheStatus 400 1000 = 0
+IsBoxed 600 = 6
+HasFinalizer 600 = false
+CanVirtualize 600 = true
