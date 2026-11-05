@@ -70,7 +70,8 @@ void collectDpowCallees(Module &M, SmallPtrSetImpl<const Value *> &Callees) {
   }
 }
 
-bool isDpowCall(const CallBase &CB, const SmallPtrSetImpl<const Value *> &Callees) {
+bool isDpowCall(const CallBase &CB,
+                const SmallPtrSetImpl<const Value *> &Callees) {
   // The frontend emits plain calls; an invoke carries exception edges whose
   // removal would change the CFG, and a musttail call must stay a call.
   if (!isa<CallInst>(CB) || CB.isMustTailCall())
@@ -81,7 +82,8 @@ bool isDpowCall(const CallBase &CB, const SmallPtrSetImpl<const Value *> &Callee
   // of the same name is reused with a different signature.
   FunctionType *FTy = CB.getFunctionType();
   return FTy->getReturnType()->isDoubleTy() && FTy->getNumParams() == 2 &&
-         FTy->getParamType(0)->isDoubleTy() && FTy->getParamType(1)->isDoubleTy();
+         FTy->getParamType(0)->isDoubleTy() &&
+         FTy->getParamType(1)->isDoubleTy();
 }
 
 } // namespace
@@ -119,11 +121,12 @@ PreservedAnalyses LibmIdentityFolding::run(Function &F,
     const auto *Exp = cast<ConstantFP>(CB->getArgOperand(1));
     Value *Base = CB->getArgOperand(0);
     Value *Replacement =
-        Exp->isZero() ? static_cast<Value *>(ConstantFP::get(Base->getType(), 1.0))
-                      : IRBuilder<>(CB).CreateFMul(Base, Base, "pow.identity");
+        Exp->isZero()
+            ? static_cast<Value *>(ConstantFP::get(Base->getType(), 1.0))
+            : IRBuilder<>(CB).CreateFMul(Base, Base, "pow.identity");
     LLVM_DEBUG(dbgs() << "folded dpow identity in " << F.getName()
-                      << ": exponent " << Exp->getValueAPF()
-                      << " -> " << *Replacement << "\n");
+                      << ": exponent " << Exp->getValueAPF() << " -> "
+                      << *Replacement << "\n");
     CB->replaceAllUsesWith(Replacement);
     CB->eraseFromParent();
   }
