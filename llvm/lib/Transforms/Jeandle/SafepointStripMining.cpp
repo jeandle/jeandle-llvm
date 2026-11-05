@@ -515,6 +515,7 @@ struct HeaderPhiState {
 enum class PrimaryExitValueKind {
   LoopInvariant,
   ResumeIV,
+  TruncatedResumeIV,
   LiftedRecurrence,
 };
 
@@ -782,6 +783,13 @@ buildStripMinePlanWithIV(Loop *L, const IVInfo &IV, ICmpInst *ExitCmp,
       PrimaryExitPhis.push_back({&Phi, V, PrimaryExitValueKind::ResumeIV, 0});
       continue;
     }
+    if (auto *Trunc = dyn_cast<TruncInst>(V)) {
+      if (Trunc->getOperand(0) == Shape.ResumeIV) {
+        PrimaryExitPhis.push_back(
+            {&Phi, V, PrimaryExitValueKind::TruncatedResumeIV, 0});
+        continue;
+      }
+    }
     PHINode *HPhi = getHeaderPhiForLatchValue(V, Shape.Header, Shape.Latch);
     if (!HPhi || HPhi == IV.Phi) {
       LLVM_DEBUG(dbgs() << "  reject " << L->getHeader()->getName()
@@ -951,6 +959,12 @@ bool StripMinePlan::stillStructurallyValid(LoopInfo &LI,
       if (State.IncomingValue != Shape.ResumeIV)
         return false;
       break;
+    case PrimaryExitValueKind::TruncatedResumeIV: {
+      auto *Trunc = dyn_cast<TruncInst>(State.IncomingValue);
+      if (!Trunc || Trunc->getOperand(0) != Shape.ResumeIV)
+        return false;
+      break;
+    }
     case PrimaryExitValueKind::LiftedRecurrence:
       if (State.RecurrenceIndex >= LiftedHeaderPhis.size() ||
           LiftedHeaderPhis[State.RecurrenceIndex]->getIncomingValueForBlock(
@@ -1327,6 +1341,15 @@ static void fixupPrimaryExitPhis(StripMinePlan &Plan, BasicBlock *OuterHeader,
       Phi->setIncomingValue(Idx, Shape.FirstIterationGuaranteed ? OuterIV
                                                                 : OuterIVNext);
       break;
+    case PrimaryExitValueKind::TruncatedResumeIV: {
+      BasicBlock *ExitFrom =
+          Shape.FirstIterationGuaranteed ? OuterHeader : OuterLatch;
+      IRBuilder<> B(ExitFrom->getTerminator());
+      Value *ExitIV = Shape.FirstIterationGuaranteed ? OuterIV : OuterIVNext;
+      Phi->setIncomingValue(
+          Idx, B.CreateTrunc(ExitIV, Phi->getType(), "outer.iv.exit"));
+      break;
+    }
     case PrimaryExitValueKind::LiftedRecurrence:
       assert(State.RecurrenceIndex < OuterReducPhis.size() &&
              "planned recurrence index out of range");

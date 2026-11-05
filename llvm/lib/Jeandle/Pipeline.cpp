@@ -77,11 +77,12 @@ static cl::opt<InlinePolicy> JeandleInlinePolicy(
                           "Inline accessor methods only"),
                clEnumValN(InlinePolicy::Off, "off", "Disable inlining")));
 
-Pipeline::Pipeline(OptimizationLevel Level, LLVMContext &Ctx, PipelineMode Mode)
+Pipeline::Pipeline(OptimizationLevel Level, LLVMContext &Ctx, TargetMachine *TM,
+                   PipelineMode Mode)
     : SI(Ctx, /*DebugLogging=*/false) {
   SI.registerCallbacks(PIC, &MAM);
 
-  PassBuilder PB(nullptr, PipelineTuningOptions(), std::nullopt, &PIC);
+  PassBuilder PB(TM, PipelineTuningOptions(), std::nullopt, &PIC);
 
   // Register all the basic analyses with the managers.
   PB.registerModuleAnalyses(MAM);
