@@ -7,6 +7,7 @@ add_llvm_component_library(LLVMJeandleTransforms
   JavaOperationDeletion.cpp
   JavaOperationLower.cpp
   JavaOpLengthFolding.cpp
+  LibmIdentityFolding.cpp
   PartialEscapeIterative.cpp
   PartialEscapeTransform.cpp
   JeandleNarrowOopMarker.cpp

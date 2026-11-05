@@ -21,6 +21,7 @@
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
 #include "llvm/Transforms/Jeandle/JeandleNarrowOopMarker.h"
+#include "llvm/Transforms/Jeandle/LibmIdentityFolding.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeIterative.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeTransform.h"
 #include "llvm/Transforms/Jeandle/ProfileDevirtualization.h"
@@ -182,6 +183,15 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
       break;
     }
   }
+  // Fold the exact constant-exponent identities of the runtime dpow call
+  // (dpow(x,2.0)->x*x, dpow(x,+-0.0)->1.0) here and again after the O3
+  // pipeline: literal exponents and exponents revealed by the inline driver
+  // are visible at this point, so the folded multiply/constant feeds the
+  // high-tier loop cluster and everything below; the second run catches
+  // exponents the O3 SCCP/instcombine rounds reveal. The pass itself does
+  // not look through selects/PHIs -- that division of labor is what keeps
+  // the frontend free of constant-exponent checks. See LibmIdentityFolding.h.
+  PM.addPass(createModuleToFunctionPassAdaptor(LibmIdentityFolding()));
   // ==== PEA segment ====
   // Everything below up to InsertGCBarriers exists to serve PEA: the
   // high-tier loop-optimization cluster that exposes virtualization
@@ -347,6 +357,9 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
 
   PM.addPass(JavaOperationLower(1));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(Level)));
+  // Second LibmIdentityFolding run: catch dpow exponents the O3 pipeline
+  // revealed as constants (see the first run above).
+  PM.addPass(createModuleToFunctionPassAdaptor(LibmIdentityFolding()));
   PM.addPass(ExpandNarrowOopCast());
   PM.addPass(RewriteStatepointsForGC());
   PM.addPass(createModuleToFunctionPassAdaptor(JeandleNarrowOopMarker()));
