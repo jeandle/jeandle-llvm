@@ -9,11 +9,19 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/StringIntrinsicSpecialization.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
+#include "llvm/Analysis/LazyValueInfo.h"
+#include "llvm/Analysis/Loads.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Jeandle/StringIntrinsics.h"
 #include "llvm/IR/Jeandle/VMConstants.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
 
 using namespace llvm;
@@ -172,7 +180,7 @@ public:
   }
 };
 
-bool specialize(CallBase &CB) {
+bool specialize(CallBase &CB, bool PreserveScalarConversions) {
   auto Op = decodeStringIntrinsic(CB);
   // Bundles may carry independent frame-state obligations. Keep such calls
   // for the existing lowering/materialization machinery.
@@ -210,6 +218,11 @@ bool specialize(CallBase &CB) {
               StringSearchComparisonLimit)
         return false;
       break;
+    case StringIntrinsicKind::Compress:
+    case StringIntrinsicKind::Inflate:
+      if (!Small(4) || (*N(4) > 8 && !PreserveScalarConversions))
+        return false;
+      break;
     default:
       if (!Small(4))
         return false;
@@ -232,16 +245,105 @@ bool specialize(CallBase &CB) {
 }
 } // namespace
 
+namespace {
+// This is a profitability query, not an identity or stable-content proof.
+// The existing PEA and VM callback consumers still authorize those folds.
+bool hasScalarArrayOpportunity(Value *Array, const LoopInfo &LI,
+                               BatchAAResults &AA) {
+  SmallVector<const Value *, 8> Pending{Array};
+  SmallPtrSet<const Value *, 8> Visited;
+  while (!Pending.empty()) {
+    const Value *V = Pending.pop_back_val();
+    if (!Visited.insert(V).second)
+      continue;
+    SmallVector<const Value *, 4> Objects;
+    getUnderlyingObjects(V, Objects, &LI);
+    for (const Value *Object : Objects) {
+      if (auto *CB = dyn_cast<CallBase>(Object)) {
+        if (pea::isJeandleAllocation(CB))
+          return true;
+      }
+      if (auto *Load = dyn_cast<LoadInst>(Object)) {
+        auto *MutableLoad = const_cast<LoadInst *>(Load);
+        if (getOopHandleLoadId(MutableLoad))
+          return true;
+        if (isJavaOopType(Load->getType())) {
+          if (Value *Available =
+                  FindAvailableLoadedValue(MutableLoad, AA, nullptr)) {
+            Pending.push_back(Available);
+          } else {
+            // PEA may resolve an array-valued field of a local holder to a
+            // symbolic array. Preserve that related opportunity, without
+            // using the holder as proof of the loaded array's identity.
+            Pending.push_back(Load->getPointerOperand());
+          }
+        }
+      }
+      if (auto *Freeze = dyn_cast<FreezeInst>(Object))
+        Pending.push_back(Freeze->getOperand(0));
+    }
+  }
+  return false;
+}
+} // namespace
+
 PreservedAnalyses
-StringIntrinsicSpecialization::run(Function &F, FunctionAnalysisManager &) {
+StringIntrinsicSpecialization::run(Function &F, FunctionAnalysisManager &FAM) {
   if (F.getName().starts_with("jeandle."))
     return PreservedAnalyses::all();
-  SmallVector<CallBase *, 8> Calls;
-  for (Instruction &I : instructions(F))
-    if (auto *CB = dyn_cast<CallBase>(&I))
-      Calls.push_back(CB);
+  struct Plan {
+    CallBase *Call;
+    bool PreserveScalarConversions;
+    SmallVector<std::pair<unsigned, ConstantInt *>, 4> Constants;
+  };
+  SmallVector<Plan, 8> Plans;
+  LazyValueInfo *LVI = nullptr;
+  const LoopInfo *LI = nullptr;
+  for (Instruction &I : instructions(F)) {
+    auto *CB = dyn_cast<CallBase>(&I);
+    if (!CB || CB->hasOperandBundles() ||
+        (isa<CallInst>(CB) && cast<CallInst>(CB)->isMustTailCall()))
+      continue;
+    auto Op = decodeStringIntrinsic(*CB);
+    if (!Op)
+      continue;
+    Plan P{CB, false, {}};
+    for (unsigned Arg = 0; Arg != CB->arg_size(); ++Arg) {
+      Value *V = CB->getArgOperand(Arg);
+      if (!V->getType()->isIntegerTy() || isa<Constant>(V))
+        continue;
+      if (!LVI)
+        LVI = &FAM.getResult<LazyValueAnalysis>(F);
+      if (auto *C = dyn_cast_or_null<ConstantInt>(LVI->getConstant(V, CB)))
+        P.Constants.emplace_back(Arg, C);
+    }
+    Value *Count = Op->isConversion() ? CB->getArgOperand(4) : nullptr;
+    for (auto [Arg, C] : P.Constants)
+      if (Arg == 4)
+        Count = C;
+    auto *ConstantCount = dyn_cast_or_null<ConstantInt>(Count);
+    if ((Op->Kind == StringIntrinsicKind::Compress ||
+         Op->Kind == StringIntrinsicKind::Inflate) &&
+        ConstantCount && ConstantCount->getSExtValue() > 8 &&
+        ConstantCount->getSExtValue() <= StringScalarLimit) {
+      if (!LI)
+        LI = &FAM.getResult<LoopAnalysis>(F);
+      BatchAAResults AA(FAM.getResult<AAManager>(F));
+      P.PreserveScalarConversions =
+          hasScalarArrayOpportunity(CB->getArgOperand(0), *LI, AA) ||
+          hasScalarArrayOpportunity(CB->getArgOperand(2), *LI, AA);
+    }
+    Plans.push_back(std::move(P));
+  }
+  // Expansion changes the CFG. Finish every analysis query before applying
+  // any plan, so later calls never consult stale LVI or loop information.
   bool Changed = false;
-  for (CallBase *CB : Calls)
-    Changed |= specialize(*CB);
+  for (Plan &P : Plans) {
+    for (auto [Arg, C] : P.Constants) {
+      P.Call->setArgOperand(Arg, C);
+      Changed = true;
+    }
+    Changed |= specialize(*P.Call, P.PreserveScalarConversions);
+  }
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

@@ -1811,6 +1811,9 @@ private:
   // takes the generic escape path.
   bool processJavaOp(CallBase *CB);
   bool foldStringIntrinsic(CallBase *CB);
+  bool foldStringGetChar(CallBase *CB);
+  std::optional<jeandle::ObjectID> resolveStringArray(Value *V);
+  Value *readStringCell(jeandle::ObjectID ID, int64_t Offset, unsigned Bits);
   // Known non-escaping LLVM intrinsics (assume, lifetime/invariant
   // markers, debug, annotations, branch hints, ...) are no-ops for PEA;
   // launder/strip.invariant.group forward the argument's virtual alias.
@@ -7105,6 +7108,98 @@ bool Analyzer::foldICmpEquality(ICmpInst *ICmp) {
   return true;
 }
 
+std::optional<jeandle::ObjectID> Analyzer::resolveStringArray(Value *V) {
+  using namespace jeandle;
+  using namespace jeandle::pea;
+  // The general identity resolver permits poison merge arms as wildcards.
+  // A string content proof requires every explicit carrier arm to denote
+  // defined input; in particular freeze must not supply that proof.
+  SmallVector<Value *, 8> Worklist(1, V);
+  SmallPtrSet<Value *, 16> Seen;
+  while (!Worklist.empty()) {
+    Value *Current = Worklist.pop_back_val();
+    if (!Seen.insert(Current).second)
+      continue;
+    if (isa<UndefValue>(Current) || Seen.size() > 32)
+      return std::nullopt;
+    // Follow computed conditions and aggregate/constant expressions too:
+    // an opcode whitelist can miss poison hidden behind arithmetic or an
+    // extract. Allocation identities and globals are leaves, not dataflow
+    // from their arguments, frame-state bundles, or initializers.
+    if (isa<GlobalValue>(Current))
+      continue;
+    if (auto *CB = dyn_cast<CallBase>(Current))
+      if (isJeandleAllocation(CB))
+        continue;
+    if (auto *U = dyn_cast<User>(Current))
+      for (Value *Operand : U->operand_values())
+        Worklist.push_back(Operand);
+  }
+  auto R = resolveVirtualIdentity(V, CurrentState, Aliases, DL,
+                                  VirtualIdentityMode::WholeObject);
+  if (!R.isDefined() || !Eligible.lookup(R.getObjectID()))
+    return std::nullopt;
+  ObjectID ID = R.getObjectID();
+  const ObjectState &OS = CurrentState.getObjectState(ID);
+  if (!OS.isVirtual() || !Result.VirtualObjects[ID]->isArray())
+    return std::nullopt;
+  return ID;
+}
+
+Value *Analyzer::readStringCell(jeandle::ObjectID ID, int64_t Offset,
+                                unsigned Bits) {
+  using namespace jeandle;
+  const VirtualObject &VO = *Result.VirtualObjects[ID];
+  Type *Ty = Type::getIntNTy(F.getContext(), Bits);
+  for (const auto &Field : VO.Fields) {
+    auto Overlap = Field.overlaps(Offset, Bits / 8);
+    if (!Overlap ||
+        (*Overlap && (Field.Offset != Offset || Field.LLVMType != Ty)))
+      return nullptr;
+  }
+  auto It = FieldStates[ID].find(Offset);
+  if (It == FieldStates[ID].end())
+    return ConstantInt::get(Ty, 0);
+  if (!It->second.isScalar())
+    return nullptr;
+  Value *V = It->second.getScalar();
+  while (Value *Alias = Aliases.getScalarAlias(V))
+    V = Alias;
+  if (V->getType() != Ty || isa<UndefValue>(V))
+    return nullptr;
+  return V;
+}
+
+bool Analyzer::foldStringGetChar(CallBase *CB) {
+  using namespace jeandle;
+  if (!isStringGetChar(*CB))
+    return false;
+  auto ID = resolveStringArray(CB->getArgOperand(0));
+  if (!ID)
+    return false;
+  Value *Index = CB->getArgOperand(1);
+  while (Value *Alias = Aliases.getScalarAlias(Index))
+    Index = Alias;
+  auto N = stringConstantInt(Index);
+  const VirtualObject &VO = *Result.VirtualObjects[*ID];
+  // The intrinsic addresses complete native-endian words in a byte array.
+  // Separate byte slots and uncertain ranges retain the material word read.
+  if (!N || *N < 0 || !VO.ArrayElementType ||
+      !VO.ArrayElementType->isIntegerTy(8) || VO.ArrayIndexScale != 1 ||
+      VO.ArrayBaseOffset != VMConsts.arrayBaseOffsetFor(JBasicType::Byte) ||
+      VO.ArrayLength < 2 || uint64_t(*N) > (VO.ArrayLength - 2) / 2)
+    return false;
+  auto Offset = pea::checkedArrayElementOffset(VO.ArrayBaseOffset, *N, 2);
+  if (!Offset || !pea::isUsableFieldOffset(*Offset))
+    return false;
+  Value *Word = readStringCell(*ID, *Offset, 16);
+  if (!Word)
+    return false;
+  observeFieldDefinition(*ID, *Offset, FieldDefinitions);
+  emitReplaceCall(CB, Word, *ID);
+  return true;
+}
+
 bool Analyzer::foldStringIntrinsic(CallBase *CB) {
   using namespace jeandle;
   using namespace jeandle::pea;
@@ -7118,45 +7213,10 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
       V = Alias;
     return stringConstantInt(V);
   };
-  auto Whole = [&](Value *V) -> std::optional<ObjectID> {
-    // The general identity resolver permits poison merge arms as wildcards.
-    // A string content proof requires every explicit carrier arm to denote
-    // defined input; in particular freeze must not supply that proof.
-    SmallVector<Value *, 8> Worklist(1, V);
-    SmallPtrSet<Value *, 16> Seen;
-    while (!Worklist.empty()) {
-      Value *Current = Worklist.pop_back_val();
-      if (!Seen.insert(Current).second)
-        continue;
-      if (isa<UndefValue>(Current) || Seen.size() > 32)
-        return std::nullopt;
-      // Follow computed conditions and aggregate/constant expressions too:
-      // an opcode whitelist can miss poison hidden behind arithmetic or an
-      // extract. Allocation identities and globals are leaves, not dataflow
-      // from their arguments, frame-state bundles, or initializers.
-      if (isa<GlobalValue>(Current))
-        continue;
-      if (auto *CB = dyn_cast<CallBase>(Current))
-        if (isJeandleAllocation(CB))
-          continue;
-      if (auto *U = dyn_cast<User>(Current))
-        for (Value *Operand : U->operand_values())
-          Worklist.push_back(Operand);
-    }
-    auto R = resolveVirtualIdentity(V, CurrentState, Aliases, DL,
-                                    VirtualIdentityMode::WholeObject);
-    if (!R.isDefined() || !Eligible.lookup(R.getObjectID()))
-      return std::nullopt;
-    ObjectID ID = R.getObjectID();
-    const ObjectState &OS = CurrentState.getObjectState(ID);
-    if (!OS.isVirtual() || !Result.VirtualObjects[ID]->isArray())
-      return std::nullopt;
-    return ID;
-  };
-  auto Left = Whole(A(0));
+  auto Left = resolveStringArray(A(0));
   bool Eq = Op->Kind == StringIntrinsicKind::Equals;
   bool Char = Op->Kind == StringIntrinsicKind::IndexOfChar;
-  auto Right = Char ? Left : Whole(A(Eq ? 1 : 2));
+  auto Right = Char ? Left : resolveStringArray(A(Eq ? 1 : 2));
   // A surviving op must materialize every participating virtual, including
   // operands hidden by pointer carriers. The caller owns that fallback.
   if (!Left || !Right)
@@ -7175,35 +7235,14 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
            Start >= 0 && Count >= 0 && Start <= VO.ArrayLength / Cells &&
            Count <= VO.ArrayLength / Cells - Start;
   };
-  auto ReadCell = [&](ObjectID ID, int64_t Offset, unsigned Bits) -> Value * {
-    const VirtualObject &VO = *Result.VirtualObjects[ID];
-    Type *Ty = Type::getIntNTy(F.getContext(), Bits);
-    for (const auto &Field : VO.Fields) {
-      auto Overlap = Field.overlaps(Offset, Bits / 8);
-      if (!Overlap ||
-          (*Overlap && (Field.Offset != Offset || Field.LLVMType != Ty)))
-        return nullptr;
-    }
-    auto It = FieldStates[ID].find(Offset);
-    if (It == FieldStates[ID].end())
-      return ConstantInt::get(Ty, 0);
-    if (!It->second.isScalar())
-      return nullptr;
-    Value *V = It->second.getScalar();
-    while (Value *Alias = Aliases.getScalarAlias(V))
-      V = Alias;
-    if (V->getType() != Ty || isa<UndefValue>(V))
-      return nullptr;
-    return V;
-  };
   auto Read = [&](ObjectID ID, int64_t Index, bool UTF16,
                   bool CharArray = false) -> Value * {
     const VirtualObject &VO = *Result.VirtualObjects[ID];
     int64_t Offset = VO.ArrayBaseOffset + Index * (UTF16 ? 2 : 1);
-    Value *Lo = ReadCell(ID, Offset, CharArray ? 16 : 8);
+    Value *Lo = readStringCell(ID, Offset, CharArray ? 16 : 8);
     if (!Lo || !UTF16 || CharArray)
       return Lo;
-    Value *Hi = ReadCell(ID, Offset + 1, 8);
+    Value *Hi = readStringCell(ID, Offset + 1, 8);
     auto *L = dyn_cast_or_null<ConstantInt>(Lo);
     auto *H = dyn_cast_or_null<ConstantInt>(Hi);
     if (!L || !H)
@@ -7366,6 +7405,8 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
 // known-safe non-escaping shape needing no transform; false routes the call
 // to the generic escape path.
 bool Analyzer::processJavaOp(CallBase *CB) {
+  if (jeandle::isStringGetChar(*CB))
+    return foldStringGetChar(CB);
   if (jeandle::decodeStringIntrinsic(*CB))
     return foldStringIntrinsic(CB);
   using namespace jeandle::pea;

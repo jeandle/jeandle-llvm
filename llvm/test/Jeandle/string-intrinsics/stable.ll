@@ -1,4 +1,5 @@
 ; RUN: opt -S -passes='string-intrinsic-specialization,repeated-constant-field-folding' -jeandle-vm-callback-log=%S/Inputs/stable.cblog -verify-each %s | FileCheck %s
+; RUN: opt -S -passes='string-intrinsic-specialization,repeated-constant-field-folding,string-intrinsic-specialization,repeated-constant-field-folding' -jeandle-vm-callback-log=%S/Inputs/stable.cblog -verify-each %s | FileCheck %s
 
 ; GetConstantField remains the sole authority for folding Java heap contents.
 ; The callback replay supplies registered stable bytes, refuses mutable bytes,
@@ -18,6 +19,29 @@ declare i32 @jeandle.string_indexof_char(ptr addrspace(1), i32, i32, i32, i1)
  %a = load ptr addrspace(1), ptr @oop_handle_Stable_0
  %b = load ptr addrspace(1), ptr @oop_handle_Stable_1
  %r = call i32 @jeandle.string_compare(ptr addrspace(1) %a, i32 1, ptr addrspace(1) %b, i32 1, i32 1)
+ ret i32 %r
+}
+
+; Larger constants still expose stable cells to the folding callback.
+; CHECK-LABEL: @stable_compress9_failure(
+; CHECK-NOT: store
+; CHECK: store atomic i8 65
+; CHECK-NOT: store
+; CHECK: ret i32 0
+define i32 @stable_compress9_failure(ptr addrspace(1) %dst) gc "hotspotgc" {
+ %a = load ptr addrspace(1), ptr @oop_handle_Chars_4
+ %r = call i32 @jeandle.string_compress(ptr addrspace(1) %a, i32 0, ptr addrspace(1) %dst, i32 1, i32 9, i1 false)
+ ret i32 %r
+}
+
+; CHECK-LABEL: @stable_compress16_failure(
+; CHECK-NOT: store
+; CHECK: store atomic i8 65
+; CHECK-NOT: store
+; CHECK: ret i32 0
+define i32 @stable_compress16_failure(ptr addrspace(1) %dst) gc "hotspotgc" {
+ %a = load ptr addrspace(1), ptr @oop_handle_Chars_4
+ %r = call i32 @jeandle.string_compress(ptr addrspace(1) %a, i32 0, ptr addrspace(1) %dst, i32 1, i32 16, i1 false)
  ret i32 %r
 }
 ; CHECK-LABEL: @mutable(

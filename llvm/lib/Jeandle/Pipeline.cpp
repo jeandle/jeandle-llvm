@@ -294,8 +294,6 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     //       rounds.
     PM.addPass(createModuleToFunctionPassAdaptor(PartialEscapeIterative()));
   }
-  PM.addPass(
-      createModuleToFunctionPassAdaptor(StringIntrinsicSpecialization()));
   // Post-inline type recovery + TCE — unconditional. Runs for both PEA-on
   // (cleans up PEA's materializations) and PEA-off (the default config) so
   // RecoverTypeInfo re-attaches !java-klass metadata stripped by the inline
@@ -304,6 +302,12 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(InstSimplifyPass()));
   PM.addPass(createModuleToFunctionPassAdaptor(RecoverTypeInfo()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
+  PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
+  // PEA can expose stable array references whose lengths become constant only
+  // in the cleanup above. Specialize their String operations before lowering,
+  // then let the VM-authorized folder consume any newly exposed cells.
+  PM.addPass(
+      createModuleToFunctionPassAdaptor(StringIntrinsicSpecialization()));
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   PM.addPass(createModuleToFunctionPassAdaptor(CopySpecialization()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));

@@ -102,6 +102,23 @@ decodeStringIntrinsic(const CallBase &CB) {
   return Op;
 }
 
+// Keep single-code-unit access distinct from the bulk-operation ABI.
+inline bool isStringGetChar(const CallBase &CB) {
+  const auto *CI = dyn_cast<CallInst>(&CB);
+  const Function *F = CB.getCalledFunction();
+  if (!CI || CI->isMustTailCall() || CB.hasOperandBundles() || !F ||
+      F->getName() != "jeandle.string_getchar" ||
+      CB.getFunctionType() != F->getFunctionType() ||
+      CB.getFunctionType()->isVarArg() || CB.arg_size() != 2 ||
+      CB.getCallingConv() != CallingConv::Hotspot_JIT ||
+      F->getCallingConv() != CallingConv::Hotspot_JIT ||
+      !CB.getType()->isIntegerTy(16))
+    return false;
+  Type *Array = CB.getArgOperand(0)->getType();
+  return Array->isPointerTy() && Array->getPointerAddressSpace() == 1 &&
+         CB.getArgOperand(1)->getType()->isIntegerTy(32);
+}
+
 inline std::optional<int64_t> stringConstantInt(Value *V) {
   if (auto *C = dyn_cast<ConstantInt>(V))
     return C->getSExtValue();
