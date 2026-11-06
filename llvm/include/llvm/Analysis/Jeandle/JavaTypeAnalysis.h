@@ -109,6 +109,9 @@ public:
   // blocks for insertion/movement; set CFGChanged for structural CFG edits.
   // Unknown changes and changes to VM type information require clear().
   LLVM_ABI void invalidate(Value &Changed);
+  /// Caller proves the JavaTypeContextPreservation contract. This retains LVI
+  /// and unaffected context entries; ordinary notifications remain conservative.
+  LLVM_ABI void invalidatePreservingContext(Value &Changed);
   LLVM_ABI void invalidate(ArrayRef<Value *> Changed, bool CFGChanged = false);
   LLVM_ABI void invalidateForCFGChange(Value &Changed);
 
@@ -139,7 +142,9 @@ private:
   JavaTypeCache Cache;
 
   void invalidateImpl(ArrayRef<Value *> Changed, bool CFGChanged,
-                      bool ForceFull);
+                      bool ForceFull,
+                      JavaTypeContextPreservation Context =
+                          JavaTypeContextPreservation::Invalidate);
 };
 
 /// FunctionAnalysisManager 的分析入口：工厂方法

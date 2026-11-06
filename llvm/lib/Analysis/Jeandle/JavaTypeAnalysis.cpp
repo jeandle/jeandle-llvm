@@ -197,6 +197,12 @@ void JavaTypeAnalysisResult::invalidate(Value &Changed) {
   invalidate({V});
 }
 
+void JavaTypeAnalysisResult::invalidatePreservingContext(Value &Changed) {
+  Value *V = &Changed;
+  invalidateImpl({V}, false, ForceFullJavaTypeInvalidation,
+                 JavaTypeContextPreservation::Preserved);
+}
+
 void JavaTypeAnalysisResult::invalidate(ArrayRef<Value *> Changed,
                                         bool CFGChanged) {
   invalidateImpl(Changed, CFGChanged, ForceFullJavaTypeInvalidation);
@@ -208,7 +214,8 @@ void JavaTypeAnalysisResult::invalidateForCFGChange(Value &Changed) {
 }
 
 void JavaTypeAnalysisResult::invalidateImpl(ArrayRef<Value *> Changed,
-                                            bool CFGChanged, bool ForceFull) {
+                                            bool CFGChanged, bool ForceFull,
+                                            JavaTypeContextPreservation Context) {
   auto Start = Observer ? QueryClock::now() : QueryClock::time_point{};
   JavaTypeCacheInvalidationInfo Info;
   if (ForceFull) {
@@ -223,12 +230,14 @@ void JavaTypeAnalysisResult::invalidateImpl(ArrayRef<Value *> Changed,
         Changed, CFGChanged,
         ForceBaseScanJavaTypeInvalidation
             ? JavaTypeBaseInvalidationMode::Scan
-            : JavaTypeBaseInvalidationMode::SelectiveKeys);
+            : JavaTypeBaseInvalidationMode::SelectiveKeys, Context);
   }
   // Even an unrelated instruction edit can change LVI's bounded reasoning.
-  // Drop its old results before mutation; Facts and Final have also been
+  // By default drop its old results before mutation; Facts and Final have also been
   // cleared, so no result depending on the old oracle state is retained.
-  LVI.clear();
+  if (ForceFull || Info.FullClear || CFGChanged ||
+      Context != JavaTypeContextPreservation::Preserved)
+    LVI.clear();
   if (!Observer)
     return;
   JavaTypeInvalidationEvent Event;

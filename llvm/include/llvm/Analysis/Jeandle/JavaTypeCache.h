@@ -246,6 +246,12 @@ public:
 /// Oracle maintenance requires notifyOracleChanged(), even without IR changes.
 /// A StableOracleEpoch permits skipping repeat oracle calls between such
 /// notifications; arbitrary changing callbacks must use GuardOnly.
+/// Preserved is a caller proof: unchanged CFG, guards, assumptions, type
+/// metadata and oracle answers for unaffected values, including bounded-solver
+/// precision. No oracle reset may occur between notification and the query.
+/// Arbitrary callbacks and unknown edits must use Invalidate.
+enum class JavaTypeContextPreservation { Invalidate, Preserved };
+
 class LLVM_ABI JavaTypeCache {
   Function *Owner;
   bool EnableFinal;
@@ -289,7 +295,9 @@ public:
   JavaTypeCacheInvalidationInfo
   invalidate(ArrayRef<Value *> Changed, bool CFGChanged = false,
              JavaTypeBaseInvalidationMode Mode =
-                 JavaTypeBaseInvalidationMode::SelectiveKeys);
+                 JavaTypeBaseInvalidationMode::SelectiveKeys,
+             JavaTypeContextPreservation Context =
+                 JavaTypeContextPreservation::Invalidate);
 };
 
 } // namespace llvm::jeandle

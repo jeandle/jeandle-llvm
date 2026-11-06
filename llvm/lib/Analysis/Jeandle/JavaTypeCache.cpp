@@ -414,7 +414,8 @@ void JavaTypeCache::notifyOracleChanged() {
 
 JavaTypeCacheInvalidationInfo
 JavaTypeCache::invalidate(ArrayRef<Value *> Changed, bool CFGChanged,
-                            JavaTypeBaseInvalidationMode Mode) {
+                            JavaTypeBaseInvalidationMode Mode,
+                            JavaTypeContextPreservation Context) {
   JavaTypeCacheInvalidationInfo Info;
   size_t OldBase = Base.size();
   size_t OldDefined = Defined.size();
@@ -487,7 +488,35 @@ JavaTypeCache::invalidate(ArrayRef<Value *> Changed, bool CFGChanged,
       Base.invalidate(Affected, CFGChanged, Mode, Info.BaseSlotsScanned);
   Info.DefinedRemoved = Defined.invalidate(Affected, CFGChanged, Mode,
                                            Info.DefinedSlotsScanned);
-  Info.FactsRemoved = Facts.invalidate();
-  Info.FinalRemoved = Final.invalidate();
+  if (Context == JavaTypeContextPreservation::Preserved && !CFGChanged &&
+      getMode() == JavaTypeFactsCache::Mode::StableOracleEpoch) {
+    auto EraseAffected = [&](auto &Map, size_t &Scanned) {
+      size_t Removed = 0;
+      for (auto It = Map.begin(); It != Map.end();) {
+        auto Current = It++;
+        ++Scanned;
+        if (Seen.contains(Current->first.first)) {
+          Map.erase(Current);
+          ++Removed;
+        }
+      }
+      return Removed;
+    };
+    Info.FactsRemoved = EraseAffected(Facts.Paths, Info.PathFactsSlotsScanned);
+    Info.FactsRemoved += EraseAffected(Facts.Guards, Info.PathFactsSlotsScanned);
+    Info.FactsRemoved += EraseAffected(Facts.NullEdges, Info.PathFactsSlotsScanned);
+    Info.FinalRemoved = EraseAffected(Final.Memo, Info.FinalTypesSlotsScanned);
+    if (Facts.StatsEnabled) {
+      ++Facts.Counters.Invalidations;
+      Facts.Counters.EntriesRemoved += Info.FactsRemoved;
+    }
+    if (Final.StatsEnabled) {
+      ++Final.Counters.Invalidations;
+      Final.Counters.EntriesRemoved += Info.FinalRemoved;
+    }
+  } else {
+    Info.FactsRemoved = Facts.invalidate();
+    Info.FinalRemoved = Final.invalidate();
+  }
   return Info;
 }

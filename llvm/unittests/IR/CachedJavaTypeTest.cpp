@@ -2361,3 +2361,87 @@ TEST_F(CachedJavaTypeTest, SharedPathsReuseInstructionAndPhiPrefixes) {
 }
 
 } // namespace
+
+TEST_F(CachedJavaTypeTest, ProvenContextPreservationRetainsFinalAndOracleEpoch) {
+  auto M = parse(R"IR(
+    define ptr @test(ptr "java-klass"="9" %obj, i32 %n) {
+    entry:
+      %noise = add i32 %n, 1
+      br label %tail
+    tail:
+      ret ptr %obj
+    }
+  )IR");
+  ASSERT_NE(M, nullptr);
+  Function &F = *M->getFunction("test");
+  DominatorTree DT(F);
+  auto *Noise = findBaseTestInstruction(F, "noise");
+  ASSERT_TRUE(Noise->use_empty());
+  JavaTypeCache Cache(F, FactsCacheMode::StableOracleEpoch);
+  Cache.setStatsEnabled(true);
+  auto *At = F.back().getTerminator();
+  for (unsigned I = 0; I != 32; ++I) {
+    if (I) {
+      auto Removed = Cache.invalidate({Noise}, false,
+          JavaTypeBaseInvalidationMode::SelectiveKeys,
+          JavaTypeContextPreservation::Preserved);
+      EXPECT_EQ(Removed.FinalRemoved, 0U);
+      Noise->setOperand(1, ConstantInt::get(Type::getInt32Ty(Context), 1 + (I & 1)));
+    }
+    EXPECT_EQ(getCachedJavaType(F.getArg(0), &DT, At, noNullEdge, Cache),
+              getJavaType(F.getArg(0), &DT, At, noNullEdge));
+  }
+  EXPECT_EQ(Cache.Final.getStats().Hits, 31U);
+  getCachedJavaType(Noise, &DT, At, noNullEdge, Cache);
+  auto Removed = Cache.invalidate({Noise}, false,
+      JavaTypeBaseInvalidationMode::SelectiveKeys,
+      JavaTypeContextPreservation::Preserved);
+  EXPECT_EQ(Removed.FinalRemoved, 1U);
+  EXPECT_NE(Cache.Final.lookup(F.getArg(0), At->getParent()), nullptr);
+  Cache.invalidate({Noise}, true, JavaTypeBaseInvalidationMode::SelectiveKeys,
+                   JavaTypeContextPreservation::Preserved);
+  EXPECT_EQ(Cache.finalTypesSize(), 0U);
+  getCachedJavaType(F.getArg(0), &DT, At, noNullEdge, Cache);
+  Cache.notifyOracleChanged();
+  EXPECT_EQ(Cache.finalTypesSize(), 0U);
+  getCachedJavaType(F.getArg(0), &DT, At, noNullEdge, Cache);
+  Cache.invalidate({Noise});
+  EXPECT_EQ(Cache.finalTypesSize(), 0U);
+}
+
+TEST_F(CachedJavaTypeTest, AnalysisExplicitPreservationRetainsFinal) {
+  auto M = parse(R"IR(
+    define ptr @test(ptr "java-klass"="9" %obj, i32 %n) {
+    entry:
+      %noise = add i32 %n, 1
+      br label %tail
+    tail:
+      ret ptr %obj
+    }
+  )IR");
+  ASSERT_NE(M, nullptr);
+  auto *Option = cl::getRegisteredOptions().lookup("jeandle-java-type-stats");
+  ASSERT_NE(Option, nullptr);
+  auto &Collect = *static_cast<cl::opt<bool> *>(Option);
+  bool Saved = Collect;
+  auto Restore = make_scope_exit([&] { Collect = Saved; });
+  Collect = true;
+  Function &F = *M->getFunction("test");
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+  auto &Analysis = FAM.getResult<JavaTypeAnalysis>(F);
+  const auto &Stats = FAM.getResult<JavaTypeStatsAnalysis>(F).getStats();
+  Instruction *Noise = findBaseTestInstruction(F, "noise");
+  auto *At = F.back().getTerminator();
+  EXPECT_EQ(Analysis.getJavaType(F.getArg(0), At), JavaType(9, false));
+  Analysis.invalidatePreservingContext(*Noise);
+  Noise->setOperand(1, ConstantInt::get(Type::getInt32Ty(Context), 2));
+  EXPECT_EQ(Analysis.getJavaType(F.getArg(0), At), JavaType(9, false));
+  EXPECT_EQ(Stats.FinalHits, 1U);
+  Analysis.invalidate(*Noise);
+  Noise->setOperand(1, ConstantInt::get(Type::getInt32Ty(Context), 3));
+  EXPECT_EQ(Analysis.getJavaType(F.getArg(0), At), JavaType(9, false));
+  EXPECT_EQ(Stats.FinalHits, 1U);
+  EXPECT_EQ(Stats.FinalMisses, 2U);
+}
