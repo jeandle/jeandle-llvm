@@ -4,8 +4,8 @@
 ; RUN:   %s | FileCheck %s
 
 ; Full PEA -> barrier insertion -> statepoint rewriting coverage for reference
-; fields/elements. Stores into virtual objects and their frontend barriers must
-; disappear. A replayed store into a materialized Object[] must receive one
+; fields/elements. Stores into virtual objects disappear before barriers are
+; inserted. A replayed store into a materialized Object[] must receive one
 ; fresh barrier. External and already-materialized sibling oops used only by a
 ; virtual-object descriptor must be listed as GC-live and relocated.
 
@@ -55,22 +55,16 @@ body:
       ptr addrspace(1) %holder, i64 8
   store atomic ptr addrspace(1) %external,
       ptr addrspace(1) %holder.external unordered, align 8
-  call hotspotcc void @jeandle.post_barrier(
-      ptr addrspace(1) %holder.external, ptr addrspace(1) %external)
   %holder.array = getelementptr inbounds i8,
       ptr addrspace(1) %holder, i64 16
   store atomic ptr addrspace(1) %array,
       ptr addrspace(1) %holder.array unordered, align 8
-  call hotspotcc void @jeandle.post_barrier(
-      ptr addrspace(1) %holder.array, ptr addrspace(1) %array)
   %array.base = getelementptr inbounds i8,
       ptr addrspace(1) %array, i64 16
   %array.element = getelementptr inbounds ptr addrspace(1),
       ptr addrspace(1) %array.base, i64 0
   store atomic ptr addrspace(1) %external,
       ptr addrspace(1) %array.element unordered, align 8
-  call hotspotcc void @jeandle.post_barrier(
-      ptr addrspace(1) %array.element, ptr addrspace(1) %external)
   call void @observe(i32 1)
       [ "deopt"(i32 17, i32 17, i64 12, ptr addrspace(1) %holder) ]
   ret void
@@ -104,8 +98,6 @@ body:
       ptr addrspace(1) %array.base, i64 1
   store atomic ptr addrspace(1) %external,
       ptr addrspace(1) %array.element unordered, align 8
-  call hotspotcc void @jeandle.post_barrier(
-      ptr addrspace(1) %array.element, ptr addrspace(1) %external)
   call void @sink(ptr addrspace(1) %array)
   ret void
 unwind:
@@ -116,9 +108,9 @@ unwind:
 ; CHECK-LABEL: define void @materialized_array_replay
 ; CHECK: @jeandle.new_array
 ; CHECK: store atomic ptr addrspace(1)
-; The frontend barrier on the virtual store is folded; InsertGCBarriers adds
-; exactly one barrier for the replayed real store.
+; InsertGCBarriers adds exactly one barrier for the replayed real store.
 ; CHECK-COUNT-1: @jeandle.post_barrier
+; CHECK-NOT: @jeandle.post_barrier
 ; CHECK: @llvm.experimental.gc.statepoint
 ; CHECK-SAME: @sink
 ; CHECK-SAME: "gc-live"
@@ -145,14 +137,10 @@ body:
       ptr addrspace(1) %outer, i64 8
   store atomic ptr addrspace(1) %external,
       ptr addrspace(1) %outer.external unordered, align 8
-  call hotspotcc void @jeandle.post_barrier(
-      ptr addrspace(1) %outer.external, ptr addrspace(1) %external)
   %outer.sibling = getelementptr inbounds i8,
       ptr addrspace(1) %outer, i64 16
   store atomic ptr addrspace(1) %sibling,
       ptr addrspace(1) %outer.sibling unordered, align 8
-  call hotspotcc void @jeandle.post_barrier(
-      ptr addrspace(1) %outer.sibling, ptr addrspace(1) %sibling)
   call void @observe(i32 %payload)
       [ "deopt"(i32 29, i32 29, i64 12, ptr addrspace(1) %outer) ]
   ret void
@@ -162,7 +150,7 @@ unwind:
 }
 
 ; CHECK-LABEL: define void @materialized_sibling_descriptor_liveness
-; The outer allocation and its virtual stores/barriers disappear; the published
+; The outer allocation and its virtual stores disappear; the published
 ; sibling remains.
 ; CHECK-COUNT-1: @jeandle.new_instance
 ; CHECK-NOT: @jeandle.post_barrier

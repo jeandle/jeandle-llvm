@@ -40,6 +40,10 @@ class Type;
 
 namespace llvm::jeandle::pea {
 
+// Match a diagnostic function name exactly or with a numeric ciMethod suffix.
+// A .root suffix must be present on both names or absent from both.
+bool matchesFunctionNameFilter(StringRef FunctionName, StringRef Filter);
+
 // A checked, assertion-free view of a DeoptValueEncoding. Index remains
 // signed because descriptor IDs and field offsets have different semantic
 // validity rules.
@@ -345,12 +349,9 @@ bool isJeandleAllocation(const CallBase *CB); // either of the above
 bool isJeandleArrayLength(const CallBase *CB);
 bool isJeandleLoadKlass(const CallBase *CB);
 bool isJeandleGetClass(const CallBase *CB);
-bool isJeandleCheckCast(const CallBase *CB);
-bool isJeandleInstanceOf(const CallBase *CB);
 bool isJeandleCheckInstanceOf(const CallBase *CB);
 bool isJeandleCheckIfValueBased(const CallBase *CB);
 bool isJeandleArrayStoreCheck(const CallBase *CB);
-bool isJeandlePostBarrier(const CallBase *CB);
 bool isJeandleMonitorEnter(const CallBase *CB);
 bool isJeandleMonitorExit(const CallBase *CB);
 bool isJeandleRegisterFinalizerIfNeeded(const CallBase *CB);

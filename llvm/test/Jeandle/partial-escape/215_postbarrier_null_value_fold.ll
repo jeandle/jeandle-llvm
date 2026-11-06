@@ -1,16 +1,12 @@
-; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-vm-callback-log=%S/Inputs/215_postbarrier_null_value_fold.cblog %s | FileCheck %s
+; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform,insert-gc-barriers" -jeandle-vm-callback-log=%S/Inputs/215_postbarrier_null_value_fold.cblog %s | FileCheck %s
 
-; Object[] virtual array; a T_OBJECT array store of `null` is followed by
-; jeandle.post_barrier. The frontend emits the barrier unconditionally for
-; T_OBJECT stores (no null-value guard, unlike the LLVM-side InsertGCBarriers
-; pass which skips ConstantPointerNull). foldPostBarrier resolves the address
-; operand (arg 0) to the virtual array and erases the barrier; the null value
-; operand is irrelevant to the fold. The store is eliminated and the array
-; never escapes, so the allocation, the store and the barrier all disappear.
+; A null store into a virtual Object[] disappears during PEA. The downstream
+; barrier pass sees no store, so it emits neither a pre nor a post barrier.
 
 @arrayOopDesc.element_size.object = private constant i32 8
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc void @jeandle.pre_barrier(ptr addrspace(1))
 declare hotspotcc void @jeandle.post_barrier(ptr addrspace(1), ptr addrspace(1))
 
 declare i32 @__gxx_personality_v0(...)
@@ -24,8 +20,6 @@ n:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i32 16
   %p2 = getelementptr inbounds ptr addrspace(1), ptr addrspace(1) %base, i64 2
   store atomic ptr addrspace(1) null, ptr addrspace(1) %p2 unordered, align 8
-  call hotspotcc void @jeandle.post_barrier(ptr addrspace(1) %p2,
-                                           ptr addrspace(1) null)
   ret i32 0
 u:
   %lp = landingpad i64 cleanup
@@ -35,6 +29,7 @@ u:
 ; CHECK-LABEL: define i32 @test_postbarrier_null_value_fold
 ; CHECK-NOT: jeandle.new_array
 ; CHECK-NOT: store
+; CHECK-NOT: jeandle.pre_barrier
 ; CHECK-NOT: jeandle.post_barrier
 ; CHECK: ret i32 0
 

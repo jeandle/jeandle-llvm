@@ -1,17 +1,10 @@
-; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-vm-callback-log=%S/Inputs/217_postbarrier_variable_index_survives.cblog %s | FileCheck %s
+; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform,insert-gc-barriers" -jeandle-vm-callback-log=%S/Inputs/217_postbarrier_variable_index_survives.cblog %s | FileCheck %s
 
-; Object[] virtual array; the store (and the post_barrier) target a VARIABLE
-; element index. processStore cannot resolve a constant field offset for a
-; variable index, so it marks the array ineligible. foldPostBarrier still
-; resolves the address operand to the (still-virtual-at-analysis-point) array
-; and emits a ReplaceCallEffect carrying the array's ObjID. At commit(),
-; dropEffectsFor(arrayID) purges that ReplaceCallEffect (and the array's
-; EliminateAllocationEffect), so the ORIGINAL jeandle.post_barrier must survive
-; guarding the real store, and the allocation must stay. This ties the
-; barrier-erasure to the array's eligibility — the same ObjID linkage
-; foldArrayStoreCheck uses.
+; A variable-index store keeps the array real. InsertGCBarriers protects the
+; retained store with a pre barrier. Its null value needs no post barrier.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc void @jeandle.pre_barrier(ptr addrspace(1))
 declare hotspotcc void @jeandle.post_barrier(ptr addrspace(1), ptr addrspace(1))
 
 declare i32 @__gxx_personality_v0(...)
@@ -25,8 +18,6 @@ n:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i32 16
   %pi = getelementptr inbounds ptr addrspace(1), ptr addrspace(1) %base, i64 %i
   store atomic ptr addrspace(1) null, ptr addrspace(1) %pi unordered, align 4
-  call hotspotcc void @jeandle.post_barrier(ptr addrspace(1) %pi,
-                                           ptr addrspace(1) null)
   ret void
 u:
   %lp = landingpad i64 cleanup
@@ -35,7 +26,9 @@ u:
 
 ; CHECK-LABEL: define void @test_postbarrier_variable_index_survives
 ; CHECK: jeandle.new_array
+; CHECK: jeandle.pre_barrier
 ; CHECK: store atomic
-; CHECK: jeandle.post_barrier
+; CHECK-NOT: jeandle.post_barrier
+; CHECK: ret void
 
 !java-method-compilation = !{}

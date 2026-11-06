@@ -11,6 +11,11 @@
 ; RUN:   '-jeandle-pea-analyze-function=filter.Target.rooted()V.root' \
 ; RUN:   %s 2>&1 | FileCheck %s --check-prefix=ANALYZE-IDENTITY \
 ; RUN:     --implicit-check-not='function=@"filter.Target.work()V"'
+; RUN: opt -disable-output -passes="partial-escape-iterative" \
+; RUN:   -jeandle-pea-iterations=1 \
+; RUN:   '-jeandle-dump-pea-ir-function=filter.Target.rooted()V.root' \
+; RUN:   %s 2>&1 | FileCheck %s --check-prefix=DUMP-IDENTITY \
+; RUN:     --implicit-check-not='PEA-SUMMARY function filter.Target.work()V'
 ; RUN: opt -disable-output -passes="require<partial-escape-analysis>" \
 ; RUN:   -jeandle-trace-pea -jeandle-pea-analyze-only=.extra \
 ; RUN:   '-jeandle-pea-analyze-function=filter.Target.work()V' \
@@ -116,6 +121,9 @@ unwind:
 ; ANALYZE-LEGACY: PEA: EliminateAllocation function=@"filter.Target.work()V.extra.decoy" [VO=0]
 
 ; ANALYZE-IDENTITY: PEA: EliminateAllocation function=@"filter.Target.rooted()V.123.root" [VO=0]
+
+; DUMP-IDENTITY: ;; PEA-DUMP before iter=0 function filter.Target.rooted()V.123.root
+; DUMP-IDENTITY: ;; PEA-SUMMARY function filter.Target.rooted()V.123.root rounds=1 stop=iteration-cap
 
 ; DUMP-EXACT: ;; PEA-DUMP before iter=0 function filter.Target.work()V{{$}}
 ; DUMP-EXACT: ;; PEA-SUMMARY function filter.Target.work()V rounds=1 stop=iteration-cap

@@ -28,6 +28,7 @@
 #include "llvm/Transforms/Jeandle/PartialEscapeIterative.h"
 
 #include "llvm/Analysis/Jeandle/PartialEscapeAnalysis.h"
+#include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
@@ -83,32 +84,12 @@ static cl::list<std::string> JeandleDumpPEAIRFunctions(
 
 // True when no exact-name dump allowlist is set or FunctionName is on it.
 static bool matchesExactDumpFunction(StringRef FunctionName) {
-  if (JeandleDumpPEAIRFunctions.empty())
-    return true;
-  for (const std::string &Allowed : JeandleDumpPEAIRFunctions) {
-    StringRef AllowedName(Allowed);
-    if (FunctionName == AllowedName)
-      return true;
-    // Keep dump filtering consistent with the PEA analysis filter for
-    // JDK-generated symbols carrying a numeric ciMethod identity.
-    constexpr StringLiteral RootSuffix = ".root";
-    bool FunctionIsRoot = FunctionName.ends_with(RootSuffix);
-    bool AllowedIsRoot = AllowedName.ends_with(RootSuffix);
-    if (FunctionIsRoot != AllowedIsRoot)
-      continue;
-    StringRef Candidate = FunctionName;
-    StringRef StableName = AllowedName;
-    if (FunctionIsRoot) {
-      Candidate = Candidate.drop_back(RootSuffix.size());
-      StableName = StableName.drop_back(RootSuffix.size());
-    }
-    if (!Candidate.consume_front(StableName) || !Candidate.consume_front(".") ||
-        Candidate.empty() ||
-        !llvm::all_of(Candidate, [](char C) { return C >= '0' && C <= '9'; }))
-      continue;
-    return true;
-  }
-  return false;
+  return JeandleDumpPEAIRFunctions.empty() ||
+         llvm::any_of(JeandleDumpPEAIRFunctions,
+                      [&](const std::string &Allowed) {
+                        return jeandle::pea::matchesFunctionNameFilter(
+                            FunctionName, Allowed);
+                      });
 }
 
 // Hard upper bound guarding against non-converging inputs.

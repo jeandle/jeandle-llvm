@@ -1,7 +1,10 @@
-; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-vm-callback-log=%S/Inputs/11_instanceof_folded.cblog %s | FileCheck %s
+; RUN: llvm-link -S %s %S/Inputs/phase0_type_checks.ll -o %t
+; RUN: opt -S -passes="java-operation-lower<phase=0>" %t -o %t.lowered
+; RUN: FileCheck %s --check-prefix=LOWERED < %t.lowered
+; RUN: opt -S -passes="instcombine,simplifycfg,loop-simplify,instcombine,partial-escape-iterative" -jeandle-vm-callback-log=%S/Inputs/11_instanceof_folded.cblog %t.lowered | FileCheck %s
 
-; PEA: jeandle.instanceof on a virtual (non-null) receiver folds to
-; i32 1 when the subtype relation is statically known.
+; Phase-0 lowering exposes check_instanceof and a zext. PEA folds the
+; subtype query on a virtual receiver, then InstCombine produces i32 1.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc i32 @jeandle.instanceof(ptr addrspace(0), ptr addrspace(1))
@@ -27,5 +30,12 @@ u:
 ; CHECK-NOT: jeandle.new_instance
 ; CHECK-NOT: jeandle.instanceof
 ; CHECK: ret i32 1
+
+; LOWERED-LABEL: define i32 @test_instanceof
+; LOWERED-NOT: call hotspotcc i32 @jeandle.instanceof
+; LOWERED: call hotspotcc i1 @jeandle.check_instanceof
+; LOWERED: zext i1
+; LOWERED-NOT: call hotspotcc i32 @jeandle.instanceof
+; LOWERED: ret i32
 
 !java-method-compilation = !{}
