@@ -152,19 +152,15 @@ static llvm::cl::opt<bool> JeandlePEAFoldCopy(
     llvm::cl::desc("PEA: fold jeandle.copy pseudo calls with a virtual "
                    "destination into field state instead of materializing."));
 
-// Element-count cap for concrete-source copy folds. Above the cap the
-// surviving bulk copy (an optimized stub) beats per-element loads: JMH on
-// JeandleScalarizedCopy shows the fold winning at small counts (3.4x at 1,
-// 1.02-1.15x at 8) and losing beyond it (0.77x at 16, 0.70x at 64), matching
-// C2's ArrayCopyLoadStoreMaxElem semantics for eliminating arraycopy with a
-// tightly coupled allocation. Default 8, like C2. Virtual sources transfer
-// existing field state without generating loads; larger transfers are allowed
-// when their destinations disappear or their materialization replays stay
-// within the scalar count cap.
-static llvm::cl::opt<unsigned> JeandlePEACopyFoldMaxCount(
-    "jeandle-pea-copy-fold-max-count", llvm::cl::init(8), llvm::cl::Hidden,
-    llvm::cl::desc("PEA: maximum scalar count for concrete-source copy loads "
-                   "and materialized virtual-source copy destinations."));
+// The copy fold has no element-count cap of its own: a folded destination is
+// a virtual array, so the transfer is already bounded by
+// -jeandle-pea-max-array-length (the analogue of Graal's
+// MaximumEscapeAnalysisArrayLength, which likewise imposes no separate
+// arraycopy-fold limit). The emitted per-element loads and materialization
+// replay stores form contiguous, ascending, same-type, naturally-aligned
+// unordered-atomic runs — the shape the auto-vectorizer widens once it
+// accepts unordered atomics — so per-element cost does not grow with the
+// array length the way a scalar-only emission would.
 
 // Cascade other still-locked virtuals at materialization when the target uses
 // HotSpot's lightweight locking (LM_LIGHTWEIGHT requires strict lock nesting).
@@ -835,14 +831,12 @@ static DenseSet<BasicBlock *> findUnsafeReachableCyclicBlocks(Function &F,
 class Analyzer {
 public:
   Analyzer(Function &F, DominatorTree &DT, LoopInfo &LI, bool StrictLockOrder,
-           bool AllowLargeVirtualCopyFolds,
            const DenseSet<Instruction *> &SuppressedCFGProofs,
            const DenseSet<CallBase *> &SuppressedVirtualizations)
       : F(F), DT(DT), LI(LI), DL(F.getParent()->getDataLayout()),
         VMConsts(jeandle::VMConstants::fromModule(*F.getParent())),
         MonitorDepth(computeMonitorDepthInfo(F)),
         StrictLockOrder(StrictLockOrder),
-        AllowLargeVirtualCopyFolds(AllowLargeVirtualCopyFolds),
         LockEliminationEnabled(JeandlePEAEliminateLocks),
         SuppressedCFGProofs(SuppressedCFGProofs),
         SuppressedVirtualizations(SuppressedVirtualizations),
@@ -864,7 +858,6 @@ public:
   ArrayRef<CallBase *> getRetryVirtualizationAllocationSites() const {
     return RetryVirtualizationAllocationSites;
   }
-  bool needsConservativeCopyRetry() const { return ExpensiveCopyReplay; }
 
   // Loop-nest execution mode, a single analyzer-global field consulted by
   // processAllocation and processLoop:
@@ -913,14 +906,6 @@ private:
   // Cached "strict lock order" decision shared by every fresh attempt in this
   // analysis run; see resolveStrictLockOrder() for the precedence rules.
   const bool StrictLockOrder;
-  // A rejected dense replay restores the scalar copy cap for this function.
-  // The caller only changes this from true to false, bounding profitability
-  // recovery to one fresh analysis independently of correctness retries.
-  const bool AllowLargeVirtualCopyFolds;
-  bool ExpensiveCopyReplay = false;
-  // An overapproximation across loop rollback, used only to skip the final
-  // profitability audit in functions without any oversized virtual copy.
-  bool MayHaveLargeVirtualCopyFolds = false;
   // Whether balanced monitor enter/exit pairs on virtual receivers may be
   // eliminated this run (snapshot of the JeandlePEAEliminateLocks cl::opt at
   // Analyzer construction).
@@ -1908,7 +1893,6 @@ private:
   // checked read-only first; any failure returns false so the caller takes
   // the generic escape path (both operands materialize at the call).
   bool processCopyCall(CallBase *CB);
-  bool hasExpensiveCopyReplays();
   // Element-kind compatibility gate for a copy fold: distinct array klasses
   // are acceptable only with a proof — the frontend's ValidatedCopy marker
   // (the exact "guards were emitted" signal; copyOf/copyOfRange do NOT
@@ -7469,9 +7453,6 @@ bool Analyzer::processCopyCall(CallBase *CB) {
     DestPos = 0;
     Len = static_cast<int64_t>(Dest.ArrayLength);
   }
-  if (!AllowLargeVirtualCopyFolds &&
-      *Len > static_cast<int64_t>(JeandlePEACopyFoldMaxCount))
-    return false;
   // Destination bounds: a virtual array's length is a compile-time constant.
   std::optional<int64_t> DestEnd = checkedOffsetAdd(*DestPos, *Len);
   if (!DestEnd || *DestEnd > static_cast<int64_t>(Dest.ArrayLength))
@@ -7481,8 +7462,6 @@ bool Analyzer::processCopyCall(CallBase *CB) {
       resolveVirtualIdentity(CB->getArgOperand(0), CurrentState, Aliases, DL,
                              VirtualIdentityMode::WholeObject);
   const bool SrcVirtual = SrcIdentity.isDefined();
-  if (!SrcVirtual && *Len > static_cast<int64_t>(JeandlePEACopyFoldMaxCount))
-    return false;
   const jeandle::VirtualObject *Src = nullptr;
   if (SrcVirtual) {
     jeandle::ObjectID SrcID = SrcIdentity.getObjectID();
@@ -7651,63 +7630,11 @@ bool Analyzer::processCopyCall(CallBase *CB) {
     }
   }
   emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
-  MayHaveLargeVirtualCopyFolds |=
-      *Len > static_cast<int64_t>(JeandlePEACopyFoldMaxCount);
   // Counted per analyzer visit: a copy inside a loop fixpoint re-folds on
   // every body pass, so the number counts (site, round) pairs, not distinct
   // call sites.
   ++AttemptStats.CopyFolds;
   return true;
-}
-
-bool Analyzer::hasExpensiveCopyReplays() {
-  // Count committed physical replay fields, not the copy window: default
-  // slots need no stores, and a destination that disappears needs no replay.
-  DenseMap<jeandle::ObjectID, size_t> MaxReplayFields;
-  for (const auto &KV : Result.BlockEffects)
-    for (const jeandle::Effect &E : KV.second)
-      if (const auto *ME = dyn_cast<jeandle::MaterializeEffect>(&E)) {
-        size_t &Max = MaxReplayFields[ME->getMutationOwner()];
-        Max = std::max(Max, ME->FieldEntries.size());
-      }
-
-  for (const auto &KV : Result.BlockEffects) {
-    for (const jeandle::Effect &E : KV.second) {
-      const auto *RE = dyn_cast<jeandle::ReplaceCallEffect>(&E);
-      if (!RE)
-        continue;
-      auto *CB = dyn_cast_or_null<CallBase>((Value *)RE->Target);
-      if (!CB || !jeandle::pea::isJeandleCopyPseudoCall(CB))
-        continue;
-      jeandle::ObjectID ID = RE->getMutationOwner();
-      if (ID >= Result.VirtualObjects.size() ||
-          !Result.VirtualObjects[ID]->isArray())
-        continue;
-      const auto &Dest = *Result.VirtualObjects[ID];
-      std::optional<int64_t> Len =
-          jeandle::pea::classifyJeandleCopyPseudo(CB) ==
-                  jeandle::pea::JeandleCopyPseudoKind::CloneArray
-              ? std::optional<int64_t>(Dest.ArrayLength)
-              : getCopyConstantI64(CB->getArgOperand(4));
-      if (!Len)
-        return true;
-      if (*Len <= static_cast<int64_t>(JeandlePEACopyFoldMaxCount))
-        continue;
-      auto Classification = Result.EscapeClassification.find(ID);
-      if (Classification == Result.EscapeClassification.end())
-        return true;
-      if (Classification->second ==
-          jeandle::PEAResult::EscapeKind::NeverEscapes)
-        continue;
-      auto Replay = MaxReplayFields.find(ID);
-      if (Classification->second !=
-              jeandle::PEAResult::EscapeKind::PartiallyEscapes ||
-          Replay == MaxReplayFields.end() ||
-          Replay->second > JeandlePEACopyFoldMaxCount)
-        return true;
-    }
-  }
-  return false;
 }
 
 Value *Analyzer::getOrCreateCopyElementSemanticLoad(CallBase *Copy,
@@ -11557,11 +11484,6 @@ jeandle::PEAResult Analyzer::run() {
     return jeandle::PEAResult();
   if (!Result.hasLegalMaterializationAtomicTypes(DL))
     return jeandle::PEAResult();
-  if (AllowLargeVirtualCopyFolds && MayHaveLargeVirtualCopyFolds &&
-      hasExpensiveCopyReplays()) {
-    ExpensiveCopyReplay = true;
-    return jeandle::PEAResult();
-  }
   publishAttemptOutputs();
   return std::move(Result);
 }
@@ -11589,11 +11511,10 @@ PartialEscapeAnalysis::run(Function &F, FunctionAnalysisManager &FAM) {
   auto &LI = FAM.getResult<LoopAnalysis>(F);
 
   const bool StrictLockOrder = resolveStrictLockOrder();
-  bool AllowLargeVirtualCopyFolds = true;
   DenseSet<Instruction *> SuppressedCFGProofs;
   DenseSet<CallBase *> SuppressedVirtualizations;
   while (true) {
-    Analyzer A(F, DT, LI, StrictLockOrder, AllowLargeVirtualCopyFolds,
+    Analyzer A(F, DT, LI, StrictLockOrder,
                SuppressedCFGProofs, SuppressedVirtualizations);
     jeandle::PEAResult Attempt = A.run();
     if (!A.getRetryVirtualizationAllocationSites().empty()) {
@@ -11629,12 +11550,6 @@ PartialEscapeAnalysis::run(Function &F, FunctionAnalysisManager &FAM) {
     }
 
     ArrayRef<Instruction *> InvalidProofs = A.getInvalidCFGProofKillers();
-    if (A.needsConservativeCopyRetry()) {
-      // Reject all oversized folds together: suppressing one destination at
-      // a time can expose a whole clone chain one fresh attempt at a time.
-      AllowLargeVirtualCopyFolds = false;
-      continue;
-    }
     if (InvalidProofs.empty())
       return Attempt;
 

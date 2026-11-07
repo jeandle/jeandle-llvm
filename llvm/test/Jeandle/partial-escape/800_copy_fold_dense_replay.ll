@@ -1,8 +1,11 @@
 ; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-vm-callback-log=%S/Inputs/770_copy_fold_v2v_full.cblog %s | FileCheck %s
 
-; Large virtual copies may eliminate arrays or replay a bounded number of
-; fields. Dense materialization must retain bulk copy; one rejected fold
-; restores the count cap throughout the function without a retry cascade.
+; Dense large copies fold like any other: the destination's length is bounded
+; by the array-virtualization cap, and the materialization replays the full
+; entry set as a contiguous run of same-type unordered-atomic stores (the
+; shape the auto-vectorizer widens once unordered atomics are vectorizable).
+; Sparse windows replay only the tracked entries; default slots replay
+; nothing; clone chains fold end to end.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
 declare void @jeandle.copy(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, ptr, ptr, i64, i64)
@@ -88,8 +91,10 @@ u:
 }
 
 ; CHECK-LABEL: define i32 @dense_escape(
-; CHECK-COUNT-1: invoke void @jeandle.copy
 ; CHECK-NOT: jeandle.copy
+; The full 16-entry window replays onto the materialized destination.
+; CHECK-COUNT-16: store atomic i32
+; CHECK: call void @publish
 ; CHECK: ret i32
 
 define i32 @small_escape() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
@@ -191,8 +196,10 @@ u:
 }
 
 ; CHECK-LABEL: define i32 @dense_clone_escape(
-; CHECK-COUNT-1: invoke void @jeandle.copy
 ; CHECK-NOT: jeandle.copy
+; All 12 cloned elements replay at the escape point.
+; CHECK-COUNT-12: store atomic i32
+; CHECK: call void @publish
 ; CHECK: ret i32
 
 define i32 @mixed_folds() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
@@ -259,9 +266,11 @@ u:
 }
 
 ; CHECK-LABEL: define i32 @mixed_folds(
-; CHECK-COUNT-2: invoke void @jeandle.copy
+; Both copies fold independently; the never-escaping tail's read folds to
+; the transferred constant.
 ; CHECK-NOT: jeandle.copy
-; CHECK: ret i32
+; CHECK: call void @publish
+; CHECK: ret i32 3
 
 define i32 @clone_chain() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
@@ -326,8 +335,10 @@ u:
 }
 
 ; CHECK-LABEL: define i32 @clone_chain(
-; CHECK-COUNT-3: invoke void @jeandle.copy
+; The whole chain folds; only the final clone's 9 tracked elements replay.
 ; CHECK-NOT: jeandle.copy
+; CHECK-COUNT-9: store atomic i32
+; CHECK: call void @publish
 ; CHECK: ret i32
 
 define i32 @multiple_replay_sites(i1 %choose) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
@@ -374,7 +385,7 @@ u:
 }
 
 ; CHECK-LABEL: define i32 @multiple_replay_sites(
-; CHECK: invoke void @jeandle.copy
+; CHECK-NOT: jeandle.copy
 ; CHECK: call void @publish
 ; CHECK: ret i32 0
 

@@ -1,11 +1,11 @@
 ; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-vm-callback-log=%S/Inputs/770_copy_fold_v2v_full.cblog %s | FileCheck %s
-; RUN: opt -S -jeandle-pea-copy-fold-max-count=0 -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-vm-callback-log=%S/Inputs/770_copy_fold_v2v_full.cblog %s | FileCheck %s
 
-; The concrete-load count cap must not force existing virtual state into memory.
-; Virtual-to-virtual jeandle.copy fold: both src and dest are virtual int[16]
-; arrays. The arraycopy-kind pseudo call folds into the dest VO's field state
-; (entry transfer), the call is deleted, both allocations never escape, and
-; the downstream dest loads fold to the transferred constants.
+; Large virtual-to-virtual folds are not capped: the folded destination is a
+; virtual array, so its length is already bounded by the array-virtualization
+; cap. Both src and dest are virtual int[16] arrays. The arraycopy-kind pseudo
+; call folds into the dest VO's field state (entry transfer), the call is
+; deleted, both allocations never escape, and the downstream dest loads fold
+; to the transferred constants.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
 declare void @jeandle.copy(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, ptr, ptr, i64, i64)
