@@ -1627,21 +1627,29 @@ PreservedAnalyses PartialEscapeTransform::run(Function &F,
   // and slow-path blocks orphaned by ConstantFoldTerminator above.
   Changed |= EliminateUnreachableBlocks(F);
 
-  // Drop references on still-unparented OwnedInsts before verifyFunction: the
-  // PEAResult destructor (which runs in the analysis manager, after the
-  // verifier) would clean them up, but without this sweep an unparented helper
-  // holding a use of a now-parented helper trips the verifier's "use list of X
-  // is in IR but X's user is not". dropAllReferences() severs the use list
-  // without freeing the value; the dtor still owns the WeakTrackingVH and does
-  // the eventual deleteValue.
-  for (WeakTrackingVH &VH : Result.OwnedInsts) {
-    if (Value *V = VH) {
-      if (auto *I = dyn_cast<Instruction>(V)) {
-        if (!I->getParent())
-          I->dropAllReferences();
+  // Drop references on still-unparented owned instructions before
+  // verifyFunction: the PEAResult destructor (which runs in the analysis
+  // manager, after the verifier) would clean them up, but without this sweep
+  // an unparented helper holding a use of a now-parented helper trips the
+  // verifier's "use list of X is in IR but X's user is not".
+  // dropAllReferences() severs the use list without freeing the value; the
+  // dtor still owns the WeakTrackingVH and does the eventual deleteValue.
+  // OwnedCopyLoads (the concrete-source copy fold's per-field load chains,
+  // whose PlaceInstructionEffects may have been dropped with the fold) need
+  // the identical treatment: an unplaced chain's GEP uses the in-IR source
+  // instruction and would otherwise fail the same use-list check.
+  auto DropUnparentedRefs = [](SmallVectorImpl<WeakTrackingVH> &Owned) {
+    for (WeakTrackingVH &VH : Owned) {
+      if (Value *V = VH) {
+        if (auto *I = dyn_cast<Instruction>(V)) {
+          if (!I->getParent())
+            I->dropAllReferences();
+        }
       }
     }
-  }
+  };
+  DropUnparentedRefs(Result.OwnedInsts);
+  DropUnparentedRefs(Result.OwnedCopyLoads);
 
   // In debug builds, verify the rewritten IR so any PEA malformation (broken
   // SSA from a stale RAUW, mis-ordered CreatePHI vs per-pred Materialize,

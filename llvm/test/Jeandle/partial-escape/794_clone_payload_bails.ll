@@ -2,8 +2,9 @@
 ; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -jeandle-vm-callback-log=%S/Inputs/794_clone_payload_bails.cblog %s | FileCheck %s --check-prefix=SHORT
 
 ; Byte-payload clone bail cases:
-;   The concrete case — clone-instance with a concrete source: there is no
-;   field enumeration to build per-field loads, so the fold must not fire.
+;   The barrier case — clone-instance with a concrete source whose klass the
+;   GetCloneInstanceInfo callback declines with RequiresGCBarriers: the fold
+;   must not fire, the bulk copy stays for the collector-specific expansion.
 ;   The short case — a payload window that does not cover all fields (one
 ;   word short) must not fire: the destination's uncovered field would keep
 ;   its default instead of the source's value.

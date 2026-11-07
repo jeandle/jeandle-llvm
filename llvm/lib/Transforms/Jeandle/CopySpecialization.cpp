@@ -196,8 +196,8 @@ CopyFacts analyzeCopy(CallBase &CB, DominatorTree &DT,
     const jeandle::JavaType SrcType =
         jeandle::getJavaType(CB.getArgOperand(0), &DT, &CB, IsNullEdge);
     if (SrcType.isKnown() && Callbacks->GetCloneInstanceInfo != nullptr) {
-      Facts.CloneInstanceInfo =
-          Callbacks->GetCloneInstanceInfo(SrcType.Klass, SrcType.Exact);
+      Facts.CloneInstanceInfo = Callbacks->GetCloneInstanceInfo(
+          SrcType.Klass, SrcType.Exact, /*expansion_bound=*/true);
     }
   } else {
     assert((isArrayClone(CB) || isReferenceArrayClone(CB)) &&

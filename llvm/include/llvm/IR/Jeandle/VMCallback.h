@@ -289,8 +289,9 @@ enum class JeandleInlineReason : int {
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
   def(GetCloneInstanceInfo, CloneInstanceInfoResult, Tuple,                      \
-      (uintptr_t a1, bool a2), (a1, a2),                                         \
-      (VMCallbackValueType::Uintptr, VMCallbackValueType::Bool), 2)
+      (uintptr_t a1, bool a2, bool a3), (a1, a2, a3),                            \
+      (VMCallbackValueType::Uintptr, VMCallbackValueType::Bool,                  \
+       VMCallbackValueType::Bool), 3)
 // clang-format on
 
 // =============================================================================
@@ -503,7 +504,15 @@ enum class JeandleInlineReason : int {
 ///                         It also rechecks concurrent subclass loading,
 ///                         records C2's leaf-type dependency, and reports
 ///                         whether collector barriers require the bulk clone
-///                         expansion.
+///                         expansion. The third argument selects the caller's
+///                         admission: with expansion_bound=true the
+///                         ArrayCopyLoadStoreMaxElem field-count bound applies
+///                         (C2's ArrayCopyNode::get_count parity — the caller
+///                         expands the copy into per-element load/store IR);
+///                         a PEA fold that only carries field state passes
+///                         false and gets the complete layout (Graal's
+///                         ObjectClone virtualize has no instance field-count
+///                         bound).
 
 struct VMCallbacks {
   ALL_JEANDLE_VM_CALLBACKS(DEF_VM_CALLBACK_FIELD)

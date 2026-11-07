@@ -1319,6 +1319,18 @@ private:
                      CopyElementLoadKeyHash>
       CopyElementLoadCache;
 
+  // Copy sites folded with a VIRTUAL source, as (source, destination) VO id
+  // pairs. commit() consults this after eligibility settles: a fold whose
+  // destination turned ineligible is dropped and its call REVIVES, and the
+  // revived call reads the source's memory at the call — the source's own
+  // materialization may replay the values only after the call (or the
+  // source may be proposed for deletion), so commit keeps such a source
+  // entirely real. Like CaseBPhiAliases, intentionally not snapshotted:
+  // commit()-time-only state, re-derived on every analysis visit (duplicate
+  // pairs are inert — the consumer re-checks eligibility).
+  SmallVector<std::pair<jeandle::ObjectID, jeandle::ObjectID>, 4>
+      CopyFoldVirtualSources;
+
   // Per-VO record of LLVM pointer-PHIs that processBlockPhis
   // aliased via Case-B (every incoming agrees on the same ObjectID).
   // commit() consults this to schedule explicit PHI erasures for VOs
@@ -1893,6 +1905,18 @@ private:
   // checked read-only first; any failure returns false so the caller takes
   // the generic escape path (both operands materialize at the call).
   bool processCopyCall(CallBase *CB);
+  // Concrete-source leg of the clone-instance fold — the Jeandle counterpart
+  // of Graal ObjectClone's concrete-instance path: enumerate the clone
+  // klass's non-static fields via the GetCloneInstanceInfo callback (the
+  // same enumeration CopySpecialization's instance-clone scalarization
+  // uses) and fold each field to a semantic load placed at the call. BaseOff
+  // and PayloadEnd delimit the validated full-coverage payload window.
+  // Returns false (caller takes the generic escape path) when the source
+  // still references a virtual object, the callback is unavailable or
+  // declines the klass, or a field's storage cannot be modelled.
+  bool foldCloneInstanceConcreteSource(CallBase *CB, jeandle::ObjectID DestID,
+                                       jeandle::VirtualObject &Dest,
+                                       int64_t BaseOff, int64_t PayloadEnd);
   // Element-kind compatibility gate for a copy fold: distinct array klasses
   // are acceptable only with a proof — the frontend's ValidatedCopy marker
   // (the exact "guards were emitted" signal; copyOf/copyOfRange do NOT
@@ -1917,6 +1941,30 @@ private:
   // control context (validated guards, null checks) for bounds/type safety.
   Value *getOrCreateCopyElementSemanticLoad(CallBase *Copy, Value *ConcreteSrc,
                                             Type *ElemTy, int64_t SrcOff);
+  // Clear the reaching-def entries of every destination slot inside
+  // [Lo, Hi) when a copy fold takes the slot over (written or erased). The
+  // copy call itself becomes the slot's reaching definition, and
+  // dropEffectsForIneligible revives that call as a whole unit when the
+  // destination turns ineligible — a per-slot restored store would only add
+  // a dead write the revived call immediately overwrites. Clearing the
+  // entry keeps such overwritten stores unobserved, so their
+  // EliminateStore effects survive the drop as dead-store eliminations.
+  // VirtualRefStoreTargets entries are deliberately untouched: a store
+  // OBSERVED before the fold (a folded load consumed its value) must remain
+  // restorable, and its inner reference keeps the keep-real cascade sound.
+  void clearCopyFoldReachingDefs(jeandle::ObjectID DestID, int64_t Lo,
+                                 int64_t Hi);
+  // Observe every reaching definition of SrcID's slots inside [Lo, Hi) AT
+  // THE FOLD, before any later store can kill the entries in the live
+  // point-sensitive map: a revived copy call reads these original values,
+  // and commit-time observation (markIneligible walks the live map) would
+  // miss a pre-copy store whose entry a post-copy store overwrote. The
+  // observed set is insert-only, so the observation survives later kills;
+  // it is inert while the fold survives (an observed store's owner still
+  // eliminates it) and restores the stores when the source is kept real
+  // (see CopyFoldVirtualSources).
+  void observeCopyFoldSourceDefs(jeandle::ObjectID SrcID, int64_t Lo,
+                                 int64_t Hi);
   // Fold a monitorenter on an eligible virtual receiver into lock-state
   // tracking and a ReplaceCall elision. Returns false otherwise; an
   // ineligible (already-abandoned) receiver first cascades still-locked
@@ -5498,6 +5546,20 @@ static Type *arrayElementStorageType(jeandle::JBasicType Kind,
   return ElemTy;
 }
 
+// The LLVM storage type of one INSTANCE field for its Java basic type.
+// Boolean fields occupy one JVM layout byte — the frontend stores them as i8
+// (a trunc + mask-1 byte store) and CopySpecialization's instance-clone
+// expansion loads them as i8 — so Boolean shares Byte's storage instead of
+// the i1 computational slot llvmElementTypeFor gives it. Reference fields
+// shrink to the narrow pointer exactly like array elements.
+static Type *instanceFieldStorageType(jeandle::JBasicType Kind,
+                                      bool UseCompressedOops,
+                                      const DataLayout &DL, LLVMContext &Ctx) {
+  if (Kind == jeandle::JBasicType::Boolean)
+    Kind = jeandle::JBasicType::Byte;
+  return arrayElementStorageType(Kind, UseCompressedOops, DL, Ctx);
+}
+
 // Allocation virtualization. Virtualize a jeandle.new_instance /
 // jeandle.new_array site: build the VirtualObject, install a virtual
 // ObjectState (a presence marker; per-field values live in FieldStates), add
@@ -7284,13 +7346,16 @@ std::optional<int64_t> Analyzer::getCopyConstantI64(Value *V) {
 
 // Fold a jeandle.copy pseudo call into virtual field state — the Jeandle
 // counterpart of Graal BasicArrayCopyNode::virtualize(). The destination must
-// be an eligible virtual array; positions and length must be constants with
+// be an eligible virtual array (or, for a byte-payload clone-instance, an
+// eligible virtual instance); positions and length must be constants with
 // provable bounds and element-type compatibility. A virtual source transfers
 // field-state entries element-by-element (a same-VO overlap with
 // destPos > srcPos transfers in reverse so no element is read after being
 // overwritten, matching Java's overlapping-copy semantics); a concrete source
-// is deferred to the element-load machinery. Everything is validated read-only
-// first; only then are field states mutated, the call's ReplaceCall elision
+// is deferred to the element-load machinery (per element for arrays, per
+// declared field for a clone-instance). Everything is validated read-only
+// first; only then are field states mutated, the reaching-def entries of the
+// overwritten window slots cleared, the call's ReplaceCall elision
 // recorded (mutation owner = destination VO, so dropEffectsForIneligible
 // revives the call — and its memory write — if the destination later turns
 // ineligible), and the caller proceeds to recordDeoptBundleMappings. Any
@@ -7322,9 +7387,9 @@ bool Analyzer::processCopyCall(CallBase *CB) {
 
   // A clone-instance copies the instance payload as raw bytes: fold it by
   // transferring every source field entry inside the payload window to the
-  // fresh clone VO (virtual source only — building per-field loads for a
-  // concrete source needs a field-enumeration query the callback set does
-  // not offer).
+  // fresh clone VO (virtual source), or — for a concrete source — by loading
+  // each of the clone klass's declared fields from the source object (the
+  // Graal ObjectClone concrete-instance path).
   if (Kind == JeandleCopyPseudoKind::CloneInstance) {
     if (!Dest.isInstance())
       return false;
@@ -7349,7 +7414,8 @@ bool Analyzer::processCopyCall(CallBase *CB) {
         resolveVirtualIdentity(CB->getArgOperand(0), CurrentState, Aliases, DL,
                                VirtualIdentityMode::WholeObject);
     if (!SrcIdentity.isDefined())
-      return false;
+      return foldCloneInstanceConcreteSource(CB, DestID, Dest, *BaseOff,
+                                             *PayloadEnd);
     jeandle::ObjectID SrcID = SrcIdentity.getObjectID();
     if (!Eligible.lookup(SrcID))
       return false;
@@ -7404,6 +7470,17 @@ bool Analyzer::processCopyCall(CallBase *CB) {
         Stale.push_back(Off);
     for (int64_t Off : Stale)
       DestFields.erase(Off);
+    // A revived call reads the source window's original values AS OF THE
+    // CALL: observe the reaching definitions right here — before any later
+    // store can kill their entries in the live point-sensitive map — and
+    // record the source for commit's keep-real rule
+    // (CopyFoldVirtualSources), which restores the (observed) stores at
+    // their original positions when the fold is dropped.
+    observeCopyFoldSourceDefs(SrcID, *BaseOff, *PayloadEnd);
+    CopyFoldVirtualSources.emplace_back(SrcID, DestID);
+    // The full-coverage copy is now the reaching definition of every window
+    // slot it wrote or reset to default.
+    clearCopyFoldReachingDefs(DestID, *BaseOff, *PayloadEnd);
     emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
     ++AttemptStats.CopyFolds;
     return true;
@@ -7629,6 +7706,66 @@ bool Analyzer::processCopyCall(CallBase *CB) {
       DestFields[DestOff] = jeandle::FieldValue::scalar(Load);
     }
   }
+  // The transferred elements form one contiguous destination range; the copy
+  // call is now the reaching definition of every slot it wrote or reset to
+  // default. (Validation already proved these offsets representable; the
+  // optionals are belt-and-suspenders.) For a same-VO copy the source window
+  // overlaps the destination window — the shared slots are both read and
+  // rewritten by the call — so their definitions must stay out of the
+  // destination clear, or the overlap would delete exactly the stores a
+  // revived call reads (Java's overlapping-copy semantics read the pre-copy
+  // values of every element).
+  if (*Len > 0) {
+    std::optional<int64_t> SrcWinLo, SrcWinHi;
+    if (SrcVirtual) {
+      SrcWinLo = checkedArrayElementOffset(Dest.ArrayBaseOffset, *SrcPos,
+                                           Dest.ArrayIndexScale);
+      std::optional<int64_t> SrcLastIdx = checkedOffsetAdd(*SrcPos, *Len - 1);
+      SrcWinHi =
+          SrcLastIdx ? checkedArrayElementOffset(Dest.ArrayBaseOffset,
+                                                 *SrcLastIdx,
+                                                 Dest.ArrayIndexScale)
+                     : std::nullopt;
+      if (SrcWinHi)
+        SrcWinHi = checkedOffsetAdd(*SrcWinHi, Dest.ArrayIndexScale);
+      // A revived call reads this window's original values AS OF THE CALL:
+      // observe the reaching definitions right here — before any later
+      // store can kill their entries in the live point-sensitive map — and
+      // record the source for commit's keep-real rule
+      // (CopyFoldVirtualSources), which restores the (observed) stores at
+      // their original positions when the fold is dropped.
+      if (SrcWinLo && SrcWinHi) {
+        observeCopyFoldSourceDefs(SrcIdentity.getObjectID(), *SrcWinLo,
+                                  *SrcWinHi);
+        CopyFoldVirtualSources.emplace_back(SrcIdentity.getObjectID(),
+                                            DestID);
+      }
+    }
+    std::optional<int64_t> DestWinLo = checkedArrayElementOffset(
+        Dest.ArrayBaseOffset, *DestPos, Dest.ArrayIndexScale);
+    std::optional<int64_t> DestLastIdx = checkedOffsetAdd(*DestPos, *Len - 1);
+    std::optional<int64_t> DestWinHi =
+        DestLastIdx ? checkedArrayElementOffset(Dest.ArrayBaseOffset,
+                                                *DestLastIdx,
+                                                Dest.ArrayIndexScale)
+                    : std::nullopt;
+    if (DestWinHi)
+      DestWinHi = checkedOffsetAdd(*DestWinHi, Dest.ArrayIndexScale);
+    if (DestWinLo && DestWinHi) {
+      if (!SameVO) {
+        clearCopyFoldReachingDefs(DestID, *DestWinLo, *DestWinHi);
+      } else if (SrcWinLo && SrcWinHi) {
+        // Clear only the destination-only parts of the window.
+        if (*SrcWinLo > *DestWinLo)
+          clearCopyFoldReachingDefs(DestID, *DestWinLo,
+                                    std::min(*DestWinHi, *SrcWinLo));
+        if (*SrcWinHi < *DestWinHi)
+          clearCopyFoldReachingDefs(DestID,
+                                    std::max(*DestWinLo, *SrcWinHi),
+                                    *DestWinHi);
+      }
+    }
+  }
   emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
   // Counted per analyzer visit: a copy inside a loop fixpoint re-folds on
   // every body pass, so the number counts (site, round) pairs, not distinct
@@ -7714,6 +7851,132 @@ Value *Analyzer::getOrCreateCopyElementSemanticLoad(CallBase *Copy,
   CopyElementLoadCache.insert_or_assign(
       Key, CopyElementLoadChain{Addr, Load, CastVH});
   return Semantic;
+}
+
+void Analyzer::clearCopyFoldReachingDefs(jeandle::ObjectID DestID, int64_t Lo,
+                                         int64_t Hi) {
+  auto DIt = FieldDefinitions.find(DestID);
+  if (DIt == FieldDefinitions.end())
+    return;
+  auto &Offsets = DIt->second;
+  SmallVector<int64_t, 8> ToErase;
+  for (const auto &[Off, Defs] : Offsets)
+    if (Off >= Lo && Off < Hi)
+      ToErase.push_back(Off);
+  for (int64_t Off : ToErase)
+    Offsets.erase(Off);
+}
+
+void Analyzer::observeCopyFoldSourceDefs(jeandle::ObjectID SrcID, int64_t Lo,
+                                         int64_t Hi) {
+  auto DIt = FieldDefinitions.find(SrcID);
+  if (DIt == FieldDefinitions.end())
+    return;
+  SmallVector<int64_t, 8> ToObserve;
+  for (const auto &[Off, Defs] : DIt->second)
+    if (Off >= Lo && Off < Hi)
+      ToObserve.push_back(Off);
+  for (int64_t Off : ToObserve)
+    observeFieldDefinition(SrcID, Off, FieldDefinitions);
+}
+
+bool Analyzer::foldCloneInstanceConcreteSource(
+    CallBase *CB, jeandle::ObjectID DestID, jeandle::VirtualObject &Dest,
+    int64_t BaseOff, int64_t PayloadEnd) {
+  // A derived pointer of a still-virtual object must not become a load base:
+  // whole-object identity already failed above, so a BaseObject resolution
+  // here is exactly that shape, and the memory behind its eliminated stores
+  // is not written until materialization. Well-formed clone IR always names
+  // the whole source object; anything else keeps the bulk copy.
+  if (jeandle::pea::resolveVirtualRef(CB->getArgOperand(0), CurrentState,
+                                      Aliases, DL))
+    return false;
+  // Best-effort static cross-check: an annotated source klass that differs
+  // from the clone allocation's klass contradicts the clone shape.
+  jeandle::JavaType SrcJT = jeandle::getJavaType(CB->getArgOperand(0), nullptr,
+                                                 nullptr, nullptr);
+  if (SrcJT.isKnown() && SrcJT.Klass != Dest.Klass)
+    return false;
+
+  const jeandle::VMCallbacks *VMCB = jeandle::getVMCallbacks();
+  if (!VMCB || !VMCB->GetCloneInstanceInfo)
+    return false;
+  // The destination allocation's klass operand IS the clone's runtime klass
+  // — and by clone semantics also the source's — so enumerating it describes
+  // the source's actual field layout; the klass is exact. Ready covers the
+  // admission shared with CopySpecialization's instance-clone scalarization
+  // (injected fields and the collector barrier policy for a tightly-coupled
+  // clone). The expansion field-count bound deliberately does NOT apply
+  // here: this fold only carries field state (Graal's ObjectClone
+  // virtualize has no instance field-count bound), unlike
+  // CopySpecialization's per-element load/store expansion.
+  jeandle::CloneInstanceInfoResult Info = VMCB->GetCloneInstanceInfo(
+      Dest.Klass, /*klass_exact=*/true, /*expansion_bound=*/false);
+  if (std::get<0>(Info) !=
+      static_cast<int>(jeandle::CloneInstanceInfoStatus::Ready))
+    return false;
+  // Ready promises the count matches the description list; a mismatched or
+  // negative count is a bogus callback result — decline rather than trust a
+  // partial layout.
+  if (std::get<1>(Info) < 0 ||
+      static_cast<size_t>(std::get<1>(Info)) != std::get<2>(Info).size())
+    return false;
+
+  // Validation: every declared field must land WHOLLY inside the payload
+  // window (the bytes the real clone copied), stay within the offset model,
+  // and be representable as a storage type the destination slot accepts.
+  // getOrCreateFieldIndex may insert an inert FieldDesc on the validation
+  // path — the accepted processStore pattern; a bail here materializes the
+  // destination immediately.
+  SmallVector<std::pair<int64_t, Type *>, 8> Fields;
+  for (const jeandle::CloneInstanceFieldInfo &Field : std::get<2>(Info)) {
+    int64_t Off = std::get<0>(Field);
+    auto BasicType = static_cast<jeandle::JBasicType>(std::get<1>(Field));
+    if (Off < BaseOff || Off >= PayloadEnd ||
+        !jeandle::pea::isUsableFieldOffset(Off) ||
+        BasicType >= jeandle::JBasicType::Count)
+      return false;
+    Type *StorageTy = instanceFieldStorageType(
+        BasicType, VMConsts.UseCompressedOops, DL, F.getContext());
+    if (!StorageTy)
+      return false;
+    std::optional<int64_t> FieldEnd =
+        jeandle::pea::checkedOffsetAdd(Off, DL.getTypeStoreSize(StorageTy));
+    if (!FieldEnd || *FieldEnd > PayloadEnd)
+      return false;
+    if (Dest.getOrCreateFieldIndex(Off, StorageTy, DL) < 0)
+      return false;
+    Fields.emplace_back(Off, StorageTy);
+  }
+
+  // Commit: no failure paths beyond this point. Materialize the outer map
+  // entry BEFORE taking DestFields (an operator[] insert can rehash the
+  // outer DenseMap and would dangle a reference taken earlier).
+  if (!FieldStates.count(DestID))
+    (void)FieldStates[DestID];
+  auto &DestFields = FieldStates[DestID];
+  for (const auto &[Off, StorageTy] : Fields) {
+    Value *Load = getOrCreateCopyElementSemanticLoad(
+        CB, CB->getArgOperand(0), StorageTy, Off);
+    DestFields[Off] = jeandle::FieldValue::scalar(Load);
+  }
+  // Window slots that are not declared fields revert to their defaults: the
+  // full-coverage clone overwrote whatever a stale store had put there.
+  DenseSet<int64_t> FieldOffsets;
+  for (const auto &[Off, StorageTy] : Fields)
+    FieldOffsets.insert(Off);
+  SmallVector<int64_t, 8> Stale;
+  for (const auto &[Off, FV] : DestFields)
+    if (Off >= BaseOff && Off < PayloadEnd && !FieldOffsets.count(Off))
+      Stale.push_back(Off);
+  for (int64_t Off : Stale)
+    DestFields.erase(Off);
+  // The full-coverage copy is now the reaching definition of every window
+  // slot it wrote or reset to default.
+  clearCopyFoldReachingDefs(DestID, BaseOff, PayloadEnd);
+  emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
+  ++AttemptStats.CopyFolds;
+  return true;
 }
 
 void Analyzer::propagatePointerAlias(Instruction *I) {
@@ -9516,6 +9779,23 @@ void Analyzer::commit() {
             AnyChange = true;
           }
       }
+      // A dropped copy fold revives a call that READS its virtual source's
+      // memory at the call. The source's own materialization may replay the
+      // tracked values only AFTER the call (or the source may have been
+      // proposed for deletion), so an eligible source cannot be trusted to
+      // have its values in memory there. Keep such a source entirely real:
+      // markIneligible restores its eliminated stores at their original
+      // positions (which dominate the call) and drops its replays. This
+      // runs BEFORE the surviving-use audit below so the audit's FreshRetry
+      // (a full re-analysis) is not triggered for a source the plan can
+      // already keep real soundly.
+      for (const auto &[SrcID, FoldDestID] : CopyFoldVirtualSources) {
+        if (Eligible.lookup(FoldDestID) || !Eligible.lookup(SrcID))
+          continue;
+        markIneligible(SrcID);
+        AnyChange = true;
+      }
+
       // An ordinary allocation that is neither directly materialized nor
       // retained by a live prepared synthetic DAG is proposed for deletion.
       // Audit its final SSA uses through transparent pointer carriers: every
