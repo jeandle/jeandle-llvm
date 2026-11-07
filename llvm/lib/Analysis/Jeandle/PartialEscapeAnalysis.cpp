@@ -7183,7 +7183,7 @@ bool Analyzer::foldStringGetChar(CallBase *CB) {
   auto N = stringConstantInt(Index);
   const VirtualObject &VO = *Result.VirtualObjects[*ID];
   // The intrinsic addresses complete native-endian words in a byte array.
-  // Separate byte slots and uncertain ranges retain the material word read.
+  // Uncertain ranges retain the material word read.
   if (!N || *N < 0 || !VO.ArrayElementType ||
       !VO.ArrayElementType->isIntegerTy(8) || VO.ArrayIndexScale != 1 ||
       VO.ArrayBaseOffset != VMConsts.arrayBaseOffsetFor(JBasicType::Byte) ||
@@ -7193,8 +7193,34 @@ bool Analyzer::foldStringGetChar(CallBase *CB) {
   if (!Offset || !pea::isUsableFieldOffset(*Offset))
     return false;
   Value *Word = readStringCell(*ID, *Offset, 16);
-  if (!Word)
-    return false;
+  if (!Word) {
+    Value *First = readStringCell(*ID, *Offset, 8);
+    Value *Second = readStringCell(*ID, *Offset + 1, 8);
+    if (!First || !Second)
+      return false;
+    // Only virtual byte cells participate. Keep both reaching definitions
+    // observable if a later use cancels virtualization of this array.
+    observeFieldDefinition(*ID, *Offset + 1, FieldDefinitions);
+    auto Place = [&](Instruction *I) -> Value * {
+      I->setDebugLoc(CB->getDebugLoc());
+      Result.OwnedInsts.emplace_back(I);
+      auto E = std::make_unique<PlaceInstructionEffect>();
+      E->Block = CB->getParent();
+      E->Target = CB;
+      E->InstructionToPlace = I;
+      E->SeqNo = Result.nextSeqNo();
+      Result.addBlockEffect(std::move(E));
+      return I;
+    };
+    Type *WordTy = Type::getInt16Ty(F.getContext());
+    Value *Low = Place(new ZExtInst(DL.isLittleEndian() ? First : Second,
+                                    WordTy, "string.low"));
+    Value *High = Place(new ZExtInst(DL.isLittleEndian() ? Second : First,
+                                     WordTy, "string.high"));
+    High = Place(BinaryOperator::CreateShl(High, ConstantInt::get(WordTy, 8),
+                                           "string.shift"));
+    Word = Place(BinaryOperator::CreateOr(Low, High, "string.word"));
+  }
   observeFieldDefinition(*ID, *Offset, FieldDefinitions);
   emitReplaceCall(CB, Word, *ID);
   return true;

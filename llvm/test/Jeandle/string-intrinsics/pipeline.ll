@@ -2,6 +2,7 @@
 ; RUN: opt -S --jeandle --print-pipeline-passes %s 2>&1 | FileCheck %s --check-prefix=ON
 ; RUN: opt -S --jeandle --jeandle-pea-iterations=0 --print-pipeline-passes %s 2>&1 | FileCheck %s --check-prefix=OFF
 ; ON: function(string-intrinsic-specialization),function(repeated-constant-field-folding)
+; ON: java-op-length-folding,string-intrinsic-specialization
 ; ON: partial-escape-iterative
 ; ON: function(string-intrinsic-specialization)
 ; ON: repeated-constant-field-folding

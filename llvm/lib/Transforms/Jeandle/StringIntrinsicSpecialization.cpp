@@ -16,6 +16,7 @@
 #include "llvm/Analysis/Loads.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Jeandle/StringIntrinsics.h"
@@ -246,6 +247,15 @@ bool specialize(CallBase &CB, bool PreserveScalarConversions) {
 } // namespace
 
 namespace {
+bool isArrayLengthRead(const CallBase *CB) {
+  if (!CB || !pea::isJeandleArrayLength(CB) || CB->hasOperandBundles())
+    return false;
+  FunctionType *Ty = CB->getFunctionType();
+  return !Ty->isVarArg() && Ty->getReturnType()->isIntegerTy(32) &&
+         Ty->getNumParams() == 1 && Ty->getParamType(0)->isPointerTy() &&
+         Ty->getParamType(0)->getPointerAddressSpace() == 1;
+}
+
 // This is a profitability query, not an identity or stable-content proof.
 // The existing PEA and VM callback consumers still authorize those folds.
 bool hasScalarArrayOpportunity(Value *Array, const LoopInfo &LI,
@@ -299,6 +309,15 @@ StringIntrinsicSpecialization::run(Function &F, FunctionAnalysisManager &FAM) {
   SmallVector<Plan, 8> Plans;
   LazyValueInfo *LVI = nullptr;
   const LoopInfo *LI = nullptr;
+  DominatorTree *DT = nullptr;
+  DenseMap<Value *, SmallVector<CallBase *, 4>> Lengths;
+  for (Instruction &I : instructions(F))
+    if (auto *CB = dyn_cast<CallBase>(&I))
+      if (isArrayLengthRead(CB)) {
+        auto &Calls = Lengths[CB->getArgOperand(0)];
+        if (Calls.size() < 16)
+          Calls.push_back(CB);
+      }
   for (Instruction &I : instructions(F)) {
     auto *CB = dyn_cast<CallBase>(&I);
     if (!CB || CB->hasOperandBundles() ||
@@ -314,7 +333,21 @@ StringIntrinsicSpecialization::run(Function &F, FunctionAnalysisManager &FAM) {
         continue;
       if (!LVI)
         LVI = &FAM.getResult<LazyValueAnalysis>(F);
-      if (auto *C = dyn_cast_or_null<ConstantInt>(LVI->getConstant(V, CB)))
+      auto *C = dyn_cast_or_null<ConstantInt>(LVI->getConstant(V, CB));
+      auto *Length = dyn_cast<CallBase>(V);
+      if (!C && isArrayLengthRead(Length)) {
+        if (!DT)
+          DT = &FAM.getResult<DominatorTreeAnalysis>(F);
+        // Repeated length reads can straddle writes or allocation calls.
+        // Only the immutable length feeds this String specialization; the
+        // calls and every mutable element access retain their semantics.
+        for (CallBase *Other : Lengths[Length->getArgOperand(0)])
+          if (DT->dominates(Other, CB))
+            if ((C = dyn_cast_or_null<ConstantInt>(
+                     LVI->getConstant(Other, CB))))
+              break;
+      }
+      if (C)
         P.Constants.emplace_back(Arg, C);
     }
     Value *Count = Op->isConversion() ? CB->getArgOperand(4) : nullptr;

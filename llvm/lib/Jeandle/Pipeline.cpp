@@ -207,6 +207,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     // new precision).
     FunctionPassManager PrePEAHighTier;
     PrePEAHighTier.addPass(JavaOpLengthFolding());
+    // Newly folded array lengths expose bounded String operations involving
+    // a local array and a material operand. Expand them before PEA decides
+    // whether the local array escapes.
+    PrePEAHighTier.addPass(StringIntrinsicSpecialization());
     // Re-establish the canonical loop form; the inline driver may have
     // introduced loops that are not in simplified form.
     PrePEAHighTier.addPass(LoopSimplifyPass());

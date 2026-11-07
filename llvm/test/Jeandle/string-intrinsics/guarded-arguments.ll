@@ -5,6 +5,45 @@ target datalayout = "e-p:64:64-p1:64:64"
 @arrayOopDesc.base_offset_in_bytes.char = constant i32 16
 declare void @jeandle.string_inflate(ptr addrspace(1), i32, ptr addrspace(1), i32, i32, i1)
 declare i32 @jeandle.string_equals(ptr addrspace(1), ptr addrspace(1), i32)
+declare i32 @jeandle.arraylength(ptr addrspace(1))
+declare void @may_write()
+
+; Array lengths are immutable across intervening calls. A String count can
+; reuse a dominating guard without treating mutable array contents as stable.
+; CHECK-LABEL: @reloaded_guarded_length(
+; CHECK: call void @may_write
+; CHECK: load atomic i8
+; CHECK-NOT: call i32 @jeandle.string_equals
+; CHECK: ret i32
+define i32 @reloaded_guarded_length(ptr addrspace(1) %a, ptr addrspace(1) %b) {
+entry:
+  %old = call i32 @jeandle.arraylength(ptr addrspace(1) %a)
+  %valid = icmp eq i32 %old, 1
+  br i1 %valid, label %work, label %exit
+work:
+  call void @may_write()
+  %new = call i32 @jeandle.arraylength(ptr addrspace(1) %a)
+  %r = call i32 @jeandle.string_equals(ptr addrspace(1) %a, ptr addrspace(1) %b, i32 %new)
+  ret i32 %r
+exit:
+  ret i32 -1
+}
+
+; A guard on another array cannot bound this count.
+; CHECK-LABEL: @different_array_length(
+; CHECK: call i32 @jeandle.string_equals
+define i32 @different_array_length(ptr addrspace(1) %a, ptr addrspace(1) %b) {
+entry:
+  %old = call i32 @jeandle.arraylength(ptr addrspace(1) %a)
+  %valid = icmp eq i32 %old, 1
+  br i1 %valid, label %work, label %exit
+work:
+  %new = call i32 @jeandle.arraylength(ptr addrspace(1) %b)
+  %r = call i32 @jeandle.string_equals(ptr addrspace(1) %a, ptr addrspace(1) %b, i32 %new)
+  ret i32 %r
+exit:
+  ret i32 -1
+}
 
 ; A dominating Java guard proves the length without rewriting the SSA value.
 ; CHECK-LABEL: @guarded_inflate(

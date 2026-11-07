@@ -42,12 +42,9 @@ u:
 }
 
 ; CHECK-LABEL: @overlapping_bytes(
-; CHECK: @jeandle.new_array
-; CHECK: store atomic i8 18
-; CHECK: store atomic i8 -91
-; CHECK: call hotspotcc i16 @jeandle.string_getchar
-; CHECK-NOT: poison
-; CHECK: ret i16
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.string_getchar
+; CHECK: ret i16 -23278
 define i16 @overlapping_bytes(i32 %index) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
  %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10001 to ptr), i32 4, i32 32, i32 16, i32 100, i1 false, i1 false) to label %work unwind label %u
