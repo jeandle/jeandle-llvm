@@ -7562,6 +7562,15 @@ bool Analyzer::processCopyCall(CallBase *CB) {
     if (!SrcEnd || *SrcEnd > static_cast<int64_t>(Src->ArrayLength))
       return false;
   } else {
+    // A derived pointer of a still-virtual object must not become a load
+    // base: whole-object identity failed above, so a resolveVirtualRef hit
+    // here is exactly that shape, and the memory behind its eliminated
+    // stores is not written until materialization. Well-formed copy IR
+    // always names the whole source array; anything else keeps the real
+    // copy (the same contract as the clone-instance concrete leg).
+    if (jeandle::pea::resolveVirtualRef(CB->getArgOperand(0), CurrentState,
+                                        Aliases, DL))
+      return false;
     // Concrete source: fold to per-element typed loads placed at the call.
     // The static element type must be provable — a load of the wrong element
     // kind would both misread memory and silently drop the
