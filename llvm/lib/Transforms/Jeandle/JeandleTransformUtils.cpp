@@ -27,39 +27,6 @@
 
 namespace llvm {
 
-void emitStoreStoreBarrier(IRBuilder<> &B, Module &M) {
-  Function *StoreStore = M.getFunction("jeandle.membar_storestore");
-  if (StoreStore && !StoreStore->isDeclaration()) {
-    CallInst *Call = B.CreateCall(StoreStore, {});
-    Call->setCallingConv(CallingConv::Hotspot_JIT);
-    return;
-  }
-  B.CreateFence(AtomicOrdering::Release);
-}
-
-void emitPublishWrites(IRBuilder<> &B, Value *Receiver) {
-  assert(jeandle::isWideOopType(Receiver->getType()));
-  Module &M = *B.GetInsertBlock()->getModule();
-  FunctionType *Ty = FunctionType::get(B.getVoidTy(), {Receiver->getType()},
-                                       /*isVarArg=*/false);
-  GlobalValue *Named = M.getNamedValue("jeandle.publish_writes");
-  Function *Publish = dyn_cast_or_null<Function>(Named);
-  if (Named && (!Publish || Publish->getFunctionType() != Ty ||
-                !Publish->isDeclaration()))
-    report_fatal_error("invalid jeandle.publish_writes declaration");
-  if (!Publish)
-    Publish = Function::Create(Ty, GlobalValue::ExternalLinkage,
-                               "jeandle.publish_writes", M);
-  Publish->setCallingConv(CallingConv::Hotspot_JIT);
-  Publish->addFnAttr(Attribute::NoUnwind);
-  Publish->addFnAttr(Attribute::WillReturn);
-  Publish->addFnAttr("gc-leaf-function");
-  Publish->addParamAttr(
-      0, Attribute::getWithCaptureInfo(B.getContext(), CaptureInfo::none()));
-  CallInst *Call = B.CreateCall(Publish, {Receiver});
-  Call->setCallingConv(CallingConv::Hotspot_JIT);
-}
-
 std::optional<JavaVirtualCallSite> getJavaVirtualCallSite(InvokeInst &CB) {
   if (CB.arg_empty() || !CB.hasDeoptState())
     return std::nullopt;

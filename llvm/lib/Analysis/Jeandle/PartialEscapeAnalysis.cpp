@@ -72,6 +72,7 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
+#include "llvm/IR/Jeandle/MemoryBarrier.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/IR/Metadata.h"
@@ -546,6 +547,7 @@ struct BlockExitData {
   DenseSet<jeandle::ObjectID> Virtuals;
   // Objects already materialized on every path reaching this exit.
   DenseSet<jeandle::ObjectID> Materialized;
+  DenseMap<jeandle::ObjectID, uint8_t> PendingBarriers;
   // Per-object field values at block exit; an absent offset means "Java
   // default", never "field does not exist".
   DenseMap<jeandle::ObjectID, DenseMap<int64_t, jeandle::FieldValue>>
@@ -861,6 +863,7 @@ static void markObjectMaterializedDispositionInExitData(BlockExitData &Data,
   Data.Virtuals.erase(ID);
   Data.Materialized.insert(ID);
   Data.FieldStates.erase(ID);
+  Data.PendingBarriers.erase(ID);
   Data.FieldDefinitions.erase(ID);
   Data.LockCounts.erase(ID);
   Data.LiveLockEnters.erase(ID);
@@ -2279,6 +2282,7 @@ private:
     // Flip the per-object state to materialized (live CurrentState vs
     // ExitInfo).
     function_ref<void(jeandle::ObjectID)> FlipState;
+    function_ref<uint8_t(jeandle::ObjectID)> GetPendingBarriers;
   };
   // Shared materialization driver: run the
   // cascade/lock-capture/prereq/dominance/emit/flip algorithm for ID under
@@ -2952,7 +2956,9 @@ void Analyzer::inheritFromExit(const BlockExitData &Exit) {
   for (jeandle::ObjectID ID : Exit.Virtuals) {
     if (!Eligible.lookup(ID))
       continue;
-    CurrentState.addObject(ID, jeandle::ObjectState());
+    jeandle::ObjectState OS;
+    OS.addPendingBarriers(Exit.PendingBarriers.lookup(ID));
+    CurrentState.addObject(ID, std::move(OS));
   }
   for (jeandle::ObjectID ID : Exit.Materialized) {
     if (!Eligible.lookup(ID))
@@ -4159,8 +4165,11 @@ bool Analyzer::MergeProcessor::mergeFieldStates(jeandle::ObjectID ID) {
   // the fixpoint converges.
   MergeEffects.addAll(PendingPhiEffects);
 
-  // Case B: object stays virtual at BB entry with the merged field state.
-  CurrentState.addObject(ID, jeandle::ObjectState());
+  // Case B: all virtual paths contribute their outstanding ordering.
+  jeandle::ObjectState OS;
+  for (const auto *Pred : Preds)
+    OS.addPendingBarriers(Pred->PendingBarriers.lookup(ID));
+  CurrentState.addObject(ID, std::move(OS));
   if (!Merged.empty())
     FieldStates[ID] = std::move(Merged);
   if (!MergedDefinitions.empty())
@@ -4227,6 +4236,7 @@ void Analyzer::normalizeIneligibleVirtualRefs(BlockExitData &Data) {
       Data.Virtuals.erase(Holder);
       Data.Materialized.erase(Holder);
       Data.FieldStates.erase(Holder);
+      Data.PendingBarriers.erase(Holder);
       Data.LockCounts.erase(Holder);
       Data.LiveLockEnters.erase(Holder);
     }
@@ -4248,6 +4258,8 @@ void Analyzer::snapshotExitStateInto(BlockExitData &Data) {
       continue;
     if (OS->isVirtual()) {
       Data.Virtuals.insert(ID);
+      if (OS->getPendingBarriers())
+        Data.PendingBarriers[ID] = OS->getPendingBarriers();
       auto FIt = FieldStates.find(ID);
       if (FIt != FieldStates.end() && !FIt->second.empty())
         Data.FieldStates[ID] = FIt->second;
@@ -4796,7 +4808,7 @@ bool Analyzer::hasObservableIdentityUse(
         // Initialization publication does not inspect the receiver's identity.
         // Its virtual-receiver fold also applies in exits not yet visited by
         // the loop traversal, so it cannot block a virtual identity merge.
-        if (jeandle::isPublishWrites(CB))
+        if (jeandle::isObjectMemoryBarrier(CB))
           continue;
         unsigned Operand = Use.getOperandNo();
         if (CB->isBundleOperand(Operand) &&
@@ -5481,7 +5493,10 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
   // MergeProcessor's MergeEffects for a merge, PendingMergePhis[BB] for an
   // entry/single-pred path). They are assigned SeqNos at drain time.
   Out.addAll(PendingPhiEffects);
-  CurrentState.addObject(NewID, jeandle::ObjectState());
+  jeandle::ObjectState OS;
+  for (unsigned I = 0; I < PerPredIDs.size(); ++I)
+    OS.addPendingBarriers(ExitInfos[I]->PendingBarriers.lookup(PerPredIDs[I]));
+  CurrentState.addObject(NewID, std::move(OS));
   Eligible[NewID] = true;
   // Refresh the merged field state unconditionally: with the phi-keyed
   // cache the same synthetic ID is reused across loop-fixpoint passes with
@@ -7541,14 +7556,16 @@ bool Analyzer::foldICmpEquality(ICmpInst *ICmp) {
 // to the generic escape path.
 bool Analyzer::processJavaOp(CallBase *CB) {
   using namespace jeandle::pea;
-  if (jeandle::isPublishWrites(CB)) {
+  if (jeandle::isObjectMemoryBarrier(CB)) {
     auto Identity =
         resolveVirtualIdentity(CB->getArgOperand(0), CurrentState, Aliases, DL,
                                VirtualIdentityMode::WholeObject);
     if (!Identity.isDefined() || !Eligible.lookup(Identity.getObjectID()))
       return false;
-    // A virtual receiver has no physical initialization writes to publish.
-    // A later materialization emits publication for its final replay stores.
+    // Retain ordering at this program point until the object is replayed.
+    auto Kind = *jeandle::getMemoryBarrierKind(CB->getCalledFunction()->getName());
+    CurrentState.getObjectStateForModification(Identity.getObjectID())
+        .addPendingBarriers(jeandle::getMemoryBarrierObligation(Kind));
     emitReplaceCall(CB, nullptr, Identity.getObjectID());
     return true;
   }
@@ -7783,6 +7800,9 @@ bool Analyzer::processCopyCall(CallBase *CB) {
     // The full-coverage copy is now the reaching definition of every window
     // slot it wrote or reset to default.
     clearCopyFoldReachingDefs(DestID, *BaseOff, *PayloadEnd);
+    if (jeandle::copyNeedsInitializationBarrier(*CB))
+      CurrentState.getObjectStateForModification(DestID)
+          .addPendingBarriers(jeandle::AllocationInitObligation);
     emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
     ++AttemptStats.CopyFolds;
     return true;
@@ -8150,6 +8170,9 @@ bool Analyzer::processCopyCall(CallBase *CB) {
       }
     }
   }
+  if (jeandle::copyNeedsInitializationBarrier(*CB))
+    CurrentState.getObjectStateForModification(DestID)
+        .addPendingBarriers(jeandle::AllocationInitObligation);
   emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
   // Counted per analyzer visit: a copy inside a loop fixpoint re-folds on
   // every body pass, so the number counts (site, round) pairs, not distinct
@@ -8355,6 +8378,9 @@ bool Analyzer::foldCloneInstanceConcreteSource(
   // The full-coverage copy is now the reaching definition of every window
   // slot it wrote or reset to default.
   clearCopyFoldReachingDefs(DestID, BaseOff, PayloadEnd);
+  if (jeandle::copyNeedsInitializationBarrier(*CB))
+    CurrentState.getObjectStateForModification(DestID)
+        .addPendingBarriers(jeandle::AllocationInitObligation);
   emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
   ++AttemptStats.CopyFolds;
   return true;
@@ -9815,6 +9841,7 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
   E->ReplaySource = C.ReplaySource;
   E->ReplayTarget = C.ReplayTarget;
   E->PlanID = ActiveMaterializationPlanID;
+  E->PendingBarriers = C.GetPendingBarriers(ID);
   if (FSIt != C.FieldStates.end()) {
     SmallVector<int64_t, 8> Offsets;
     Offsets.reserve(FSIt->second.size());
@@ -9932,13 +9959,16 @@ void Analyzer::materializeAt(jeandle::ObjectID ID, Instruction *InsertBefore,
   // init) so each outlives C — function_ref does NOT own its callable, and a
   // temporary would be destroyed at the end of the `C{...};` statement, leaving
   // a dangling ref for the ensureMaterialized call on the next line.
+  auto GetPendingBarriers = [&](jeandle::ObjectID Oid) {
+    return CurrentState.getObjectStateOptional(Oid)->getPendingBarriers();
+  };
   MaterializeContext C{FieldStates,    FieldDefinitions,
                        LockCounts,     LiveLockEnters,
                        Materialized,   Reason,
                        InsertBefore,   InsertBefore->getParent(),
                        nullptr,        Recurse,
                        ClearLockState, CaptureLocksIntoEffect,
-                       ComputeSafeIP,  FlipState};
+                       ComputeSafeIP,  FlipState, GetPendingBarriers};
   ensureMaterialized(ID, C);
 }
 
@@ -11227,6 +11257,7 @@ void Analyzer::materializeAtPredFromExitInfo(jeandle::ObjectID ID,
     ExitInfo.Virtuals.erase(Oid);
     ExitInfo.Materialized.insert(Oid);
     ExitInfo.FieldStates.erase(Oid);
+    ExitInfo.PendingBarriers.erase(Oid);
     ExitInfo.FieldDefinitions.erase(Oid);
     ExitInfo.LockCounts.erase(Oid);
   };
@@ -11245,6 +11276,9 @@ void Analyzer::materializeAtPredFromExitInfo(jeandle::ObjectID ID,
   Value *LogicalEscape = TargetMerge
                              ? static_cast<Value *>(TargetMerge)
                              : static_cast<Value *>(PH->getTerminator());
+  auto GetPendingBarriers = [&](jeandle::ObjectID Oid) {
+    return ExitInfo.PendingBarriers.lookup(Oid);
+  };
   MaterializeContext C{ExitInfo.FieldStates,
                        ExitInfo.FieldDefinitions,
                        ExitInfo.LockCounts,
@@ -11258,7 +11292,8 @@ void Analyzer::materializeAtPredFromExitInfo(jeandle::ObjectID ID,
                        ClearLockState,
                        CaptureLocksIntoEffect,
                        ComputeSafeIP,
-                       FlipState};
+                       FlipState,
+                       GetPendingBarriers};
   ensureMaterialized(ID, C);
   if (hasPendingRetry())
     return;
@@ -11326,7 +11361,7 @@ void Analyzer::materializeAtPredFromExitInfo(jeandle::ObjectID ID,
 
 // Equality on BlockExitData (the per-object base data). Two payloads are
 // equivalent iff every per-object dimension (still-virtual set, materialized
-// set, FieldStates per offset, LockCounts, LiveLockEnters) matches by
+// set, pending ordering, FieldStates per offset, LockCounts, LiveLockEnters) matches by
 // structural comparison.
 bool Analyzer::exitDataEquivalent(const BlockExitData &A,
                                   const BlockExitData &B) {
@@ -11340,6 +11375,8 @@ bool Analyzer::exitDataEquivalent(const BlockExitData &A,
   for (auto ID : A.Materialized)
     if (!B.Materialized.count(ID))
       return false;
+  if (A.PendingBarriers != B.PendingBarriers)
+    return false;
   if (A.FieldStates.size() != B.FieldStates.size())
     return false;
   for (auto &Kv : A.FieldStates) {

@@ -359,6 +359,8 @@ private:
   // Virtual while the allocation is still elided; Materialized once the
   // object has a real SSA identity on this path.
   StateKind Kind = Virtual;
+  // Ordering removed with this virtual object, owed at its next replay.
+  uint8_t PendingBarriers = 0;
   // Per-VO live monitor stack: each element is a MonitorIdRef identifying
   // the (enter-call, bytecode-depth) pair pushed by a folded monitorenter
   // on this VO whose matching monitorexit hasn't yet been seen on this
@@ -374,8 +376,8 @@ private:
   Value *MaterializedValue = nullptr;
 
 public:
-  // ObjectState carries ONLY the per-VO virtual/materialized flag, the live
-  // lock stack, and (once materialized) the materialized pointer. Per-FIELD
+  // ObjectState carries the per-VO virtual/materialized flag, pending ordering,
+  // the live lock stack, and (once materialized) the materialized pointer. Per-FIELD
   // state does NOT live here: LLVM's Analysis/Transform split plus the SSA
   // single-pass walk prevent propagating a per-field state array across the
   // CFG inside the block state (see the STATE MODEL comment in
@@ -395,6 +397,11 @@ public:
     return MaterializedValue;
   }
   bool hasLocks() const { return !Locks.empty(); }
+  uint8_t getPendingBarriers() const { return PendingBarriers; }
+  void addPendingBarriers(uint8_t Obligations) {
+    assert(isVirtual());
+    PendingBarriers |= Obligations;
+  }
 
   // The pure virtual->materialized STATE FLIP only — it does NOT emit a
   // Materialize effect or build an allocation invoke (that is the caller's
@@ -404,6 +411,7 @@ public:
   void escape(Value *Ptr) {
     assert(isVirtual());
     assert(Ptr);
+    PendingBarriers = 0;
     Kind = Materialized;
     MaterializedValue = Ptr;
     // The lock state is retained across the virtual->materialized flip: the
@@ -795,6 +803,8 @@ public:
   // per tracked field with a known value (Unknown slots replay nothing and
   // are omitted), in ascending offset order at emission.
   SmallVector<FieldEntry, 8> FieldEntries;
+  // Point-local snapshot, including obligations with no non-default stores.
+  uint8_t PendingBarriers = 0;
   // Surviving (unbalanced) monitorenters to re-emit at the materialize point,
   // sorted ascending by BytecodeDepth.
   SmallVector<MaterializedLock, 2> Locks;

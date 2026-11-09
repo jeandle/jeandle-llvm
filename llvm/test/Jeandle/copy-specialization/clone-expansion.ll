@@ -1,7 +1,7 @@
 ; RUN: opt -S -passes="function(copy-specialization),java-operation-lower<phase=1>" -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog %s 2>&1 | FileCheck %s
 ; RUN: %if aarch64-registered-target %{ opt -S -passes="function(copy-specialization),java-operation-lower<phase=1>" -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog %s 2>&1 | llc -mtriple=aarch64-linux-gnu -O2 -o - | FileCheck %s --check-prefix=AARCH64 %}
-; RUN: %if x86-registered-target %{ sed 's/!"x28"/!"r15"/' %s | opt -S -verify-each -passes="function(copy-specialization),java-operation-lower<phase=1>" -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog | llc -mtriple=x86_64-linux-gnu -O2 -o - | FileCheck %s --check-prefix=X86 %}
-; RUN: %if riscv-registered-target %{ sed 's/!"x28"/!"x23"/' %s | opt -S -verify-each -passes="function(copy-specialization),java-operation-lower<phase=1>" -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog | llc -mtriple=riscv64-linux-gnu -O2 -o - | FileCheck %s --check-prefix=RISCV %}
+; RUN: %if x86-registered-target %{ sed 's/!"x28"/!"r15"/' %s | opt -S -mtriple=x86_64-linux-gnu -verify-each -passes="function(copy-specialization),java-operation-lower<phase=1>" -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog | llc -mtriple=x86_64-linux-gnu -O2 -o - | FileCheck %s --check-prefix=X86 %}
+; RUN: %if riscv-registered-target %{ sed 's/!"x28"/!"x23"/' %s | opt -S -mtriple=riscv64-linux-gnu -verify-each -passes="function(copy-specialization),java-operation-lower<phase=1>" -jeandle-vm-callback-log=%S/Inputs/clone-instance.cblog | llc -mtriple=riscv64-linux-gnu -O2 -o - | FileCheck %s --check-prefix=RISCV %}
 
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-p3:32:32:32-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"
 target triple = "aarch64-unknown-linux-gnu"
@@ -97,7 +97,7 @@ exception:
 ; CHECK: arraycopy.slow_call:
 ; CHECK: invoke hotspotcc void @SharedRuntime_slow_arraycopy_C
 ; CHECK: arraycopy.result:
-; CHECK-NEXT: fence release
+; CHECK-NEXT: call void @llvm.aarch64.dmb(i32 10)
 ; CHECK: arraycopy.nonpositive:
 ; CHECK: [[NEGATIVE:%.*]] = icmp slt i64 %length, 0
 ; CHECK: br i1 [[NEGATIVE]], label %arraycopy.slow_region, label %arraycopy.length.fast
@@ -148,7 +148,7 @@ exception:
 ; CHECK-NOT: @jeandle.copy
 ; CHECK: br i1 true, label %arraycopy.nonpositive, label %arraycopy.nonpositive.fast
 ; CHECK: arraycopy.result:
-; CHECK-NEXT: fence release
+; CHECK-NEXT: call void @llvm.aarch64.dmb(i32 10)
 ; CHECK: arraycopy.nonpositive:
 ; CHECK-NEXT: br label %arraycopy.result
 

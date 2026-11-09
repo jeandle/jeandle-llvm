@@ -233,7 +233,7 @@ alloc.unwind:
 ; CHECK-NEXT: store atomic ptr addrspace(1) inttoptr (i64 123 to ptr addrspace(1)), ptr addrspace(1) %[[CHILD_SLOT16]] unordered, align 8
 ; The virtual outer is described as wire id 0. Its offset-16 field is the
 ; materialized child oop, and the original outer root becomes VORef wire id 0.
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: invoke void @may_throw()
 ; CHECK-SAME: [ "deopt"(i32 99, i32 99,
 ; CHECK-SAME: i64 262156, i64 69108, i32 1,

@@ -56,7 +56,7 @@ unwind:
 ; CHECK-NEXT: %[[FIELD:pea.casec.field.phi[^ ]*]] = phi i32 [ 41, %left ], [ 42, %right ]
 ; CHECK-NEXT: %[[SLOT:pea.matslot[^ ]*]] = getelementptr inbounds i8, ptr addrspace(1) %p, i64 8
 ; CHECK-NEXT: store atomic i32 %[[FIELD]], ptr addrspace(1) %[[SLOT]] unordered, align 4
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @sink(ptr addrspace(1) %p)
 ; CHECK-NOT: store atomic i32 41
 ; CHECK-NOT: store atomic i32 42
@@ -111,7 +111,7 @@ handler:
 ; CHECK-NEXT: cleanup
 ; CHECK-NEXT: %[[USLOT:pea.matslot[^ ]*]] = getelementptr inbounds i8, ptr addrspace(1) %p, i64 8
 ; CHECK-NEXT: store atomic i32 %[[UFIELD]], ptr addrspace(1) %[[USLOT]] unordered, align 4
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @sink(ptr addrspace(1) %p)
 ; CHECK-NEXT: resume i64 %[[LP]]
 ; CHECK-NOT: store atomic i32 51

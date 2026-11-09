@@ -72,6 +72,6 @@ u:
 ; CHECK: invoke hotspotcc{{.*}}@jeandle.new_array(ptr inttoptr (i64 2222 to ptr)
 ; CHECK: %[[FIELD:[^ ]+]] = getelementptr inbounds i8, ptr addrspace(1) %o, i64 16
 ; CHECK-NEXT: store atomic ptr addrspace(1) %inner, ptr addrspace(1) %[[FIELD]]
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(ptr addrspace(1) %o)
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %o)
 
 !java-method-compilation = !{}

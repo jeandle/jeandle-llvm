@@ -133,7 +133,7 @@ unwind.mixed:
 ; MIXED: br i1 %early, label %early.mixed, label %[[MIXED_EDGE:[-A-Za-z$._0-9]+]]
 ; MIXED: [[MIXED_EDGE]]:
 ; MIXED: store atomic i32 41, ptr addrspace(1) %{{[-A-Za-z$._0-9]+}} unordered, align 4
-; MIXED-NEXT: call hotspotcc void @jeandle.publish_writes(
+; MIXED-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; MIXED-NEXT: br label %merge.mixed
 ; MIXED: merge.mixed:
 ; MIXED-NEXT: %pa = phi ptr addrspace(1) [ null, %right.mixed ], [ %a, %[[MIXED_EDGE]] ]

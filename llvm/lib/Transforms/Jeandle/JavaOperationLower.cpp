@@ -16,6 +16,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/Attributes.h"
+#include "llvm/IR/Jeandle/MemoryBarrier.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -34,29 +35,33 @@ runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
   bool Changed = false;
   SmallSetVector<CallBase *, 16> Calls;
 
-  // Keep receiver-bearing publication through PEA and its canonicalization.
-  // Only after virtualization is complete does it become a platform barrier.
+  // Lower semantic ordering in every body, including JavaOps that are inlined
+  // later. Collect first: target emission may add intrinsic declarations.
   if (Phase == 1) {
-    if (Function *Publish = M.getFunction("jeandle.publish_writes")) {
-      for (User *U : Publish->users())
-        if (auto *CB = dyn_cast<CallBase>(U))
-          if (jeandle::isPublishWrites(CB))
-            Calls.insert(CB);
-      for (CallBase *CB : Calls) {
-        Function *Caller = CB->getCaller();
-        IRBuilder<> B(CB);
-        emitStoreStoreBarrier(B, M);
-        CB->eraseFromParent();
-        if (FAM)
-          FAM->invalidate(*Caller, PreservedAnalyses::none());
-        Changed = true;
-      }
-      Calls.clear();
+    for (Function &F : M)
+      for (Instruction &I : instructions(F))
+        if (auto *CB = dyn_cast<CallBase>(&I))
+          if (Function *Callee = CB->getCalledFunction())
+            if (jeandle::getMemoryBarrierKind(Callee->getName()))
+              Calls.insert(CB);
+    for (CallBase *CB : Calls) {
+      if (!jeandle::isMemoryBarrierCall(CB))
+        report_fatal_error("invalid Jeandle memory barrier call");
+      Function *Caller = CB->getCaller();
+      IRBuilder<> B(CB);
+      jeandle::emitMemoryBarrier(B, *jeandle::getMemoryBarrierKind(
+                                      CB->getCalledFunction()->getName()));
+      CB->eraseFromParent();
+      if (FAM)
+        FAM->invalidate(*Caller, PreservedAnalyses::none());
+      Changed = true;
     }
+    Calls.clear();
   }
 
   auto shouldInline = [Phase](const Function &F) -> bool {
-    if (!F.hasFnAttribute(jeandle::Attribute::LowerPhase))
+    if (jeandle::getMemoryBarrierKind(F.getName()) ||
+        !F.hasFnAttribute(jeandle::Attribute::LowerPhase))
       return false;
     int V = 0;
     bool Failed = F.getFnAttribute(jeandle::Attribute::LowerPhase)

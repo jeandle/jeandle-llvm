@@ -15,10 +15,10 @@ declare i32 @__gxx_personality_v0(...)
 
 ; CHECK-LABEL: define void @nested_publication(
 ; CHECK: store atomic i8 %value, {{.*}} unordered, align 1
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: %{{[^ ]+}} = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
 ; CHECK-NEXT: store atomic ptr addrspace(1) %array, {{.*}} unordered, align 8
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @publish(ptr addrspace(1) %outer, ptr addrspace(1) %array)
 ; CHECK-NEXT: ret void
 define void @nested_publication(i8 %value) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
@@ -40,7 +40,7 @@ unwind:
 
 ; CHECK-LABEL: define void @locked_publication(
 ; CHECK: store atomic i32 %value, {{.*}} unordered, align 4
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock
 ; CHECK-NEXT: call void @publish
 ; CHECK-NEXT: call hotspotcc void @jeandle.monitorexit_with_lightweight_lock

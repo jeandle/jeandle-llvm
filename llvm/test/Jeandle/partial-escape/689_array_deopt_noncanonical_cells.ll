@@ -45,7 +45,7 @@ unwind:
 ; CHECK-COUNT-1: invoke hotspotcc ptr addrspace(1) @jeandle.new_array
 ; CHECK: %[[SLOT:[-A-Za-z$._0-9]+]] = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 17
 ; CHECK-NEXT: store atomic i8 7, ptr addrspace(1) %[[SLOT]] unordered, align 1
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @safepoint() [ "deopt"(i32 1, i32 1, i64 12, ptr addrspace(1) %arr) ]
 ; CHECK-NOT: i64 262157
 ; CHECK-NOT: i64 524300
@@ -71,7 +71,7 @@ unwind:
 ; CHECK-COUNT-1: invoke hotspotcc ptr addrspace(1) @jeandle.new_array
 ; CHECK: %[[SLOT:[-A-Za-z$._0-9]+]] = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
 ; CHECK-NEXT: store atomic i16 4660, ptr addrspace(1) %[[SLOT]] unordered, align 2
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @safepoint() [ "deopt"(i32 2, i32 2, i64 12, ptr addrspace(1) %arr) ]
 ; CHECK-NOT: i64 262157
 ; CHECK-NOT: i64 524300
@@ -128,7 +128,7 @@ unwind:
 ; CHECK-NEXT: store atomic ptr addrspace(1) %[[REF0]], ptr addrspace(1) %[[REFSLOT0]] unordered, align 8
 ; CHECK: %[[REFSLOT1:[^ ]+]] = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 24
 ; CHECK-NEXT: store atomic ptr addrspace(1) %[[REF1]], ptr addrspace(1) %[[REFSLOT1]] unordered, align 8
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @safepoint() [ "deopt"(i32 15, i32 15, i64 12, ptr addrspace(1) %arr) ]
 
 define void @zero_offset_wrappers_are_canonical() gc "hotspotgc"
@@ -274,7 +274,7 @@ unwind:
 ; CHECK-COUNT-1: invoke hotspotcc ptr addrspace(1) @jeandle.new_array
 ; CHECK: %[[LONG_SLOT:[-A-Za-z$._0-9]+]] = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
 ; CHECK-NEXT: store atomic i64 456, ptr addrspace(1) %[[LONG_SLOT]] unordered, align 8
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @safepoint() [ "deopt"(i32 13, i32 13, i64 12, ptr addrspace(1) %arr) ]
 ; CHECK-NOT: i64 262157
 ; CHECK-NOT: i64 524300
@@ -324,7 +324,7 @@ unwind:
 ; CHECK-NEXT: store atomic i8 7, ptr addrspace(1) %[[BAD]] unordered, align 1
 ; CHECK-NEXT: %[[ELEM:[-A-Za-z$._0-9]+]] = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 24
 ; CHECK-NEXT: store atomic ptr addrspace(1) %child, ptr addrspace(1) %[[ELEM]] unordered, align 8
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @safepoint()
 ; The independent object is the only descriptor, so dense numbering assigns
 ; it wire id 0: klass 68911, zero fields.
@@ -385,7 +385,7 @@ unwind:
 ; CHECK-NEXT: store atomic i8 9, ptr addrspace(1) %[[BAD]] unordered, align 1
 ; CHECK-NEXT: %[[ELEM:[-A-Za-z$._0-9]+]] = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 24
 ; CHECK-NEXT: store atomic ptr addrspace(1) %a, ptr addrspace(1) %[[ELEM]] unordered, align 8
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @safepoint()
 ; CHECK-SAME: [ "deopt"(i32 7, i32 7, i64 12,
 ; CHECK-SAME: ptr addrspace(1) %outer,

@@ -63,7 +63,7 @@ unwind:
 ; FINAL: %[[SAME_SLOT:[A-Za-z0-9._]+]] = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 8
 ; FINAL-NEXT: store atomic i32 %value, ptr addrspace(1) %[[SAME_SLOT]] unordered, align 4
 ; Both positions and both deopt slots retain the one real identity.
-; FINAL-NEXT: call hotspotcc void @jeandle.publish_writes(
+; FINAL-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; FINAL-NEXT: call void @sink2(ptr addrspace(1) %obj, ptr addrspace(1) %obj)
 ; FINAL-SAME: [ "deopt"(i32 99, i32 99, i64 12, ptr addrspace(1) %obj, i64 4294967308, ptr addrspace(1) %obj) ]
 ; FINAL-NOT: i64 262156
@@ -105,10 +105,10 @@ unwind:
 ; FINAL-NOT: invoke hotspotcc ptr addrspace(1) @jeandle.new_instance
 ; FINAL: %[[A_SLOT:pea\.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
 ; FINAL-NEXT: store atomic i32 %left, ptr addrspace(1) %[[A_SLOT]] unordered, align 4
-; FINAL-NEXT: call hotspotcc void @jeandle.publish_writes(
+; FINAL-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; FINAL-NEXT: %[[B_SLOT:pea\.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
 ; FINAL-NEXT: store atomic i32 %right, ptr addrspace(1) %[[B_SLOT]] unordered, align 4
-; FINAL-NEXT: call hotspotcc void @jeandle.publish_writes(
+; FINAL-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; FINAL-NEXT: call void @sink2(ptr addrspace(1) %a, ptr addrspace(1) %b)
 ; FINAL-SAME: [ "deopt"(i32 99, i32 99, i64 12, ptr addrspace(1) %a, i64 4294967308, ptr addrspace(1) %b) ]
 ; Neither real actual receives a virtual-object descriptor.
@@ -157,12 +157,12 @@ unwind:
 ; Child replay precedes the outer replay that stores the child's real identity.
 ; FINAL: %[[CHILD_SLOT:pea\.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %child, i64 8
 ; FINAL-NEXT: store atomic i32 %child.value, ptr addrspace(1) %[[CHILD_SLOT]] unordered, align 4
-; FINAL-NEXT: call hotspotcc void @jeandle.publish_writes(
+; FINAL-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; FINAL-NEXT: %[[OUTER_INT:pea\.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 8
 ; FINAL-NEXT: store atomic i32 %outer.value, ptr addrspace(1) %[[OUTER_INT]] unordered, align 4
 ; FINAL-NEXT: %[[OUTER_REF:pea\.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
 ; FINAL-NEXT: store atomic ptr addrspace(1) %child, ptr addrspace(1) %[[OUTER_REF]] unordered, align 8
-; FINAL-NEXT: call hotspotcc void @jeandle.publish_writes(
+; FINAL-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; FINAL-NEXT: call void @sink2(ptr addrspace(1) %outer, ptr addrspace(1) %child)
 ; FINAL-SAME: [ "deopt"(i32 99, i32 99, i64 12, ptr addrspace(1) %outer, i64 4294967308, ptr addrspace(1) %child) ]
 ; FINAL-NOT: i64 262156
@@ -202,7 +202,7 @@ unwind:
 ; FINAL: call:
 ; FINAL-NEXT: %[[BRANCH_SLOT:pea\.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 8
 ; FINAL-NEXT: store atomic i32 %value, ptr addrspace(1) %[[BRANCH_SLOT]] unordered, align 4
-; FINAL-NEXT: call hotspotcc void @jeandle.publish_writes(
+; FINAL-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; FINAL-NEXT: call void @sink2(ptr addrspace(1) %obj, ptr addrspace(1) %obj)
 ; FINAL: no.call:
 ; FINAL-NOT: pea.matslot

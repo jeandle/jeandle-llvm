@@ -72,6 +72,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/Metadata.h"
+#include "llvm/IR/Jeandle/MemoryBarrier.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
@@ -113,7 +114,8 @@ static bool splitReplayEdges(jeandle::PEAResult &Result) {
       // target-local analysis state is still required, but splitting the CFG
       // would create an empty block with no runtime control dependence to
       // preserve.
-      if (ME->FieldEntries.empty() && ME->Locks.empty())
+      if (ME->FieldEntries.empty() && ME->Locks.empty() &&
+          !ME->PendingBarriers)
         continue;
       EdgePlan *Plan = nullptr;
       for (EdgePlan &Candidate : Plans)
@@ -295,6 +297,7 @@ struct ExpectedReplayFieldGroup {
   Value *Receiver = nullptr;
   bool HasDistinctRealAllocation = false;
   SmallVector<ExpectedReplayOperation, 4> Fields;
+  SmallVector<jeandle::MemoryBarrierKind, 2> Barriers;
 };
 
 // The concrete value a replay store must write for a field entry, or null
@@ -421,7 +424,7 @@ static bool replayStoredValueMatches(Value *Actual, Value *ExpectedSemantic,
 // initialization sequence without accumulating barriers.
 static bool isReplayPublicationBarrier(Instruction *I) {
   auto *Call = dyn_cast_or_null<CallInst>(I);
-  return jeandle::isPublishWrites(Call) &&
+  return jeandle::isObjectMemoryBarrier(Call) &&
          Call->getCallingConv() == CallingConv::Hotspot_JIT &&
          Call->getTailCallKind() == CallInst::TCK_None;
 }
@@ -491,6 +494,8 @@ static bool matchExistingReplaySuffix(
       Group.Fields.push_back(Op);
       Expected.push_back(std::move(Op));
     }
+    Group.Barriers = jeandle::getReplayMemoryBarriers(
+        Effect->PendingBarriers, !Group.Fields.empty());
     FieldGroups.push_back(std::move(Group));
 
     if (ReplayBatch && Effect->SeqNo == ReplayBatch->EmitterSeqNo) {
@@ -539,8 +544,10 @@ static bool matchExistingReplaySuffix(
           SmallVectorImpl<Instruction *> &Matched, Instruction *&Before) {
         Instruction *At = Start;
         SmallVector<Instruction *, 8> Candidate;
-        if (!Group.Fields.empty()) {
+        for (auto Kind : llvm::reverse(Group.Barriers)) {
           if (!isReplayPublicationBarrier(At) ||
+              jeandle::getMemoryBarrierKind(
+                  cast<CallInst>(At)->getCalledFunction()->getName()) != Kind ||
               cast<CallInst>(At)->getArgOperand(0) != Group.Receiver)
             return false;
           Candidate.push_back(At);
@@ -611,7 +618,7 @@ static bool matchExistingReplaySuffix(
   bool MayPermuteGroups = true;
   for (unsigned I = 0; I < FieldGroups.size(); ++I) {
     const ExpectedReplayFieldGroup &Group = FieldGroups[I];
-    if (Group.Fields.empty())
+    if (Group.Fields.empty() && Group.Barriers.empty())
       continue;
     NonEmptyGroups.push_back(I);
     MayPermuteGroups &= Group.HasDistinctRealAllocation &&
@@ -626,14 +633,8 @@ static bool matchExistingReplaySuffix(
     for (unsigned Remaining = NonEmptyGroups.size(); Remaining; --Remaining) {
       if (!isReplayPublicationBarrier(Cursor))
         return false;
-      auto *Store =
-          dyn_cast_or_null<StoreInst>(previousNonDebugInstruction(Cursor));
-      auto *GEP = Store
-                      ? dyn_cast<GetElementPtrInst>(Store->getPointerOperand())
-                      : nullptr;
-      if (!GEP)
-        return false;
-      auto It = GroupForReceiver.find(GEP->getPointerOperand());
+      auto It = GroupForReceiver.find(
+          cast<CallInst>(Cursor)->getArgOperand(0));
       if (It == GroupForReceiver.end() || Consumed[It->second])
         return false;
       unsigned Match = It->second;
@@ -980,8 +981,10 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
   // The original allocation/clone barrier precedes these delayed stores.
   // Publish the initialized fields before any escape or surviving lock, just
   // as Graal's CommitAllocation lowering publishes its initialization writes.
-  if (Emitted)
-    emitPublishWrites(SB, MatVal);
+  for (auto Kind : jeandle::getReplayMemoryBarriers(E.PendingBarriers, Emitted)) {
+    jeandle::createMemoryBarrier(SB, Kind, MatVal);
+    Emitted = true;
+  }
 
   // Re-emit surviving monitorenters from the final result-owned physical plan.
   // Every lock-carrying site has one depth-sorted batch. Its tail effect emits

@@ -6,7 +6,7 @@
 ; retain their memory-ordering contract across inter-iteration InstCombine.
 target datalayout = "e-p:64:64"
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
-declare hotspotcc void @jeandle.publish_writes(ptr addrspace(1)) nounwind "gc-leaf-function"
+declare hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1)) nounwind "gc-leaf-function"
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -23,7 +23,7 @@ init:
   %field = getelementptr inbounds i8, ptr addrspace(1) %object, i64 16
   store atomic i32 %value, ptr addrspace(1) %field unordered, align 4
   fence release
-  call hotspotcc void @jeandle.publish_writes(ptr addrspace(1) %object)
+  call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %object)
   %result = load atomic i32, ptr addrspace(1) %field unordered, align 4
   ret i32 %result
 unwind:
@@ -35,7 +35,7 @@ unwind:
 ; CHECK: fence release
 ; CHECK-NEXT: %[[FIELD:[^ ]+]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) %object, i64 16
 ; CHECK-NEXT: store atomic i32 %value, ptr addrspace(1) %[[FIELD]] unordered, align 4
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(ptr addrspace(1) %object)
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %object)
 ; CHECK-NEXT: call void @sink(ptr addrspace(1) %object)
 ; CHECK-NEXT: ret void
 define void @replay_after_user_fence(i32 %value) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
@@ -45,7 +45,7 @@ init:
   %field = getelementptr inbounds i8, ptr addrspace(1) %object, i64 16
   store atomic i32 %value, ptr addrspace(1) %field unordered, align 4
   fence release
-  call hotspotcc void @jeandle.publish_writes(ptr addrspace(1) %object)
+  call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %object)
   call void @sink(ptr addrspace(1) %object)
   ret void
 unwind:

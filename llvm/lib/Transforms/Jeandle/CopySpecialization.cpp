@@ -19,6 +19,7 @@
 #include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
+#include "llvm/IR/Jeandle/MemoryBarrier.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMConstants.h"
 #include "llvm/IR/LLVMContext.h"
@@ -143,12 +144,7 @@ CallBase *findTightlyCoupledArrayAllocation(CallBase &CI) {
 }
 
 bool needsCopyPublicationBarrier(CallBase &CI) {
-  // Payload clones retain the frontend's barrier. Reference-array clones and
-  // copies into fresh arrays need ordering after their final payload stores,
-  // including when those stores replace the pseudo call entirely.
-  return isReferenceArrayClone(CI) ||
-         (isAllocTightlyCoupled(CI) &&
-          findTightlyCoupledArrayAllocation(CI) != nullptr);
+  return jeandle::copyNeedsInitializationBarrier(CI);
 }
 
 CopyFacts analyzeCopy(CallBase &CB, DominatorTree &DT,
@@ -594,6 +590,8 @@ std::optional<bool> tryScalarizeInstanceClone(
   // them later. TODO: propagate the tightly-coupled allocation property so
   // that pass can omit the unnecessary pre-barrier and, when
   // ReduceInitialCardMarks is enabled, the post-barrier as well.
+  jeandle::createMemoryBarrier(B, jeandle::MemoryBarrierKind::AllocationInit,
+                               BaseDest);
   eraseCopyPseudoCall(CI);
   return true;
 }
@@ -665,7 +663,9 @@ bool tryScalarizeCopy(CallBase &CI, const CopyFacts &Facts) {
   BasicBlock *ExceptionCtl = Invoke.getUnwindDest();
   if (needsCopyPublicationBarrier(CI)) {
     IRBuilder<> ResultFenceBuilder(&Invoke);
-    emitStoreStoreBarrier(ResultFenceBuilder, *M);
+    jeandle::createMemoryBarrier(ResultFenceBuilder,
+                                 jeandle::MemoryBarrierKind::AllocationInit,
+                                 CI.getArgOperand(2));
   }
   ExceptionCtl->removePredecessor(ResultCtl);
   Invoke.eraseFromParent();
@@ -739,8 +739,8 @@ bool expandClonePayloadCopy(CallBase &CI) {
                      B.getInt1(isInstanceClone(CI))});
   Expansion->setCallingConv(CallingConv::Hotspot_JIT);
 
-  // Publication ordering is emitted by the frontend's copy_clone_payload() and
-  // remains in place when this pass replaces the clone pseudo call.
+  jeandle::createMemoryBarrier(B, jeandle::MemoryBarrierKind::AllocationInit,
+                               Dest);
 
   eraseCopyPseudoCall(CI);
   return true;
@@ -1468,7 +1468,9 @@ bool generateArrayCopy(CallBase &CI, CallBase *Allocation,
   // before publishing the freshly allocated destination.
   if (NeedsPublicationBarrier) {
     IRBuilder<> ResultFenceBuilder(ResultRegion->getTerminator());
-    emitStoreStoreBarrier(ResultFenceBuilder, *M);
+    jeandle::createMemoryBarrier(ResultFenceBuilder,
+                                 jeandle::MemoryBarrierKind::AllocationInit,
+                                 CI.getArgOperand(2));
   }
 
   CI.deleteValue();

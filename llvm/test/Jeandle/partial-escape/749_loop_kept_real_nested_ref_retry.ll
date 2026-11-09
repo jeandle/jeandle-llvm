@@ -73,7 +73,7 @@ exit:
 ; CHECK: exit:
 ; CHECK: [[OUTER_REF:%.*]] = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
 ; CHECK-NEXT: store atomic ptr addrspace(1) %inner, ptr addrspace(1) [[OUTER_REF]] unordered, align 8
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @sink(ptr addrspace(1) %outer)
 
 ; DEBUG: PEA: keep-real field unavailable VO=0 value= %path.value = load

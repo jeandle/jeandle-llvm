@@ -240,7 +240,7 @@ unwind:
 ; CHECK-NEXT: store atomic ptr addrspace(3) %[[NARROW0]], ptr addrspace(1) %[[NARROW_SLOT0]] unordered, align 4
 ; CHECK-NEXT: %[[NARROW_SLOT1:[^ ]+]] = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 12
 ; CHECK-NEXT: store atomic ptr addrspace(3) %[[NARROW1]], ptr addrspace(1) %[[NARROW_SLOT1]] unordered, align 4
-; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: ret ptr addrspace(1) %obj
 
 !java-method-compilation = !{}
@@ -254,7 +254,7 @@ unwind:
 ; GC-NEXT: call hotspotcc void @jeandle.pre_barrier(ptr addrspace(1) %[[G1]])
 ; GC-NEXT: store atomic ptr addrspace(1) %[[R1:[^ ]+]], ptr addrspace(1) %[[G1]] unordered, align 8
 ; GC-NEXT: call hotspotcc void @jeandle.post_barrier(ptr addrspace(1) %[[G1]], ptr addrspace(1) %[[R1]])
-; GC-NEXT: call hotspotcc void @jeandle.publish_writes(
+; GC-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; GC-NEXT: ret ptr addrspace(1) %obj
 ; GC-LABEL: define ptr addrspace(1) @accept_fixed_narrow_pointer_vector(
 ; GC: %[[NG0:[^ ]+]] = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 8
@@ -267,5 +267,5 @@ unwind:
 ; GC-NEXT: store atomic ptr addrspace(3) %[[NR1:[^ ]+]], ptr addrspace(1) %[[NG1]] unordered, align 4
 ; GC-NEXT: %[[NW1:[^ ]+]] = addrspacecast ptr addrspace(3) %[[NR1]] to ptr addrspace(1)
 ; GC-NEXT: call hotspotcc void @jeandle.post_barrier(ptr addrspace(1) %[[NG1]], ptr addrspace(1) %[[NW1]])
-; GC-NEXT: call hotspotcc void @jeandle.publish_writes(
+; GC-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; GC-NEXT: ret ptr addrspace(1) %obj

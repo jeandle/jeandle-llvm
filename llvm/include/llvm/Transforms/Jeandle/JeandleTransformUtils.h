@@ -32,15 +32,6 @@
 
 namespace llvm {
 
-/// Order initialization stores before publishing a newly initialized object.
-/// Keep the platform StoreStore JavaOp until JavaOperationLower; standalone
-/// modules without its template use a system release fence.
-void emitStoreStoreBarrier(IRBuilder<> &B, Module &M);
-
-/// Publish replay initialization for \p Receiver after its stores. The
-/// receiver-bearing operation remains virtualizable until phase-1 lowering.
-void emitPublishWrites(IRBuilder<> &B, Value *Receiver);
-
 /// Append a PEA virtual-object (VO) descriptor for a never-escaping instance
 /// object into \p Args, the operand list of a "deopt" operand bundle. This is
 /// the single emit chokepoint for Jeandle PEA deoptimization support: a VO

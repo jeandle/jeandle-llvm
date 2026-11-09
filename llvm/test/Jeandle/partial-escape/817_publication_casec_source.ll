@@ -14,7 +14,7 @@
 ; CHECK: ret i32 %[[VALUE]]
 target datalayout = "e-p:64:64"
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
-declare hotspotcc void @jeandle.publish_writes(ptr addrspace(1)) nounwind "gc-leaf-function"
+declare hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1)) nounwind "gc-leaf-function"
 define i32 @casec_source_publication(i32 %limit) gc "hotspotgc" {
 entry:
   %a = call hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 23456 to ptr), i32 24, i1 false)
@@ -35,7 +35,7 @@ body:
   %next = add nuw i32 %i, 1
   br label %loop
 exit:
-  call hotspotcc void @jeandle.publish_writes(ptr addrspace(1) %a)
+  call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %a)
   ret i32 %value
 }
 !java-method-compilation = !{}
