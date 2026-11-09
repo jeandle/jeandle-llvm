@@ -8298,11 +8298,13 @@ bool Analyzer::foldCloneInstanceConcreteSource(
   if (jeandle::pea::resolveVirtualRef(CB->getArgOperand(0), CurrentState,
                                       Aliases, DL))
     return false;
-  // Best-effort static cross-check: an annotated source klass that differs
-  // from the clone allocation's klass contradicts the clone shape.
-  jeandle::JavaType SrcJT = jeandle::getJavaType(CB->getArgOperand(0), nullptr,
-                                                 nullptr, nullptr);
-  if (SrcJT.isKnown() && SrcJT.Klass != Dest.Klass)
+  // The clone's exact klass must satisfy the source's call-site type bounds;
+  // a non-exact superclass bound is compatible with a subclass clone.
+  jeandle::JavaType SrcJT =
+      jeandle::getJavaType(CB->getArgOperand(0), &DT, CB, IsNullEdge);
+  if (SrcJT.isKnown() && SrcJT.Klass != Dest.Klass &&
+      (SrcJT.Exact || jeandle::areKlassesIncompatible(
+                          Dest.Klass, /*KlassExact=*/true, SrcJT.Klass)))
     return false;
 
   const jeandle::VMCallbacks *VMCB = jeandle::getVMCallbacks();
