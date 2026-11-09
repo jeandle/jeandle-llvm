@@ -31,8 +31,10 @@
 //              (fdlibm's NaN check runs before its y==1 shortcut, and the
 //              stub's general path quiets as well), while returning x
 //              untouched would preserve the signaling payload bits.
-//   y == -1.0: fdlibm has no y==-1 shortcut; its general path may differ
-//              from 1/x by an ulp.
+//   y == -1.0: the fdlibm port shortcuts to a single one/x division
+//              (sharedRuntimeTrans.cpp), but the x86 stub has no y==-1
+//              entry shortcut, so 1/x is not bit-exact against both runtime
+//              entries.
 //   y == 0.5:  no constant identity; the guarded sqrt specialization is
 //              built by the frontend, which can create the control flow.
 //

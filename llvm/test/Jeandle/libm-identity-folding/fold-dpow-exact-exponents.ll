@@ -83,7 +83,8 @@ define double @no_fold_exponent_half(double %x) {
 }
 
 define double @no_fold_exponent_minus_one(double %x) {
-; fdlibm has no y==-1 shortcut: its general path may differ from 1/x by ulp.
+; No fold: the fdlibm port shortcuts to one/x, but the x86 stub has no
+; y==-1 entry shortcut, so 1/x is not bit-exact against both runtime entries.
 ; COMMON-LABEL: define double @no_fold_exponent_minus_one(
 ; COMMON: call double @StubRoutines_dpow(double %x, double -1.000000e+00)
 ; COMMON: ret double
