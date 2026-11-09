@@ -42,10 +42,12 @@ unwind:
 ; CHECK: left:
 ; CHECK-NEXT: [[I32_SLOT:%[A-Za-z0-9._]+]] = getelementptr inbounds i8, ptr addrspace(1) %o, i64 16
 ; CHECK-NEXT: store atomic i32 7, ptr addrspace(1) [[I32_SLOT]] unordered, align 4
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: br label %merge
 ; CHECK: right:
 ; CHECK-NEXT: [[FLOAT_SLOT:%[A-Za-z0-9._]+]] = getelementptr inbounds i8, ptr addrspace(1) %o, i64 16
 ; CHECK-NEXT: store atomic float 1.500000e+00, ptr addrspace(1) [[FLOAT_SLOT]] unordered, align 4
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: br label %merge
 ; CHECK: %v = load atomic i32, ptr addrspace(1) %mf unordered, align 4
 ; CHECK: call void @sink_i32(i32 %v)
@@ -91,11 +93,13 @@ unwind:
 ; CHECK: left:
 ; CHECK-NEXT: [[I64_SLOT:%[A-Za-z0-9._]+]] = getelementptr inbounds i8, ptr addrspace(1) %left_o, i64 16
 ; CHECK-NEXT: store atomic i64 9, ptr addrspace(1) [[I64_SLOT]] unordered, align 8
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: br label %merge
 ; CHECK: %right_o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance
 ; CHECK: right:
 ; CHECK-NEXT: [[REF_SLOT:%[A-Za-z0-9._]+]] = getelementptr inbounds i8, ptr addrspace(1) %right_o, i64 16
 ; CHECK-NEXT: store atomic ptr addrspace(1) %ref, ptr addrspace(1) [[REF_SLOT]] unordered, align 8
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: br label %merge
 ; CHECK: %o = phi ptr addrspace(1) [ %left_o, %left ], [ %right_o, %right ]
 ; CHECK: %v = load atomic i64, ptr addrspace(1) %mf unordered, align 8
@@ -142,11 +146,13 @@ unwind:
 ; CHECK: left:
 ; CHECK-NEXT: [[LEFT_CHILD_SLOT:%pea.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %child, i64 16
 ; CHECK-NEXT: store atomic i32 31, ptr addrspace(1) [[LEFT_CHILD_SLOT]] unordered, align 4
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: call void @sink_ref(ptr addrspace(1) %child)
 ; CHECK-NEXT: br label %merge
 ; CHECK: right:
 ; CHECK-NEXT: [[RIGHT_CHILD_SLOT:%pea.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %child, i64 16
 ; CHECK-NEXT: store atomic i32 31, ptr addrspace(1) [[RIGHT_CHILD_SLOT]] unordered, align 4
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: br label %merge
 ; CHECK-NOT: pea.field.phi
 ; CHECK: merge:
@@ -208,10 +214,12 @@ unwind:
 ; CHECK: left:
 ; CHECK-NEXT: [[LEFT_INNER_SLOT:%pea.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %inner, i64 16
 ; CHECK-NEXT: store atomic i32 47, ptr addrspace(1) [[LEFT_INNER_SLOT]] unordered, align 4
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: br label %merge
 ; CHECK: right:
 ; CHECK-NEXT: [[RIGHT_INNER_SLOT:%pea.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %inner, i64 16
 ; CHECK-NEXT: store atomic i32 47, ptr addrspace(1) [[RIGHT_INNER_SLOT]] unordered, align 4
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: br label %merge
 ; CHECK: merge:
 ; CHECK-NEXT: [[OUTER1:%pea.field.phi[^ ]*]] = phi ptr addrspace(1) [ %p1, %right ], [ %inner, %left ]

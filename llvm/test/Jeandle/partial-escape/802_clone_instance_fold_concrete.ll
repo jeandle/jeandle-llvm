@@ -8,7 +8,7 @@
 ; Node(type).getFields() -> one LoadFieldNode per field). The clone klass's
 ; non-static field list comes from the GetCloneInstanceInfo callback (the
 ; same enumeration CopySpecialization's instance-clone scalarization uses,
-; queried without its expansion field-count bound);
+; queried for FieldState without its raw-copy barrier or field-count limits);
 ; each field folds to an unordered-atomic semantic load placed at the call,
 ; and the destination VO stays virtual. A klass the callback declines
 ; (NotApplicable: injected fields or a non-leaf klass) keeps the

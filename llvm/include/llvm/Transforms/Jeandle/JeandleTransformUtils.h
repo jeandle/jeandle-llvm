@@ -14,6 +14,7 @@
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/DomTreeUpdater.h"
+#include "llvm/Analysis/Jeandle/JeandleAnalysisUtils.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
@@ -30,6 +31,15 @@
 #include <optional>
 
 namespace llvm {
+
+/// Order initialization stores before publishing a newly initialized object.
+/// Keep the platform StoreStore JavaOp until JavaOperationLower; standalone
+/// modules without its template use a system release fence.
+void emitStoreStoreBarrier(IRBuilder<> &B, Module &M);
+
+/// Publish replay initialization for \p Receiver after its stores. The
+/// receiver-bearing operation remains virtualizable until phase-1 lowering.
+void emitPublishWrites(IRBuilder<> &B, Value *Receiver);
 
 /// Append a PEA virtual-object (VO) descriptor for a never-escaping instance
 /// object into \p Args, the operand list of a "deopt" operand bundle. This is
@@ -313,18 +323,6 @@ inline std::optional<int> getOopHandleLoadId(LoadInst *LI) {
     return std::nullopt;
   return jeandle::getOopHandleId(LI->getPointerOperand());
 }
-
-class LazyValueInfo;
-
-/// A jeandle::IsNullEdgeOracle backed by LazyValueInfo: answers "is V provably
-/// null on edge FromBB -> ToBB?" via LVI's edge-predicate query. The
-/// referenced LVI must stay valid for the queried CFG state — only passes that
-/// do not mutate the CFG may hold and use this (LazyValueInfo caches per-block
-/// state; splitting or erasing blocks behind its back is unsafe).
-struct LVINullEdgeOracle {
-  LazyValueInfo &LVI;
-  bool operator()(Value *V, BasicBlock *FromBB, BasicBlock *ToBB) const;
-};
 
 } // namespace llvm
 

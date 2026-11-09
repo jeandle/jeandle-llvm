@@ -17,6 +17,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
@@ -32,6 +33,27 @@ runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
         function_ref<AssumptionCache &(Function &)> GetAssumptionCache) {
   bool Changed = false;
   SmallSetVector<CallBase *, 16> Calls;
+
+  // Keep receiver-bearing publication through PEA and its canonicalization.
+  // Only after virtualization is complete does it become a platform barrier.
+  if (Phase == 1) {
+    if (Function *Publish = M.getFunction("jeandle.publish_writes")) {
+      for (User *U : Publish->users())
+        if (auto *CB = dyn_cast<CallBase>(U))
+          if (jeandle::isPublishWrites(CB))
+            Calls.insert(CB);
+      for (CallBase *CB : Calls) {
+        Function *Caller = CB->getCaller();
+        IRBuilder<> B(CB);
+        emitStoreStoreBarrier(B, M);
+        CB->eraseFromParent();
+        if (FAM)
+          FAM->invalidate(*Caller, PreservedAnalyses::none());
+        Changed = true;
+      }
+      Calls.clear();
+    }
+  }
 
   auto shouldInline = [Phase](const Function &F) -> bool {
     if (!F.hasFnAttribute(jeandle::Attribute::LowerPhase))

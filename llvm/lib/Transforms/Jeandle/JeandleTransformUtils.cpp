@@ -27,6 +27,39 @@
 
 namespace llvm {
 
+void emitStoreStoreBarrier(IRBuilder<> &B, Module &M) {
+  Function *StoreStore = M.getFunction("jeandle.membar_storestore");
+  if (StoreStore && !StoreStore->isDeclaration()) {
+    CallInst *Call = B.CreateCall(StoreStore, {});
+    Call->setCallingConv(CallingConv::Hotspot_JIT);
+    return;
+  }
+  B.CreateFence(AtomicOrdering::Release);
+}
+
+void emitPublishWrites(IRBuilder<> &B, Value *Receiver) {
+  assert(jeandle::isWideOopType(Receiver->getType()));
+  Module &M = *B.GetInsertBlock()->getModule();
+  FunctionType *Ty = FunctionType::get(B.getVoidTy(), {Receiver->getType()},
+                                       /*isVarArg=*/false);
+  GlobalValue *Named = M.getNamedValue("jeandle.publish_writes");
+  Function *Publish = dyn_cast_or_null<Function>(Named);
+  if (Named && (!Publish || Publish->getFunctionType() != Ty ||
+                !Publish->isDeclaration()))
+    report_fatal_error("invalid jeandle.publish_writes declaration");
+  if (!Publish)
+    Publish = Function::Create(Ty, GlobalValue::ExternalLinkage,
+                               "jeandle.publish_writes", M);
+  Publish->setCallingConv(CallingConv::Hotspot_JIT);
+  Publish->addFnAttr(Attribute::NoUnwind);
+  Publish->addFnAttr(Attribute::WillReturn);
+  Publish->addFnAttr("gc-leaf-function");
+  Publish->addParamAttr(
+      0, Attribute::getWithCaptureInfo(B.getContext(), CaptureInfo::none()));
+  CallInst *Call = B.CreateCall(Publish, {Receiver});
+  Call->setCallingConv(CallingConv::Hotspot_JIT);
+}
+
 std::optional<JavaVirtualCallSite> getJavaVirtualCallSite(InvokeInst &CB) {
   if (CB.arg_empty() || !CB.hasDeoptState())
     return std::nullopt;
@@ -500,62 +533,6 @@ unsigned getDeoptScopeVOInsertPos(const CallBase &CB) {
     reportInvalidDeoptBundle(
         CB, "missing or mismatched adjacent i32 deopt bci pair");
   return *Start + 2;
-}
-
-/// LazyValueInfo-backed null-edge oracle. This fork's getPredicateOnEdge
-/// returns a Constant*: the constant result of the comparison, or nullptr when
-/// unknown. Unknown answers false (the edge is kept) — only positive proof may
-/// skip an edge. Pointer casts and aliases are stripped; a freeze is stripped
-/// only when its operand is proven defined, so null proofs describe the
-/// queried value even when it is produced by freezing poison.
-bool LVINullEdgeOracle::operator()(Value *V, BasicBlock *FromBB,
-                                   BasicBlock *ToBB) const {
-  while (true) {
-    V = V->stripPointerCastsAndAliases();
-    if (auto *FI = dyn_cast<FreezeInst>(V)) {
-      if (!jeandle::isProvenDefined(FI->getOperand(0)))
-        break;
-      V = FI->getOperand(0);
-      continue;
-    }
-    break;
-  }
-  auto *PT = dyn_cast<PointerType>(V->getType());
-  if (!PT)
-    return false;
-
-  // Structural fast path for the edge's own terminator: a conditional branch
-  // on `icmp eq/ne TESTED, null` answers the query directly, for either
-  // operand order and through pointer casts on the tested value — forms the
-  // LVI query below does not reliably recover. A conclusive answer on the
-  // tested edge is also final: the non-null side of a direct null test can
-  // never be a null edge.
-  if (auto *BI = dyn_cast<BranchInst>(FromBB->getTerminator()))
-    if (BI->isConditional() && BI->getSuccessor(0) != BI->getSuccessor(1))
-      if (auto *Cmp = dyn_cast<ICmpInst>(BI->getCondition()))
-        if (Cmp->getPredicate() == ICmpInst::ICMP_EQ ||
-            Cmp->getPredicate() == ICmpInst::ICMP_NE) {
-          Value *Op0 = Cmp->getOperand(0);
-          Value *Op1 = Cmp->getOperand(1);
-          Value *Tested =
-              isa<ConstantPointerNull>(Op0->stripPointerCastsAndAliases())
-                  ? Op1
-                  : (isa<ConstantPointerNull>(
-                         Op1->stripPointerCastsAndAliases())
-                         ? Op0
-                         : nullptr);
-          if (Tested && Tested->stripPointerCastsAndAliases() == V) {
-            // eq: the true successor is the null side; ne: the false one.
-            BasicBlock *NullBB = Cmp->getPredicate() == ICmpInst::ICMP_EQ
-                                     ? BI->getSuccessor(0)
-                                     : BI->getSuccessor(1);
-            return NullBB == ToBB;
-          }
-        }
-
-  Constant *C = LVI.getPredicateOnEdge(
-      ICmpInst::ICMP_EQ, V, ConstantPointerNull::get(PT), FromBB, ToBB);
-  return C && C->isOneValue();
 }
 
 } // namespace llvm

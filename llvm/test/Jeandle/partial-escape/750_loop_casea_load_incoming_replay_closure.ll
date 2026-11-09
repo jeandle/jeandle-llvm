@@ -70,6 +70,8 @@ u:
 ; CHECK-LABEL: define void @test_nested_replay_closure
 ; CHECK-NOT: store atomic ptr addrspace(1) poison
 ; CHECK: invoke hotspotcc{{.*}}@jeandle.new_array(ptr inttoptr (i64 2222 to ptr)
-; CHECK: store atomic ptr addrspace(1) %inner, ptr addrspace(1) %fw
+; CHECK: %[[FIELD:[^ ]+]] = getelementptr inbounds i8, ptr addrspace(1) %o, i64 16
+; CHECK-NEXT: store atomic ptr addrspace(1) %inner, ptr addrspace(1) %[[FIELD]]
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(ptr addrspace(1) %o)
 
 !java-method-compilation = !{}

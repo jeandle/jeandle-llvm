@@ -3,8 +3,9 @@
 
 ; Byte-payload clone bail cases:
 ;   The barrier case — clone-instance with a concrete source whose klass the
-;   GetCloneInstanceInfo callback declines with RequiresGCBarriers: the fold
-;   must not fire, the bulk copy stays for the collector-specific expansion.
+;   GetCloneInstanceInfo callback declines semantic field loads with
+;   RequiresGCBarriers (for example a collector needing read barriers): the
+;   fold must not fire, the bulk copy stays for collector-specific expansion.
 ;   The short case — a payload window that does not cover all fields (one
 ;   word short) must not fire: the destination's uncovered field would keep
 ;   its default instead of the source's value.

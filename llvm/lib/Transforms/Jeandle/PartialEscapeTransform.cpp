@@ -50,8 +50,10 @@
 
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/bit.h"
 #include "llvm/Analysis/Jeandle/DeoptPoolBundleLowering.h"
 #include "llvm/Analysis/Jeandle/PartialEscape.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeAnalysis.h"
@@ -73,6 +75,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Support/Alignment.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
@@ -413,6 +416,16 @@ static bool replayStoredValueMatches(Value *Actual, Value *ExpectedSemantic,
   return false;
 }
 
+// Match exactly the publication operation emitted after a replay field group.
+// Consuming it together with the stores lets outer PEA rounds reuse the whole
+// initialization sequence without accumulating barriers.
+static bool isReplayPublicationBarrier(Instruction *I) {
+  auto *Call = dyn_cast_or_null<CallInst>(I);
+  return jeandle::isPublishWrites(Call) &&
+         Call->getCallingConv() == CallingConv::Hotspot_JIT &&
+         Call->getTailCallKind() == CallInst::TCK_None;
+}
+
 // A later outer PEA round sees the stores and monitorenters emitted by the
 // preceding round as ordinary virtualizable operations. Replacing an identical
 // replay sequence would mutate the IR forever without making semantic
@@ -526,6 +539,13 @@ static bool matchExistingReplaySuffix(
           SmallVectorImpl<Instruction *> &Matched, Instruction *&Before) {
         Instruction *At = Start;
         SmallVector<Instruction *, 8> Candidate;
+        if (!Group.Fields.empty()) {
+          if (!isReplayPublicationBarrier(At) ||
+              cast<CallInst>(At)->getArgOperand(0) != Group.Receiver)
+            return false;
+          Candidate.push_back(At);
+          At = previousNonDebugInstruction(At);
+        }
         for (const ExpectedReplayOperation &Op : llvm::reverse(Group.Fields)) {
           auto *Store = dyn_cast_or_null<StoreInst>(At);
           if (!Store || Store->isVolatile() || !Store->isAtomic() ||
@@ -604,7 +624,10 @@ static bool matchExistingReplaySuffix(
     // group. Each group is consumed at most once.
     SmallVector<uint8_t, 4> Consumed(FieldGroups.size(), 0);
     for (unsigned Remaining = NonEmptyGroups.size(); Remaining; --Remaining) {
-      auto *Store = dyn_cast_or_null<StoreInst>(Cursor);
+      if (!isReplayPublicationBarrier(Cursor))
+        return false;
+      auto *Store =
+          dyn_cast_or_null<StoreInst>(previousNonDebugInstruction(Cursor));
       auto *GEP = Store
                       ? dyn_cast<GetElementPtrInst>(Store->getPointerOperand())
                       : nullptr;
@@ -888,19 +911,77 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
             cast<Instruction>(StoreV)->getParent() != nullptr) &&
            "materialize replay value must be a constant, argument, or "
            "in-IR instruction");
-    Value *Slot = SB.CreateInBoundsGEP(
-        I8, MatVal, SB.getInt64(FE.Storage.Offset), "pea.matslot");
-    // Natural alignment = the field type's store size rounded up to a power of
-    // two (atomic-unordered stores MUST be naturally aligned; ABI align may be
-    // smaller than store size, e.g. i64 under the default datalayout). Derived
-    // from the DataLayout so it stays correct under a future compressed-oop /
-    // 32-bit heap model, and matches the frontend's natural-aligned emission.
+    // HotSpot allocations are aligned to at least a native heap word. Packed
+    // primitive groups can start at any byte offset, so their replay width
+    // must also respect the alignment guaranteed by that offset. Reference
+    // fields retain their physical oop type for the downstream GC barriers.
+    Align HeapWordAlign(DL.getPointerSize(jeandle::CHeapAddrSpace));
     uint64_t StoreSz = DL.getTypeStoreSize(StoreV->getType()).getFixedValue();
-    Align NaturalAlign(llvm::PowerOf2Ceil(StoreSz ? StoreSz : 1));
-    StoreInst *S = SB.CreateAlignedStore(StoreV, Slot, NaturalAlign);
-    S->setAtomic(AtomicOrdering::Unordered); // Java heap stores are unordered
+    auto StorePart = [&](Value *Part, uint64_t ByteOffset, Align Alignment) {
+      Value *Slot = SB.CreateInBoundsGEP(
+          I8, MatVal, SB.getInt64(FE.Storage.Offset + ByteOffset),
+          "pea.matslot");
+      StoreInst *S = SB.CreateAlignedStore(Part, Slot, Alignment);
+      S->setAtomic(AtomicOrdering::Unordered);
+    };
+    Align SlotAlign = commonAlignment(HeapWordAlign, FE.Storage.Offset);
+    auto *VectorTy = dyn_cast<FixedVectorType>(StoreV->getType());
+    if (VectorTy && VectorTy->getElementType()->isPointerTy()) {
+      // Oop vectors cannot be bitcast to integer bits. Keep each lane as a
+      // typed reference so InsertGCBarriers observes every replayed oop.
+      uint64_t LaneSize =
+          DL.getTypeStoreSize(VectorTy->getElementType()).getFixedValue();
+      SmallVector<Value *, 4> Lanes;
+      for (unsigned Lane = 0; Lane < VectorTy->getNumElements(); ++Lane)
+        Lanes.push_back(
+            SB.CreateExtractElement(StoreV, Lane, "pea.replay.oop"));
+      for (unsigned Lane = 0; Lane < Lanes.size(); ++Lane) {
+        uint64_t ByteOffset = Lane * LaneSize;
+        Align LaneAlign =
+            commonAlignment(HeapWordAlign, FE.Storage.Offset + ByteOffset);
+        StorePart(Lanes[Lane], ByteOffset,
+                  std::min(Align(LaneSize), LaneAlign));
+      }
+    } else if (StoreV->getType()->isPointerTy() ||
+               StoreSz <= SlotAlign.value()) {
+      StorePart(StoreV, 0, Align(StoreSz));
+    } else {
+      // Atomic unordered stores require natural alignment. Reconstruct the
+      // group's exact memory bytes as the largest naturally aligned pieces;
+      // subsequent optimization can vectorize these independent replay stores.
+      Type *BitsTy = IntegerType::get(Ctx, StoreSz * 8);
+      Value *Bits = SB.CreateBitCast(StoreV, BitsTy, "pea.replay.bits");
+      SmallVector<std::pair<Value *, uint64_t>, 4> Parts;
+      for (uint64_t ByteOffset = 0; ByteOffset < StoreSz;) {
+        Align PartAlign =
+            commonAlignment(HeapWordAlign, FE.Storage.Offset + ByteOffset);
+        uint64_t PartSize =
+            llvm::bit_floor(std::min(StoreSz - ByteOffset, PartAlign.value()));
+        uint64_t Shift =
+            (DL.isLittleEndian() ? ByteOffset
+                                 : StoreSz - ByteOffset - PartSize) *
+            8;
+        Value *Part =
+            Shift ? SB.CreateLShr(Bits, Shift, "pea.replay.part") : Bits;
+        Part = SB.CreateTrunc(Part, IntegerType::get(Ctx, PartSize * 8),
+                              "pea.replay.part");
+        Parts.emplace_back(Part, ByteOffset);
+        ByteOffset += PartSize;
+      }
+      // Keep this group's GEP/store pairs contiguous so the next outer PEA
+      // round can recognize and retain its now independently tracked pieces.
+      for (const auto &[Part, ByteOffset] : Parts)
+        StorePart(Part, ByteOffset,
+                  Align(DL.getTypeStoreSize(Part->getType()).getFixedValue()));
+    }
     Emitted = true;
   }
+
+  // The original allocation/clone barrier precedes these delayed stores.
+  // Publish the initialized fields before any escape or surviving lock, just
+  // as Graal's CommitAllocation lowering publishes its initialization writes.
+  if (Emitted)
+    emitPublishWrites(SB, MatVal);
 
   // Re-emit surviving monitorenters from the final result-owned physical plan.
   // Every lock-carrying site has one depth-sorted batch. Its tail effect emits
@@ -1352,6 +1433,8 @@ PreservedAnalyses PartialEscapeTransform::run(Function &F,
     return PreservedAnalyses::all();
 
   auto &Result = FAM.getResult<PartialEscapeAnalysis>(F);
+  Result.resumeOwnedUses();
+  auto SuspendOwnedUses = make_scope_exit([&] { Result.suspendOwnedUses(); });
   if (!Result.hasOptimizationOpportunity())
     return PreservedAnalyses::all();
   // A malformed cached/custom analysis result must not mutate CFG or IR

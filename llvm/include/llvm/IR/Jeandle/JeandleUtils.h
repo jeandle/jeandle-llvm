@@ -14,6 +14,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
@@ -193,6 +194,17 @@ inline bool isNarrowOopType(Type *Ty) {
 /// Returns true for either uncompressed or compressed oop values.
 inline bool isJavaOopType(Type *Ty) {
   return isWideOopType(Ty) || isNarrowOopType(Ty);
+}
+
+/// Compiler-only initialization publication, lowered after PEA. Its receiver
+/// identifies the writes being published; it neither inspects nor captures it.
+inline bool isPublishWrites(const CallBase *CB) {
+  const Function *Callee = CB ? CB->getCalledFunction() : nullptr;
+  return Callee && Callee->getName() == "jeandle.publish_writes" &&
+         !CB->isTerminator() && CB->getType()->isVoidTy() &&
+         CB->arg_size() == 1 &&
+         isWideOopType(CB->getArgOperand(0)->getType()) &&
+         !CB->hasOperandBundles();
 }
 
 /// Constant oop handle naming convention.

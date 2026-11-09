@@ -151,21 +151,6 @@ bool needsCopyPublicationBarrier(CallBase &CI) {
           findTightlyCoupledArrayAllocation(CI) != nullptr);
 }
 
-// Keep publication ordering as a JavaOp until JavaOperationLower(1), matching
-// the frontend's instance/primitive-array clone path. Standalone modules may
-// lack its template definition; a system release fence supplies the same
-// StoreStore ordering in that case.
-void emitStoreStoreBarrier(IRBuilder<> &B, Module &M) {
-  Function *StoreStore = M.getFunction("jeandle.membar_storestore");
-  if (StoreStore != nullptr && !StoreStore->isDeclaration()) {
-    CallInst *Call = B.CreateCall(StoreStore, {});
-    Call->setCallingConv(CallingConv::Hotspot_JIT);
-    return;
-  }
-
-  B.CreateFence(AtomicOrdering::Release);
-}
-
 CopyFacts analyzeCopy(CallBase &CB, DominatorTree &DT,
                       jeandle::IsNullEdgeOracle IsNullEdge) {
   CopyFacts Facts;
@@ -197,7 +182,8 @@ CopyFacts analyzeCopy(CallBase &CB, DominatorTree &DT,
         jeandle::getJavaType(CB.getArgOperand(0), &DT, &CB, IsNullEdge);
     if (SrcType.isKnown() && Callbacks->GetCloneInstanceInfo != nullptr) {
       Facts.CloneInstanceInfo = Callbacks->GetCloneInstanceInfo(
-          SrcType.Klass, SrcType.Exact, /*expansion_bound=*/true);
+          SrcType.Klass, SrcType.Exact,
+          jeandle::CloneInstanceInfoPurpose::ScalarCopy);
     }
   } else {
     assert((isArrayClone(CB) || isReferenceArrayClone(CB)) &&

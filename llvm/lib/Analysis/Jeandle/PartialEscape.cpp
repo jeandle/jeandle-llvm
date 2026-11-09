@@ -755,6 +755,39 @@ PEAResult::~PEAResult() {
                                      OwnedSyntheticReplayPhis, OwnedCopyLoads);
 }
 
+void PEAResult::suspendOwnedUses() {
+  SmallPtrSet<Instruction *, 16> Seen;
+  auto Suspend = [&](ArrayRef<WeakTrackingVH> Owned) {
+    for (const auto &VH : Owned) {
+      auto *I = dyn_cast_or_null<Instruction>((Value *)VH);
+      if (!I || I->getParent() || !Seen.insert(I).second)
+        continue;
+      for (unsigned Index = 0; Index < I->getNumOperands(); ++Index) {
+        auto *Operand = dyn_cast_or_null<Instruction>(I->getOperand(Index));
+        if (!Operand || !Operand->getParent())
+          continue;
+        SuspendedOperands.push_back({I, Index, Operand});
+        I->setOperand(Index, PoisonValue::get(Operand->getType()));
+      }
+    }
+  };
+  Suspend(OwnedPhis);
+  Suspend(OwnedInsts);
+  Suspend(OwnedLoopFieldPhis);
+  Suspend(OwnedSyntheticReplayPhis);
+  Suspend(OwnedCopyLoads);
+}
+
+void PEAResult::resumeOwnedUses() {
+  for (const auto &Saved : SuspendedOperands) {
+    auto *I = dyn_cast_or_null<Instruction>((Value *)Saved.User);
+    Value *Operand = Saved.Operand;
+    assert(I && Operand && "cached PEA plan outlived its input IR");
+    I->setOperand(Saved.Index, Operand);
+  }
+  SuspendedOperands.clear();
+}
+
 void PEAResult::truncateOwnedTo(size_t PhisMark, size_t InstsMark) {
   assert(PhisMark <= OwnedPhis.size() && InstsMark <= OwnedInsts.size());
   destroyUnparentedOwnedInstructions(

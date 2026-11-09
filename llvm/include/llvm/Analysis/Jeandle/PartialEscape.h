@@ -202,9 +202,10 @@ public:
   uint32_t ArrayIndexScale = 0;
   uint32_t ArrayBaseOffset = 0;
 
-  // Tracked fields, kept sorted by Offset (see getOrCreateFieldIndex).
-  // Lazily populated as accesses are resolved, so its size is
-  // path-dependent and not a structural invariant of the object.
+  // Physical instance/reference field slots, kept sorted by Offset (see
+  // getOrCreateFieldIndex). Primitive array group spans travel with their
+  // point-sensitive field values, since a copy can replace the grouping.
+  // Lazily populated slots are not a structural invariant of the object.
   SmallVector<FieldDesc, 8> Fields;
 
   // A "synthetic" VirtualObject is created at a multi-pred merge by the
@@ -1158,6 +1159,18 @@ public:
   // enter truncateOwnedTo). Only the per-visit PlaceInstructionEffect is
   // rebuilt. Lifecycle otherwise identical to OwnedInsts.
   SmallVector<WeakTrackingVH, 4> OwnedCopyLoads;
+
+  // Deferred instructions must not appear in an in-IR value's use list at an
+  // analysis/pass boundary. Keep their real operands separately while the
+  // cached plan is idle; the transform resumes them before applying effects.
+  struct SuspendedOperand {
+    WeakTrackingVH User;
+    unsigned Index;
+    WeakTrackingVH Operand;
+  };
+  SmallVector<SuspendedOperand, 8> SuspendedOperands;
+  void suspendOwnedUses();
+  void resumeOwnedUses();
 
   // AS1 replay-identity PHIs for compressed Case-C synthetics. Their shells
   // are referenced by VirtualObject::SyntheticReplayPhi and by monotonic

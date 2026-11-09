@@ -68,6 +68,14 @@ enum class CloneInstanceInfoStatus : int {
   Ready = 4,
 };
 
+/// Field-state folding uses semantic field loads and ordinary replay stores;
+/// scalar copy expansion additionally needs a bounded, barrier-free raw copy.
+/// Keep these values stable because callback logs record the purpose as an int.
+enum class CloneInstanceInfoPurpose : int {
+  FieldState = 0,
+  ScalarCopy = 1,
+};
+
 /// Byte offset and JBasicType encoding for one non-static instance field.
 /// The type is not a HotSpot BasicType numeric value.
 using CloneInstanceFieldInfo = std::tuple<int, int>;
@@ -237,6 +245,10 @@ enum class JeandleInlineReason : int {
   def(GetKlassLayoutHelper, int, Int,                                            \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetKlassConstantField, ConstantFieldResult, Tuple,                          \
+      (uintptr_t a1, int a2, int a3), (a1, a2, a3),                              \
+      (VMCallbackValueType::Uintptr, VMCallbackValueType::Int,                    \
+       VMCallbackValueType::Int), 3)                                             \
   def(IsKlassInitialized, bool, Bool,                                            \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
@@ -289,9 +301,9 @@ enum class JeandleInlineReason : int {
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
   def(GetCloneInstanceInfo, CloneInstanceInfoResult, Tuple,                      \
-      (uintptr_t a1, bool a2, bool a3), (a1, a2, a3),                            \
+      (uintptr_t a1, bool a2, CloneInstanceInfoPurpose a3), (a1, a2, a3),       \
       (VMCallbackValueType::Uintptr, VMCallbackValueType::Bool,                  \
-       VMCallbackValueType::Bool), 3)
+       VMCallbackValueType::Int), 3)
 // clang-format on
 
 // =============================================================================
@@ -430,6 +442,13 @@ enum class JeandleInlineReason : int {
 ///                       — Returns Klass::layout_helper() for a constant Klass
 ///                         pointer, or 0 if unavailable. Pure (klass ->
 ///                         layout helper).
+///   GetKlassConstantField
+///                       — Returns (HotSpot BasicType, raw value) for a
+///                         VM-approved immutable field of a known Klass.
+///                         Arguments are Klass, byte offset and load bit width.
+///                         A negative BasicType means unavailable. Native
+///                         Method pointers use T_ADDRESS and are recorded as
+///                         nmethod metadata dependencies by the VM.
 ///   IsKlassInitialized  — Returns true iff a constant Klass is an initialized
 ///                         instance klass. ConstantFieldFolding only acts on a
 ///                         true result because initialization is monotonic;
@@ -503,16 +522,11 @@ enum class JeandleInlineReason : int {
 ///                         non-static field's byte offset and layout BasicType.
 ///                         It also rechecks concurrent subclass loading,
 ///                         records C2's leaf-type dependency, and reports
-///                         whether collector barriers require the bulk clone
-///                         expansion. The third argument selects the caller's
-///                         admission: with expansion_bound=true the
-///                         ArrayCopyLoadStoreMaxElem field-count bound applies
-///                         (C2's ArrayCopyNode::get_count parity — the caller
-///                         expands the copy into per-element load/store IR);
-///                         a PEA fold that only carries field state passes
-///                         false and gets the complete layout (Graal's
-///                         ObjectClone virtualize has no instance field-count
-///                         bound).
+///                         whether collector barriers prevent the requested
+///                         use. ScalarCopy applies ArrayCopyLoadStoreMaxElem
+///                         and the bulk-copy barrier policy. FieldState has
+///                         no expansion bound and admits semantic field loads
+///                         whose later replay stores receive ordinary barriers.
 
 struct VMCallbacks {
   ALL_JEANDLE_VM_CALLBACKS(DEF_VM_CALLBACK_FIELD)

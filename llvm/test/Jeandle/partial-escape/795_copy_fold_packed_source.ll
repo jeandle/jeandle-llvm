@@ -67,12 +67,11 @@ u:
   resume i64 %lp
 }
 
-; STATS: PEA stats @whole_packed: {{.*}}CopyFolds=0
+; STATS: PEA stats @whole_packed: {{.*}}CopyFolds=1
 ; CHECK-LABEL: define i8 @whole_packed(
-; CHECK: @jeandle.new_array
+; CHECK-NOT: @jeandle.copy
 ; CHECK: @jeandle.new_array
 ; CHECK: store atomic i16 8721
-; CHECK: invoke void @jeandle.copy
 ; CHECK: load atomic i8
 ; CHECK: ret i8 %v
 define i8 @whole_packed() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
@@ -100,7 +99,10 @@ u:
 ; CHECK-LABEL: define i8 @later_packed(
 ; CHECK: @jeandle.new_array
 ; CHECK: @jeandle.new_array
-; CHECK: store atomic i16 8721
+; CHECK: getelementptr inbounds i8, ptr addrspace(1) %src, i64 17
+; CHECK-NEXT: store atomic i8 17, {{.*}} align 1
+; CHECK: getelementptr inbounds i8, ptr addrspace(1) %src, i64 18
+; CHECK-NEXT: store atomic i8 34, {{.*}} align 1
 ; CHECK: invoke void @jeandle.copy
 ; CHECK: load atomic i8
 ; CHECK: ret i8 %v
@@ -177,12 +179,11 @@ u:
   resume i64 %lp
 }
 
-; STATS: PEA stats @clone_packed: {{.*}}CopyFolds=0
+; STATS: PEA stats @clone_packed: {{.*}}CopyFolds=1
 ; CHECK-LABEL: define i8 @clone_packed(
-; CHECK: @jeandle.new_array
+; CHECK-NOT: @jeandle.copy
 ; CHECK: @jeandle.new_array
 ; CHECK: store atomic i16 8721
-; CHECK: invoke void @jeandle.copy
 ; CHECK: load atomic i8
 ; CHECK: ret i8 %v
 define i8 @clone_packed() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
@@ -206,14 +207,12 @@ u:
   resume i64 %lp
 }
 
-; STATS: PEA stats @different_physical_type: {{.*}}CopyFolds=0
+; STATS: PEA stats @different_physical_type: {{.*}}CopyFolds=1
 ; CHECK-LABEL: define i32 @different_physical_type(
-; CHECK: @jeandle.new_array
-; CHECK: @jeandle.new_array
-; CHECK: store atomic float 1.000000e+00
-; CHECK: invoke void @jeandle.copy
-; CHECK: load atomic i32
-; CHECK: ret i32 %v
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.copy
+; CHECK: bitcast float 1.000000e+00 to i32
+; CHECK: ret i32
 define i32 @different_physical_type() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12346 to ptr), i32 4, i32 32, i32 16, i32 1048576)

@@ -8,4 +8,4 @@ CanVirtualize 30001 = true
 HasFinalizer 30002 = false
 CanVirtualize 30002 = true
 IsValueBased 30001 = true
-GetCloneInstanceInfo 30001 true false = (4, 3, [(16, 4), (20, 4), (24, 8)])
+GetCloneInstanceInfo 30001 true 0 = (4, 3, [(16, 4), (20, 4), (24, 8)])

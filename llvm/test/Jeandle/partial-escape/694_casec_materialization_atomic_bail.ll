@@ -48,6 +48,7 @@ bypass:
 ; CHECK-NEXT: %[[FIELD:pea.casec.field.phi[^ ]*]] = phi i32 [ 82, %right ], [ 81, %left ]
 ; CHECK-NEXT: %[[SLOT:pea.matslot[^ ]*]] = getelementptr inbounds i8, ptr addrspace(1) %p, i64 8
 ; CHECK-NEXT: store atomic i32 %[[FIELD]], ptr addrspace(1) %[[SLOT]] unordered, align 4
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: call void @sink(ptr addrspace(1) %p)
 ; CHECK-NOT: store atomic
 ; CHECK-NOT: call void @sink
@@ -94,6 +95,7 @@ bypass:
 ; CHECK-NEXT: %[[CFIELD:pea.casec.field.phi[^ ]*]] = phi i32 [ 92, %right ], [ 91, %left ]
 ; CHECK-NEXT: %[[CSLOT:pea.matslot[^ ]*]] = getelementptr inbounds i8, ptr addrspace(1) %p, i64 8
 ; CHECK-NEXT: store atomic i32 %[[CFIELD]], ptr addrspace(1) %[[CSLOT]] unordered, align 4
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: call void @sink(ptr addrspace(1) %p)
 ; CHECK-NOT: store atomic
 ; CHECK-NOT: call void @sink

@@ -81,6 +81,7 @@ exit:
 ; CHECK-NEXT: %[[CFIELD:pea.casec.field.phi[^ ]*]] = phi float [ %[[LC]], %left ], [ %[[RC]], %right ]
 ; CHECK-NEXT: %[[CSLOT:pea.matslot[^ ]*]] = getelementptr inbounds i8, ptr addrspace(1) %p, i64 8
 ; CHECK-NEXT: store atomic float %[[CFIELD]], ptr addrspace(1) %[[CSLOT]] unordered, align 4
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: call void @sink(ptr addrspace(1) %p)
 ; CHECK-NOT: store atomic float
 ; CHECK-NOT: call void @sink
@@ -177,6 +178,7 @@ exit:
 ; CHECK-NEXT: %p = phi ptr addrspace(1) [ %a, %left ], [ %b, %right ]
 ; CHECK-NEXT: %[[PSLOT:pea.matslot[^ ]*]] = getelementptr inbounds i8, ptr addrspace(1) %p, i64 8
 ; CHECK-NEXT: store atomic i32 %[[QFIELD]], ptr addrspace(1) %[[PSLOT]] unordered, align 4
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: call void @sink(ptr addrspace(1) %p)
 ; CHECK: %r = call hotspotcc ptr addrspace(1) @jeandle.new_instance{{.*}}[ "deopt"(i32 696032) ]
 ; CHECK: qmerge.identity:
@@ -184,6 +186,7 @@ exit:
 ; CHECK-NEXT: %[[QPFIELD:pea.casec.field.phi[^ ]*]] = phi i32 [ %[[QFIELD]], %qedge ], [ 0, %redge ]
 ; CHECK-NEXT: %[[QPSLOT:pea.matslot[^ ]*]] = getelementptr inbounds i8, ptr addrspace(1) %qp, i64 8
 ; CHECK-NEXT: store atomic i32 %[[QPFIELD]], ptr addrspace(1) %[[QPSLOT]] unordered, align 4
+; CHECK-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; CHECK-NEXT: call void @sink(ptr addrspace(1) %qp)
 ; CHECK-NOT: store atomic i32
 ; CHECK-NOT: call void @sink
@@ -228,6 +231,7 @@ exit:
 ; REPEAT-NOT: @jeandle.new_instance
 ; REPEAT: %[[RQSLOT:pea.matslot[^ ]*]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) %r, i64 8
 ; REPEAT-NEXT: store atomic i32 0, ptr addrspace(1) %[[RQSLOT]] unordered, align 4
+; REPEAT-NEXT: call hotspotcc void @jeandle.publish_writes(ptr addrspace(1) %r)
 ; REPEAT-NEXT: call void @sink(ptr addrspace(1) %r)
 ; REPEAT-NOT: store atomic i32
 ; REPEAT-NOT: call void @sink

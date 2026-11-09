@@ -11,6 +11,7 @@
 #include "llvm/Transforms/Jeandle/ConstantFieldFolding.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -52,6 +53,7 @@ STATISTIC(NumKlassLayoutHelpersFolded,
           "Number of jeandle.layout_helper calls folded");
 STATISTIC(NumKlassInitializedFolded,
           "Number of jeandle.klass_is_initialized calls folded");
+STATISTIC(NumKlassFieldsFolded, "Number of immutable Klass field loads folded");
 STATISTIC(NumRounds, "Number of folding rounds");
 STATISTIC(NumOopChains, "Number of oop chains followed");
 
@@ -357,10 +359,29 @@ bool isGetClassCall(CallInst *CI) {
          CI->arg_size() == 1;
 }
 
+bool isKnownNonNullAt(Value *Receiver, Instruction *Query, DominatorTree &DT,
+                      const DataLayout &DL, LazyValueInfo &LVI) {
+  SimplifyQuery SQ(DL, &DT, nullptr, Query);
+  if (isKnownNonZero(Receiver, SQ))
+    return true;
+
+  // ValueTracking bounds its search through uses for a dominating null check.
+  // Query the existing block facts as well, so later frame-state uses cannot
+  // hide the non-null edge that reaches this operation.
+  auto *PtrTy = dyn_cast<PointerType>(Receiver->getType());
+  if (!PtrTy)
+    return false;
+  auto *NonNull = dyn_cast_or_null<ConstantInt>(LVI.getPredicateAt(
+      CmpInst::ICMP_NE, Receiver, ConstantPointerNull::get(PtrTy), Query,
+      /*UseBlockValue=*/true));
+  return NonNull && NonNull->isOne();
+}
+
 bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
                       const DenseMap<Value *, int> &ConstOops,
                       DominatorTree &DT, const DataLayout &DL,
-                      jeandle::IsNullEdgeOracle IsNullEdge) {
+                      jeandle::IsNullEdgeOracle IsNullEdge,
+                      LazyValueInfo &LVI) {
   if (!isGetClassCall(CI) || !isJavaOopType(CI->getType()) || !CB.GetJavaMirror)
     return false;
 
@@ -376,8 +397,7 @@ bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
     MirrorOopId = CB.GetJavaMirror(Klass);
   } else {
     // Java type path: require exact type and non-null proof to preserve NPE.
-    SimplifyQuery SQ(DL, &DT, nullptr, CI);
-    if (!isKnownNonZero(Receiver, SQ))
+    if (!isKnownNonNullAt(Receiver, CI, DT, DL, LVI))
       return false;
 
     jeandle::JavaType ReceiverType =
@@ -402,7 +422,8 @@ bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
 bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
                        const DenseMap<Value *, int> &ConstOops,
                        DominatorTree &DT, const DataLayout &DL,
-                       jeandle::IsNullEdgeOracle IsNullEdge) {
+                       jeandle::IsNullEdgeOracle IsNullEdge,
+                       DenseSet<uintptr_t> &KnownKlasses, LazyValueInfo &LVI) {
   if (!isLoadKlassCall(CI))
     return false;
 
@@ -415,8 +436,7 @@ bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
     Klass = CB.GetOopKlass(*OopId);
   } else {
     // Exact Java type path: use the statically known receiver Klass.
-    SimplifyQuery SQ(DL, &DT, nullptr, CI);
-    if (!isKnownNonZero(Receiver, SQ))
+    if (!isKnownNonNullAt(Receiver, CI, DT, DL, LVI))
       return false;
     jeandle::JavaType ReceiverType =
         jeandle::getJavaType(Receiver, &DT, CI, IsNullEdge);
@@ -431,13 +451,15 @@ bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
   if (!KlassConstant)
     return false;
 
+  KnownKlasses.insert(Klass);
   CI->replaceAllUsesWith(KlassConstant);
   CI->eraseFromParent();
   return true;
 }
 
 bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
-                             const DenseMap<Value *, int> &ConstOops) {
+                             const DenseMap<Value *, int> &ConstOops,
+                             DenseSet<uintptr_t> &KnownKlasses) {
   if (!isLoadMirrorKlassCall(CI) || !CI->getType()->isPointerTy() ||
       !CB.GetMirrorKlass)
     return false;
@@ -459,6 +481,8 @@ bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
   if (!KlassConstant)
     return false;
 
+  if (Klass != 0)
+    KnownKlasses.insert(Klass);
   CI->replaceAllUsesWith(KlassConstant);
   CI->eraseFromParent();
   return true;
@@ -500,6 +524,66 @@ bool foldKlassInitializedCall(CallInst *CI, const jeandle::VMCallbacks &CB) {
 
   CI->replaceAllUsesWith(ConstantInt::getTrue(CI->getContext()));
   CI->eraseFromParent();
+  return true;
+}
+
+// Only semantic Klass operands establish provenance. A native inttoptr by
+// itself might name a Method, a runtime entry or arbitrary C memory.
+void collectKnownKlasses(CallBase &Call, DenseSet<uintptr_t> &KnownKlasses) {
+  Function *Callee = Call.getCalledFunction();
+  if (!Callee || Call.arg_empty())
+    return;
+  StringRef Name = Callee->getName();
+  if (Name != "jeandle.new_instance" && Name != "jeandle.new_array" &&
+      Name != "jeandle.layout_helper" &&
+      Name != "jeandle.klass_is_initialized" &&
+      Name != "jeandle.load_array_element_klass" &&
+      Name != "jeandle.check_exact_klass" && Name != "jeandle.checkcast" &&
+      Name != "jeandle.check_instanceof")
+    return;
+  if (uintptr_t Klass = jeandle::extractKlassConstant(Call.getArgOperand(0)))
+    KnownKlasses.insert(Klass);
+}
+
+bool foldKlassFieldLoad(LoadInst *LI, const jeandle::VMCallbacks &CB,
+                        const DenseSet<uintptr_t> &KnownKlasses,
+                        const DataLayout &DL) {
+  if (!CB.GetKlassConstantField || !LI->isUnordered() || LI->isVolatile() ||
+      LI->getPointerAddressSpace() != jeandle::CHeapAddrSpace)
+    return false;
+
+  Type *Ty = LI->getType();
+  bool IsInt = Ty->isIntegerTy(32);
+  bool IsAddress = Ty->isPointerTy() &&
+                   Ty->getPointerAddressSpace() == jeandle::CHeapAddrSpace;
+  if (!IsInt && !IsAddress)
+    return false;
+
+  Value *Ptr = LI->getPointerOperand();
+  APInt Offset(DL.getIndexTypeSizeInBits(Ptr->getType()), 0);
+  Value *Base = Ptr->stripAndAccumulateConstantOffsets(
+      DL, Offset, /*AllowNonInbounds=*/true);
+  uintptr_t Klass = jeandle::extractKlassConstant(Base);
+  if (!KnownKlasses.contains(Klass) || !Offset.isSignedIntN(32))
+    return false;
+
+  unsigned BitWidth = IsInt ? 32 : DL.getPointerTypeSizeInBits(Ty);
+  auto [BasicType, RawValue] = CB.GetKlassConstantField(
+      Klass, static_cast<int>(Offset.getSExtValue()), BitWidth);
+  Constant *Replacement = nullptr;
+  if (IsInt && BasicType == jeandle::T_INT)
+    Replacement = ConstantInt::get(Ty, RawValue);
+  else if (IsAddress && BasicType == jeandle::T_ADDRESS)
+    Replacement = ConstantExpr::getIntToPtr(
+        ConstantInt::get(DL.getIntPtrType(Ty), RawValue), Ty);
+  if (!Replacement)
+    return false;
+
+  auto *GEP = dyn_cast<GetElementPtrInst>(Ptr);
+  LI->replaceAllUsesWith(Replacement);
+  LI->eraseFromParent();
+  if (GEP && GEP->use_empty())
+    GEP->eraseFromParent();
   return true;
 }
 
@@ -707,6 +791,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
   unsigned Round = 0;
   bool Changed = false;
   bool RoundChanged = false;
+  DenseSet<uintptr_t> KnownKlasses;
   do {
     if (++Round > MaxRounds) {
       LLVM_DEBUG(dbgs() << "CFF: max rounds reached, stopping\n");
@@ -735,6 +820,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     SmallVector<LoadInst *, 16> Loads;
     for (BasicBlock *BB : RPOT) {
       for (Instruction &I : *BB) {
+        if (auto *Call = dyn_cast<CallBase>(&I))
+          collectKnownKlasses(*Call, KnownKlasses);
         if (auto *CI = dyn_cast<CallInst>(&I)) {
           if (isLoadKlassCall(CI))
             LoadKlassCalls.push_back(CI);
@@ -757,7 +844,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : LoadKlassCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldLoadKlassCall(CI, *CB, ConstOops, DT, DL, IsNullEdge)) {
+      if (foldLoadKlassCall(CI, *CB, ConstOops, DT, DL, IsNullEdge,
+                            KnownKlasses, LVI)) {
         ++NumKlassesFolded;
         RoundChanged = true;
         Changed = true;
@@ -767,7 +855,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : LoadMirrorKlassCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldLoadMirrorKlassCall(CI, *CB, ConstOops)) {
+      if (foldLoadMirrorKlassCall(CI, *CB, ConstOops, KnownKlasses)) {
         ++NumMirrorKlassesFolded;
         RoundChanged = true;
         Changed = true;
@@ -777,7 +865,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : GetClassCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldGetClassCall(CI, *CB, ConstOops, DT, DL, IsNullEdge)) {
+      if (foldGetClassCall(CI, *CB, ConstOops, DT, DL, IsNullEdge, LVI)) {
         ++NumGetClassesFolded;
         RoundChanged = true;
         Changed = true;
@@ -807,6 +895,13 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (LoadInst *LI : Loads) {
       if (LI->getParent() == nullptr)
         continue;
+
+      if (foldKlassFieldLoad(LI, *CB, KnownKlasses, DL)) {
+        ++NumKlassFieldsFolded;
+        RoundChanged = true;
+        Changed = true;
+        continue;
+      }
 
       std::optional<FieldLoadMatch> Match = matchFieldLoad(LI, ConstOops, DL);
       if (!Match)

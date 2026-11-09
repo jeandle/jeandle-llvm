@@ -1,4 +1,4 @@
 RequiresStrictLockOrder = 1
 HasFinalizer 30001 = false
 CanVirtualize 30001 = true
-GetCloneInstanceInfo 30001 true false = (3, 2, [])
+GetCloneInstanceInfo 30001 true 0 = (3, 2, [])

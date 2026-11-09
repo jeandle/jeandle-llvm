@@ -270,6 +270,15 @@ template <> struct VMCallbackValueCodec<int> {
     return static_cast<int>(V.number());
   }
 };
+template <> struct VMCallbackValueCodec<CloneInstanceInfoPurpose> {
+  static CallbackValue encode(CloneInstanceInfoPurpose V) {
+    return VMCallbackValueCodec<int>::encode(static_cast<int>(V));
+  }
+  static CloneInstanceInfoPurpose decode(const CallbackValue &V) {
+    return static_cast<CloneInstanceInfoPurpose>(
+        VMCallbackValueCodec<int>::decode(V));
+  }
+};
 template <> struct VMCallbackValueCodec<int64_t> {
   static CallbackValue encode(int64_t V) { return CallbackValue::fromNum(V); }
   static int64_t decode(const CallbackValue &V) {

@@ -471,10 +471,12 @@ u:
 ; PARTIAL-FINAL: escape.block:
 ; PARTIAL-FINAL: store atomic i32 %value,
 ; PARTIAL-FINAL: store atomic i32 99,
+; PARTIAL-FINAL-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; PARTIAL-FINAL-NEXT: call void @sink(ptr addrspace(1) %[[PARTIAL_O]])
 ; PARTIAL-FINAL: [[PARTIAL_EDGE]]:
 ; PARTIAL-FINAL: store atomic i32 %value,
 ; PARTIAL-FINAL: store atomic i32 99,
+; PARTIAL-FINAL-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; PARTIAL-FINAL-NEXT: br label %merge
 ; PARTIAL-FINAL: merge:
 ; PARTIAL-FINAL-NOT: store atomic
@@ -523,6 +525,7 @@ u:
 ; VOLATILE-FINAL-NEXT: %[[VOLATILE_SLOT:[A-Za-z0-9._]+]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) {{.*}}, i64 8
 ; VOLATILE-FINAL-NEXT: %[[VOLATILE_REPLAY:[A-Za-z0-9._]+]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) {{.*}}, i64 8
 ; VOLATILE-FINAL-NEXT: store atomic i32 %value, ptr addrspace(1) %[[VOLATILE_REPLAY]] unordered, align 4
+; VOLATILE-FINAL-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; VOLATILE-FINAL-NEXT: store atomic volatile i32 %value, ptr addrspace(1) %[[VOLATILE_SLOT]] unordered, align 4
 ; VOLATILE-FINAL-NEXT: call void @sink
 ; VOLATILE-FINAL-NOT: store atomic volatile
@@ -537,6 +540,7 @@ u:
 ; SYNCSCOPE-FINAL: escape.block:
 ; SYNCSCOPE-FINAL-NEXT: %[[SYNCSCOPE_SLOT:[A-Za-z0-9._]+]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) {{.*}}, i64 8
 ; SYNCSCOPE-FINAL-NEXT: store atomic i32 %value, ptr addrspace(1) %[[SYNCSCOPE_SLOT]] unordered, align 4
+; SYNCSCOPE-FINAL-NEXT: call hotspotcc void @jeandle.publish_writes(
 ; SYNCSCOPE-FINAL-NEXT: call void @sink
 ; SYNCSCOPE-FINAL-NOT: volatile
 ; SYNCSCOPE-FINAL-NOT: syncscope
