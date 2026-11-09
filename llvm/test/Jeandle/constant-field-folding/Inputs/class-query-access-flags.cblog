@@ -1,0 +1,5 @@
+GetMirrorKlass 0 = 0
+GetMirrorKlass 1 = 0
+GetMirrorKlass 2 = 100
+GetKlassModifierFlags 100 = 17
+GetKlassAccessFlags 100 = 33

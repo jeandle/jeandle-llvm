@@ -1,0 +1,6 @@
+GetConstantField 0 16 = (12, 1)
+GetOopHandleName 1 = "oop_handle_ClassMirror_1"
+GetMirrorKlass 1 = 234567
+GetSuperCheckOffset 234567 = 56
+GetSuperCheckOffset 234568 = 0
+GetSuperCheckOffset 234569 = 32

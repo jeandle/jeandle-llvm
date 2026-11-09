@@ -234,7 +234,22 @@ enum class JeandleInlineReason : int {
   def(GetMirrorKlass, uintptr_t, Uintptr,                                        \
       (int a1), (a1),                                                            \
       (VMCallbackValueType::Int), 1)                                             \
+  def(AreSameClassMirrors, int, Int,                                             \
+      (int a1, int a2), (a1, a2),                                                \
+      (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)                   \
   def(GetKlassLayoutHelper, int, Int,                                            \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetSuperCheckOffset, int, Int,                                             \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetKlassModifierFlags, int, Int,                                           \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetKlassAccessFlags, int, Int,                                             \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(IsHiddenKlass, bool, Bool,                                                 \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
   def(IsKlassInitialized, bool, Bool,                                            \
@@ -425,10 +440,18 @@ enum class JeandleInlineReason : int {
 ///                         mirror represents a primitive type. Returns
 ///                         MirrorKlassUnavailable for a non-mirror or an
 ///                         unavailable value. Pure (id -> represented klass).
+///   AreSameClassMirrors — Returns 1 when two constant Class mirrors are the
+///                         same object, 0 when they differ, or -1 if either
+///                         oop id is not a known Class mirror.
 ///   GetKlassLayoutHelper
 ///                       — Returns Klass::layout_helper() for a constant Klass
 ///                         pointer, or 0 if unavailable. Pure (klass ->
 ///                         layout helper).
+///   GetSuperCheckOffset — Return the immutable subtype-check offset for a
+///                         known, non-null recorded Klass.
+///   GetKlassModifierFlags / GetKlassAccessFlags / IsHiddenKlass
+///                       — Return immutable Klass properties for Class queries.
+///                         Only call these for a known, non-null Klass.
 ///   IsKlassInitialized  — Returns true iff a constant Klass is an initialized
 ///                         instance klass. ConstantFieldFolding only acts on a
 ///                         true result because initialization is monotonic;
