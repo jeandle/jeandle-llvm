@@ -13,7 +13,7 @@
 
 @arrayOopDesc.element_size.object = private constant i32 8
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare void @sink(i32)
 declare i32 @__gxx_personality_v0(...)
@@ -22,7 +22,7 @@ define void @array_objarray_voref_deopt(i32 %val) gc "hotspotgc" personality ptr
 entry:
   ; Allocate arr first (vo-id 0, root — it is the bundle operand).
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 54004 to ptr), i32 2, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 54004 to ptr), i32 2, i32 32, i32 16, i32 1048576, i1 false, i1 false)
          to label %alloc_point unwind label %u
 alloc_point:
   ; point is vo-id 1, transitive (referenced ONLY via arr[0]).

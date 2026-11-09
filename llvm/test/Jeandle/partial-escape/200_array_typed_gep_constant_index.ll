@@ -6,14 +6,14 @@
 ; Stores then loads return the stored constants — the alloc, stores and
 ; loads are all eliminated, leaving only the sum constant 60.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 
 declare i32 @__gxx_personality_v0(...)
 
 define i32 @test_typed_gep_const_idx() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
          to label %n unwind label %u
 n:
   %base = getelementptr inbounds i8, ptr addrspace(1) %arr, i32 16

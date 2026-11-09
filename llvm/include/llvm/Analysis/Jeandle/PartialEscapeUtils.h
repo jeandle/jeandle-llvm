@@ -346,6 +346,12 @@ bool isJeandleCallNamed(const CallBase *CB, StringRef Name);
 bool isJeandleNewInstance(const CallBase *CB);
 bool isJeandleNewArray(const CallBase *CB);
 bool isJeandleAllocation(const CallBase *CB); // either of the above
+// jeandle.new_array carries (klass, length, size, header, limit) plus two
+// trailing i1 uninitialized/deferred-publication flags; a tightly coupled
+// initializer that overwrites the payload before the array escapes sets
+// them, plain allocations pass false. The length is operand index 1.
+bool isJeandleNewArrayCall(const CallBase *CB);
+Value *getJeandleNewArrayLength(const CallBase *CB);
 bool isJeandleArrayLength(const CallBase *CB);
 bool isJeandleLoadKlass(const CallBase *CB);
 bool isJeandleGetClass(const CallBase *CB);
