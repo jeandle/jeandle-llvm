@@ -17,7 +17,7 @@
 @arrayOopDesc.element_size.byte = private constant i64 1
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_array(
-    ptr, i32, i32, i32, i32)
+    ptr, i32, i32, i32, i32, i1, i1)
 declare void @safepoint()
 declare i32 @__gxx_personality_v0(...)
 
@@ -26,7 +26,7 @@ define void @array_index_scale_add_overflow() gc "hotspotgc"
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
       ptr inttoptr (i64 73801 to ptr), i32 -2147483646,
-      i32 16, i32 16, i32 1048576)
+      i32 16, i32 16, i32 1048576, i1 false, i1 false)
       to label %body unwind label %unwind
 body:
   %index = freeze i64 2147483649
@@ -52,7 +52,7 @@ define void @deopt_array_offset_not_encodable() gc "hotspotgc"
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
       ptr inttoptr (i64 73802 to ptr), i32 1,
-      i32 -2147483647, i32 -2147483648, i32 1048576)
+      i32 -2147483647, i32 -2147483648, i32 1048576, i1 false, i1 false)
       to label %body unwind label %unwind
 body:
   %cell = getelementptr i8, ptr addrspace(1) %arr, i64 2147483648

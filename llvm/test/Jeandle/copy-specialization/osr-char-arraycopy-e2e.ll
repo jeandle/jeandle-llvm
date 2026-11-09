@@ -434,7 +434,7 @@ declare void @StubRoutines_arrayof_oop_disjoint_arraycopy(ptr addrspace(1), ptr 
 declare i32 @StubRoutines_checkcast_arraycopy(ptr addrspace(1), ptr addrspace(1), i64, i64, ptr)
 
 ; Function Attrs: noinline
-define private hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %array_klass, i32 %length, i32 %size_in_bytes, i32 %base_offset, i32 %length_limit) #5 {
+define private hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %array_klass, i32 %length, i32 %size_in_bytes, i32 %base_offset, i32 %length_limit, i1 %uninitialized, i1 %defer_initialization_membar) #5 {
 entry:
   %too_long = icmp ugt i32 %length, %length_limit
   br i1 %too_long, label %array_slow_path, label %check_tlab
@@ -484,15 +484,16 @@ array_store_wide_klass:                           ; preds = %array_fast_path
 array_post_klass_store:                           ; preds = %array_store_wide_klass, %array_store_narrow_klass
   store atomic i32 %length, ptr addrspace(1) %length_addr unordered, align 4
   %zero_tlab = load i1, ptr @VMOptions.ZeroTLAB, align 1
-  %skip_clear = and i1 %use_tlab, %zero_tlab
-  br i1 %skip_clear, label %array_init_membar, label %array_clear_memory
+  %tlab_is_zeroed = and i1 %use_tlab, %zero_tlab
+  %skip_clear = or i1 %uninitialized, %tlab_is_zeroed
+  br i1 %skip_clear, label %array_after_payload_init, label %array_clear_memory
 
 array_clear_memory:                               ; preds = %array_post_klass_store
   %base_addr = getelementptr i8, ptr addrspace(1) %tlab_old_top, i32 %base_offset
   %payload_size = sub i32 %size_in_bytes, %base_offset
   %payload_words = lshr exact i32 %payload_size, 3
   %has_payload = icmp ne i32 %payload_words, 0
-  br i1 %has_payload, label %array_zero_loop, label %array_init_membar
+  br i1 %has_payload, label %array_zero_loop, label %array_after_payload_init
 
 array_zero_loop:                                  ; preds = %array_zero_loop, %array_clear_memory
   %zi = phi i32 [ 0, %array_clear_memory ], [ %zi_next, %array_zero_loop ]
@@ -500,14 +501,17 @@ array_zero_loop:                                  ; preds = %array_zero_loop, %a
   store volatile i64 0, ptr addrspace(1) %zaddr, align 8
   %zi_next = add nuw nsw i32 %zi, 1
   %zero_done = icmp eq i32 %zi_next, %payload_words
-  br i1 %zero_done, label %array_init_membar, label %array_zero_loop
+  br i1 %zero_done, label %array_after_payload_init, label %array_zero_loop
 
-array_init_membar:                                ; preds = %array_zero_loop, %array_clear_memory, %array_post_klass_store
+array_after_payload_init:                         ; preds = %array_zero_loop, %array_clear_memory, %array_post_klass_store
+  br i1 %defer_initialization_membar, label %array_return, label %array_init_membar
+
+array_init_membar:                                ; preds = %array_after_payload_init
   fence release
   br label %array_return
 
-array_return:                                     ; preds = %array_init_membar, %array_slow_path
-  %array_oop = phi ptr addrspace(1) [ %tlab_old_top, %array_init_membar ], [ %slow_array_oop, %array_slow_path ]
+array_return:                                     ; preds = %array_init_membar, %array_after_payload_init, %array_slow_path
+  %array_oop = phi ptr addrspace(1) [ %tlab_old_top, %array_after_payload_init ], [ %tlab_old_top, %array_init_membar ], [ %slow_array_oop, %array_slow_path ]
   ret ptr addrspace(1) %array_oop
 }
 

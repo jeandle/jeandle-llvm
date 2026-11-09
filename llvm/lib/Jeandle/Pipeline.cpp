@@ -11,6 +11,7 @@
 #include "llvm/Jeandle/Pipeline.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
 #include "llvm/Transforms/Jeandle/CopySpecialization.h"
@@ -31,6 +32,7 @@
 #include "llvm/Transforms/Jeandle/SafepointPollElimination.h"
 #include "llvm/Transforms/Jeandle/SafepointStripMining.h"
 #include "llvm/Transforms/Jeandle/SafepointUtils.h"
+#include "llvm/Transforms/Jeandle/StringIntrinsicSpecialization.h"
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
@@ -192,6 +194,9 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // not look through selects/PHIs -- that division of labor is what keeps
   // the frontend free of constant-exponent checks. See LibmIdentityFolding.h.
   PM.addPass(createModuleToFunctionPassAdaptor(LibmIdentityFolding()));
+  PM.addPass(
+      createModuleToFunctionPassAdaptor(StringIntrinsicSpecialization()));
+  PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   // ==== PEA segment ====
   // Everything below up to InsertGCBarriers exists to serve PEA: the
   // high-tier loop-optimization cluster that exposes virtualization
@@ -213,6 +218,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     // new precision).
     FunctionPassManager PrePEAHighTier;
     PrePEAHighTier.addPass(JavaOpLengthFolding());
+    // Newly folded array lengths expose bounded String operations involving
+    // a local array and a material operand. Expand them before PEA decides
+    // whether the local array escapes.
+    PrePEAHighTier.addPass(StringIntrinsicSpecialization());
     // Re-establish the canonical loop form; the inline driver may have
     // introduced loops that are not in simplified form.
     PrePEAHighTier.addPass(LoopSimplifyPass());
@@ -309,6 +318,12 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(RecoverTypeInfo()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
+  // PEA can expose stable array references whose lengths become constant only
+  // in the cleanup above. Specialize their String operations before lowering,
+  // then let the VM-authorized folder consume any newly exposed cells.
+  PM.addPass(
+      createModuleToFunctionPassAdaptor(StringIntrinsicSpecialization()));
+  PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   PM.addPass(createModuleToFunctionPassAdaptor(CopySpecialization()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
 
@@ -355,6 +370,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
         SafepointPollEliminationMode::LoopDeletionPrep)));
   }
 
+  // High-tier passes resolve runtime declarations and layout constants by
+  // name. Once those passes finish, prune unused private kernels before
+  // expanding their bodies; late GC operations remain rooted by llvm.used.
+  PM.addPass(GlobalDCEPass());
   PM.addPass(JavaOperationLower(1));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(Level)));
   // Second LibmIdentityFolding run: catch dpow exponents the O3 pipeline

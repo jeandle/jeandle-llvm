@@ -7,7 +7,7 @@
 ; in handler. Any replay caused by the pointer PHI must remain on its incoming
 ; edge, and every surviving enter must have the corresponding real exit.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) readonly)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
@@ -17,7 +17,7 @@ declare i32 @__gxx_personality_v0(...)
 define void @casea_folded_invoke_term_locks(i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %lo = alloca i64, align 8
-  %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 7, i32 44, i32 16, i32 1048576)
+  %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 7, i32 44, i32 16, i32 1048576, i1 false, i1 false)
          to label %n unwind label %u
 n:
   call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %o, ptr %lo)
@@ -48,7 +48,7 @@ u:
 ; The folded arraylength invoke is erased.
 ; CHECK-NOT: @jeandle.arraylength
 ; The ORIGINAL allocation invoke (OrigAlloc %o) is RETAINED.
-; CHECK: %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 7, i32 44, i32 16, i32 1048576)
+; CHECK: %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 7, i32 44, i32 16, i32 1048576, i1 false, i1 false)
 ; No additional allocation invoke is emitted.
 ; CHECK-NOT: pea.mat = invoke
 ; Both normal paths replay the enter because both execute merge's real exit.

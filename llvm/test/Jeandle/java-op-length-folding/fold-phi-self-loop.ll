@@ -5,7 +5,7 @@
 ;  - pure mutual cycle with a single allocation: a = phi(alloc, b);
 ;    b = phi(a) — the cycle back-edge contributes NoInfo, alloc wins.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) readonly)
 
 declare i32 @__gxx_personality_v0(...)
@@ -13,7 +13,7 @@ declare i32 @__gxx_personality_v0(...)
 define i32 @test_self_loop(i32 %n, i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-           ptr inttoptr (i64 12345 to ptr), i32 %n, i32 44, i32 16, i32 1048576)
+           ptr inttoptr (i64 12345 to ptr), i32 %n, i32 44, i32 16, i32 1048576, i1 false, i1 false)
         to label %loop unwind label %u
 loop:
   %p = phi ptr addrspace(1) [ %a0, %entry ], [ %p, %loop ]
@@ -29,7 +29,7 @@ u:
 define i32 @test_mutual_pure_cycle(i32 %n, i1 %c) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-           ptr inttoptr (i64 12345 to ptr), i32 %n, i32 44, i32 16, i32 1048576)
+           ptr inttoptr (i64 12345 to ptr), i32 %n, i32 44, i32 16, i32 1048576, i1 false, i1 false)
         to label %h unwind label %u
 h:
   %a = phi ptr addrspace(1) [ %a0, %entry ], [ %b, %l ]
