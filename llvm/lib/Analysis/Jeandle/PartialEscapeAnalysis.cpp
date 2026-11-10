@@ -68,6 +68,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Jeandle/HashCodeIntrinsics.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
@@ -1812,6 +1813,7 @@ private:
   bool processJavaOp(CallBase *CB);
   bool foldStringIntrinsic(CallBase *CB);
   bool foldStringGetChar(CallBase *CB);
+  bool foldVectorizedHashCode(CallBase *CB);
   std::optional<jeandle::ObjectID> resolveStringArray(Value *V);
   Value *readStringCell(jeandle::ObjectID ID, int64_t Offset, unsigned Bits);
   // Known non-escaping LLVM intrinsics (assume, lifetime/invariant
@@ -7426,6 +7428,209 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
   return Finish(Return, *Right);
 }
 
+// Fold jeandle.vectorizedHashCode over a virtual array with a constant,
+// in-range length, in the spirit of foldStringIntrinsic: the array stays
+// virtual (no materialization, matching Graal's plain-loop treatment of
+// constant-length hashes), all-constant cells fold to a constant result, and
+// scalar cells lower to a placed Horner chain. Anything not provable —
+// non-constant fromIndex/length, lengths above HashCodeScalarLimit, layout
+// mismatch, or unreadable cells — returns false so the generic escape path
+// materializes the array exactly like C2's ArgEscape treatment.
+bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
+  using namespace jeandle;
+  using namespace jeandle::pea;
+  auto BasicType = decodeVectorizedHashCode(*CB);
+  if (!BasicType || CB->hasOperandBundles())
+    return false;
+  auto ID = resolveStringArray(CB->getArgOperand(0));
+  if (!ID)
+    return false;
+  auto N = [&](unsigned I) -> std::optional<int64_t> {
+    Value *V = CB->getArgOperand(I);
+    while (Value *Alias = Aliases.getScalarAlias(V))
+      V = Alias;
+    return stringConstantInt(V);
+  };
+  auto From = N(1);
+  auto Length = N(2);
+  if (!From || !Length || *From < 0 || *Length < 0 ||
+      *Length > HashCodeScalarLimit)
+    return false;
+  Value *Initial = CB->getArgOperand(3);
+  while (Value *Alias = Aliases.getScalarAlias(Initial))
+    Initial = Alias;
+
+  const VirtualObject &VO = *Result.VirtualObjects[*ID];
+  const bool ByteLike =
+      VO.ArrayElementType && VO.ArrayElementType->isIntegerTy(8) &&
+      VO.ArrayIndexScale == 1 &&
+      VO.ArrayBaseOffset == VMConsts.arrayBaseOffsetFor(JBasicType::Byte);
+  auto WordLike = [&](JBasicType Kind, unsigned Bits) {
+    return VO.ArrayElementType && VO.ArrayElementType->isIntegerTy(Bits) &&
+           VO.ArrayIndexScale == Bits / 8 &&
+           VO.ArrayBaseOffset == VMConsts.arrayBaseOffsetFor(Kind);
+  };
+  // Interpretation→layout table. T_CHAR accepts either a char[] payload or a
+  // byte[] of native-endian utf16 pairs (StringUTF16 usage); the pair path
+  // composes two byte cells and therefore requires constants.
+  enum class Layout { Bytes, Shorts, Chars, Utf16Pairs, Ints } Ly;
+  unsigned CellBits = 0;
+  bool Signed = false;
+  switch (*BasicType) {
+  case 4: // T_BOOLEAN
+    if (!ByteLike)
+      return false;
+    Ly = Layout::Bytes;
+    CellBits = 8;
+    Signed = false;
+    break;
+  case 8: // T_BYTE
+    if (!ByteLike)
+      return false;
+    Ly = Layout::Bytes;
+    CellBits = 8;
+    Signed = true;
+    break;
+  case 9: // T_SHORT
+    if (!WordLike(JBasicType::Short, 16))
+      return false;
+    Ly = Layout::Shorts;
+    CellBits = 16;
+    Signed = true;
+    break;
+  case 5: // T_CHAR
+    if (WordLike(JBasicType::Char, 16)) {
+      Ly = Layout::Chars;
+      CellBits = 16;
+      Signed = false;
+    } else if (ByteLike) {
+      Ly = Layout::Utf16Pairs;
+      CellBits = 8;
+      Signed = false;
+    } else {
+      return false;
+    }
+    break;
+  case 10: // T_INT
+    if (!WordLike(JBasicType::Int, 32))
+      return false;
+    Ly = Layout::Ints;
+    CellBits = 32;
+    break;
+  default:
+    return false;
+  }
+
+  // Element-scaled range check against the virtual array's element count;
+  // utf16 pairs consume two byte cells per hashed code unit.
+  const int64_t CellsPerElement = Ly == Layout::Utf16Pairs ? 2 : 1;
+  const int64_t Scale = VO.ArrayIndexScale;
+  if ((*From + *Length) * CellsPerElement > VO.ArrayLength)
+    return false;
+
+  // Validate every cell before mutating any abstract state; a failure must
+  // leave the original op untouched for the generic escape path.
+  SmallVector<Value *, HashCodeScalarLimit> Cells;
+  // utf16 pairs advance two byte cells per hashed code unit; every other
+  // layout addresses cells in the array's own element scale.
+  const int64_t ElementScale = Ly == Layout::Utf16Pairs ? 2 : Scale;
+  for (int64_t I = 0; I < *Length; ++I) {
+    auto Offset =
+        checkedArrayElementOffset(VO.ArrayBaseOffset, *From + I, ElementScale);
+    if (!Offset || !isUsableFieldOffset(*Offset))
+      return false;
+    if (Ly == Layout::Utf16Pairs) {
+      auto Lo = readStringCell(*ID, *Offset, 8);
+      auto Hi = readStringCell(*ID, *Offset + 1, 8);
+      auto *LoC = dyn_cast_or_null<ConstantInt>(Lo);
+      auto *HiC = dyn_cast_or_null<ConstantInt>(Hi);
+      if (!LoC || !HiC)
+        return false;
+      unsigned V = DL.isLittleEndian()
+                       ? LoC->getZExtValue() | (HiC->getZExtValue() << 8)
+                       : (LoC->getZExtValue() << 8) | HiC->getZExtValue();
+      Cells.push_back(ConstantInt::get(Type::getInt32Ty(F.getContext()), V));
+    } else {
+      Value *V = readStringCell(*ID, *Offset, CellBits);
+      if (!V)
+        return false;
+      Cells.push_back(V);
+    }
+  }
+
+  // Widen one cell to i32: constants evaluate immediately, scalars place the
+  // extension instruction before the call.
+  Type *I32 = Type::getInt32Ty(F.getContext());
+  auto Place = [&](Instruction *I) -> Value * {
+    I->setDebugLoc(CB->getDebugLoc());
+    Result.OwnedInsts.emplace_back(I);
+    auto E = std::make_unique<PlaceInstructionEffect>();
+    E->Block = CB->getParent();
+    E->Target = CB;
+    E->InstructionToPlace = I;
+    E->SeqNo = Result.nextSeqNo();
+    Result.addBlockEffect(std::move(E));
+    return I;
+  };
+  auto Widen = [&](Value *V) -> Value * {
+    if (V->getType() == I32)
+      return V;
+    if (auto *C = dyn_cast<ConstantInt>(V)) {
+      uint64_t Raw = C->getZExtValue();
+      if (CellBits == 8 && Signed)
+        return ConstantInt::get(I32, int32_t(int8_t(Raw)));
+      if (CellBits == 16 && Signed)
+        return ConstantInt::get(I32, int32_t(int16_t(Raw)));
+      return ConstantInt::get(I32, Raw);
+    }
+    auto Opcode = Signed ? Instruction::SExt : Instruction::ZExt;
+    return Place(CastInst::Create(Opcode, V, I32, "vhc.widen"));
+  };
+
+  // All-constant fast path: fold the whole chain to one i32 constant.
+  if (auto *InitC = dyn_cast<ConstantInt>(Initial)) {
+    uint32_t H = InitC->getZExtValue();
+    bool AllConstant = true;
+    for (Value *CellV : Cells) {
+      auto *W = dyn_cast<ConstantInt>(CellV);
+      if (!W) {
+        AllConstant = false;
+        break;
+      }
+      uint32_t Wide;
+      if (Ly == Layout::Utf16Pairs) {
+        Wide = W->getZExtValue();
+      } else if (CellBits == 8) {
+        Wide = Signed ? uint32_t(int32_t(int8_t(W->getZExtValue())))
+                      : uint32_t(W->getZExtValue());
+      } else if (CellBits == 16) {
+        Wide = Signed ? uint32_t(int32_t(int16_t(W->getZExtValue())))
+                      : uint32_t(W->getZExtValue());
+      } else {
+        Wide = W->getZExtValue();
+      }
+      H = 31 * H + Wide;
+    }
+    if (AllConstant) {
+      observeFieldDefinitions(*ID, FieldDefinitions);
+      emitReplaceCall(CB, ConstantInt::get(I32, H), *ID);
+      return true;
+    }
+  }
+
+  // Scalar path: h = 31*h + widen(cell), all ops placed before the call.
+  Value *H = Initial;
+  for (Value *CellV : Cells) {
+    Value *W = Widen(CellV);
+    Value *HMul = Place(
+        BinaryOperator::CreateMul(H, ConstantInt::get(I32, 31), "vhc.mul"));
+    H = Place(BinaryOperator::CreateAdd(HMul, W, "vhc.add"));
+  }
+  observeFieldDefinitions(*ID, FieldDefinitions);
+  emitReplaceCall(CB, H, *ID);
+  return true;
+}
+
 // Dispatch a recognized JavaOp on a virtual receiver to its fold. Returns
 // true iff the call was handled — folded to a constant / deleted, or a
 // known-safe non-escaping shape needing no transform; false routes the call
@@ -7435,6 +7640,8 @@ bool Analyzer::processJavaOp(CallBase *CB) {
     return foldStringGetChar(CB);
   if (jeandle::decodeStringIntrinsic(*CB))
     return foldStringIntrinsic(CB);
+  if (jeandle::decodeVectorizedHashCode(*CB))
+    return foldVectorizedHashCode(CB);
   using namespace jeandle::pea;
   if (isJeandleArrayLength(CB))
     return foldArrayLength(CB);

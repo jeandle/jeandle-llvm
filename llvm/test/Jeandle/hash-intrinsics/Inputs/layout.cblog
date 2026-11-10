@@ -1,0 +1,5 @@
+RequiresStrictLockOrder = 1
+ElementBasicTypeOfArrayKlass 10001 = 1
+ElementBasicTypeOfArrayKlass 10002 = 2
+ElementBasicTypeOfArrayKlass 10003 = 3
+ElementBasicTypeOfArrayKlass 10004 = 4
