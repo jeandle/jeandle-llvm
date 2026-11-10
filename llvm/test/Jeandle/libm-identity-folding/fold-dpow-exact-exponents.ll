@@ -16,11 +16,9 @@
 ;                              the same way both entries do)
 ;   dpow(x, +-0.0) -> 1.0     (fdlibm tests (iy|ly)==0 first, so even a NaN
 ;                              base yields 1.0; IEEE pow(x,+-0)=1 for all x)
-; Deliberately NOT folded:
-;   y == 1.0 -> x      the runtime quiets a signaling-NaN base, x would not
-;   y == -1.0 / 0.5 / anything else: no bit-exact identity. The guarded
-;   sqrt specialization for y == 0.5 is built by the frontend, which can
-;   create the required control flow.
+; Guarded y==1 and y==0.5 cases retain their original runtime slow call:
+; NaNs for y==1, and nonpositive/NaN bases for y==0.5. Exponent -1 remains
+; untouched because a reciprocal can differ from the selected platform stub.
 ;
 ; The pass relies on earlier passes to reveal constant exponents: it does
 ; not look through selects/PHIs itself (the second RUN line shows instcombine
@@ -64,18 +62,18 @@ define double @shared_square(double %x) {
   ret double %r
 }
 
-define double @no_fold_exponent_one(double %x) {
+define double @guarded_exponent_one(double noundef %x) {
 ; The runtime quiets a signaling-NaN base for y==1.0; returning x unchanged
 ; would differ in NaN payload bits.
-; COMMON-LABEL: define double @no_fold_exponent_one(
+; COMMON-LABEL: define double @guarded_exponent_one(
 ; COMMON: call double @StubRoutines_dpow(double %x, double 1.000000e+00)
 ; COMMON: ret double
   %r = call double @StubRoutines_dpow(double %x, double 1.000000e+00)
   ret double %r
 }
 
-define double @no_fold_exponent_half(double %x) {
-; COMMON-LABEL: define double @no_fold_exponent_half(
+define double @guarded_exponent_half(double noundef %x) {
+; COMMON-LABEL: define double @guarded_exponent_half(
 ; COMMON: call double @StubRoutines_dpow(double %x, double 5.000000e-01)
 ; COMMON: ret double
   %r = call double @StubRoutines_dpow(double %x, double 5.000000e-01)

@@ -8,7 +8,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Folds dpow(x, 2.0) -> x*x and dpow(x, +-0.0) -> 1.0 for the two callee
+// Specializes constant-exponent dpow calls for the two callee
 // forms the Jeandle frontend emits for Math.pow:
 //   - the external declaration @StubRoutines_dpow (platform stub path), or
 //   - the absolute-address constant aliased as @SharedRuntime_dpow, whose
@@ -26,17 +26,17 @@
 //              every x including NaN, so a constant 1.0 matches on every
 //              input.
 //
+// Guarded specializations:
+//   y == 1.0: non-NaN bases return unchanged. NaNs keep the original call,
+//              preserving runtime quieting and payload selection.
+//   y == 0.5: positive bases use sqrt. Non-positive and NaN bases keep the
+//              original call, preserving negative-zero and NaN behavior.
+//
 // Deliberately NOT folded:
-//   y == 1.0 -> x: both runtime entries quiet a signaling-NaN base
-//              (fdlibm's NaN check runs before its y==1 shortcut, and the
-//              stub's general path quiets as well), while returning x
-//              untouched would preserve the signaling payload bits.
 //   y == -1.0: the fdlibm port shortcuts to a single one/x division
 //              (sharedRuntimeTrans.cpp), but the x86 stub has no y==-1
 //              entry shortcut, so 1/x is not bit-exact against both runtime
 //              entries.
-//   y == 0.5:  no constant identity; the guarded sqrt specialization is
-//              built by the frontend, which can create the control flow.
 //
 //===----------------------------------------------------------------------===//
 
@@ -44,6 +44,7 @@
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/IRBuilder.h"
@@ -52,6 +53,7 @@
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 #define DEBUG_TYPE "jeandle-libm-identity-folding"
 
@@ -88,6 +90,48 @@ bool isDpowCall(const CallBase &CB,
          FTy->getParamType(1)->isDoubleTy();
 }
 
+// Keep residual calls recognizable across CSE, inlining and loop cloning.
+// Equal string call-site attributes survive attribute intersection; unknown
+// instruction metadata can be discarded when the intervening O3 merges calls.
+constexpr StringLiteral PowSlowPath = "jeandle.pow.slow";
+
+void specializeGuardedCall(CallInst &Call, bool IsOne) {
+  IRBuilder<> Builder(&Call);
+  Value *Base = Call.getArgOperand(0);
+  // A call argument may be undef or poison without causing immediate UB.
+  // Stabilize the value before branching and use that same choice in both
+  // paths, so the guard cannot introduce UB or disagree with its result.
+  if (!isGuaranteedNotToBeUndefOrPoison(Base))
+    Base = Builder.CreateFreeze(Base, "pow.base");
+  Value *Safe =
+      IsOne ? Builder.CreateFCmpORD(Base, Base, "pow.non_nan")
+            : Builder.CreateFCmpOGT(Base, ConstantFP::get(Base->getType(), 0.0),
+                                    "pow.positive");
+  Instruction *FastTerm, *SlowTerm;
+  SplitBlockAndInsertIfThenElse(Safe, &Call, &FastTerm, &SlowTerm);
+  FastTerm->getParent()->setName("pow.fast");
+  SlowTerm->getParent()->setName("pow.slow");
+  Call.getParent()->setName("pow.merge");
+
+  auto *SlowCall = cast<CallInst>(Call.clone());
+  SlowCall->setTailCallKind(CallInst::TCK_None);
+  SlowCall->setArgOperand(0, Base);
+  SlowCall->addFnAttr(Attribute::get(Call.getContext(), PowSlowPath));
+  SlowCall->insertBefore(SlowTerm->getIterator());
+
+  Value *FastResult = Base;
+  if (!IsOne)
+    FastResult = IRBuilder<>(FastTerm).CreateUnaryIntrinsic(
+        Intrinsic::sqrt, Base, nullptr, "pow.sqrt");
+
+  PHINode *Result =
+      PHINode::Create(Call.getType(), 2, "pow.result", Call.getIterator());
+  Result->addIncoming(FastResult, FastTerm->getParent());
+  Result->addIncoming(SlowCall, SlowTerm->getParent());
+  Call.replaceAllUsesWith(Result);
+  Call.eraseFromParent();
+}
+
 } // namespace
 
 PreservedAnalyses LibmIdentityFolding::run(Function &F,
@@ -112,15 +156,26 @@ PreservedAnalyses LibmIdentityFolding::run(Function &F,
     if (!CB || !isDpowCall(*CB, Callees))
       continue;
     auto *Exp = dyn_cast<ConstantFP>(CB->getArgOperand(1));
-    if (Exp && (Exp->isExactlyValue(2.0) || Exp->isZero()))
+    if (!Exp)
+      continue;
+    if (Exp->isExactlyValue(2.0) || Exp->isZero())
+      Folds.push_back(CB);
+    else if (!CB->hasFnAttr(PowSlowPath) && !CB->hasOperandBundles() &&
+             (Exp->isExactlyValue(1.0) || Exp->isExactlyValue(0.5)))
       Folds.push_back(CB);
   }
 
   if (Folds.empty())
     return PreservedAnalyses::all();
 
+  bool ChangedCFG = false;
   for (CallBase *CB : Folds) {
     const auto *Exp = cast<ConstantFP>(CB->getArgOperand(1));
+    if (Exp->isExactlyValue(1.0) || Exp->isExactlyValue(0.5)) {
+      specializeGuardedCall(*cast<CallInst>(CB), Exp->isExactlyValue(1.0));
+      ChangedCFG = true;
+      continue;
+    }
     Value *Base = CB->getArgOperand(0);
     Value *Replacement =
         Exp->isZero()
@@ -133,7 +188,7 @@ PreservedAnalyses LibmIdentityFolding::run(Function &F,
     CB->eraseFromParent();
   }
 
-  // Calls were replaced by values without control-flow or memory effects;
-  // the CFG is untouched.
-  return PreservedAnalyses::allInSet<CFGAnalyses>();
+  // Only the unguarded identities leave the CFG unchanged.
+  return ChangedCFG ? PreservedAnalyses::none()
+                    : PreservedAnalyses::allInSet<CFGAnalyses>();
 }

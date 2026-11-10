@@ -9,21 +9,23 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Folds the exact constant-exponent identities of the HotSpot runtime dpow
+// Specializes constant-exponent HotSpot runtime dpow
 // call that the Jeandle frontend emits for Math.pow while
 // JeandleUseHotspotIntrinsics is on (StubRoutines::dpow where the platform
 // generated a stub, else SharedRuntime::dpow):
 //
 //   dpow(x, 2.0)   -> x * x
 //   dpow(x, +-0.0) -> 1.0
+//   dpow(x, 1.0)   -> x for non-NaN bases, original runtime otherwise
+//   dpow(x, 0.5)   -> sqrt(x) for positive bases, original runtime otherwise
 //
-// Both identities are bit-exact against both runtime entries on every
+// The unguarded identities are bit-exact against both runtime entries on every
 // input, NaN payloads and signaling-NaN quieting included: the fdlibm port
 // returns x*x for y==2 before any range reduction and tests (iy|ly)==0
-// before its NaN check, and the x86 libm stub multiplies at entry. All
-// other exponents are left alone -- see LibmIdentityFolding.cpp for the
-// excluded cases (y==1.0 in particular is NOT bit-exact for a signaling-NaN
-// base).
+// before its NaN check, and the x86 libm stub multiplies at entry.
+// The guarded cases leave NaNs on their original runtime path, preserving
+// signaling-NaN quieting and payloads. Exponent -1 remains a runtime call
+// because reciprocal need not be bit-exact against the platform stub.
 //
 // The runtime call is opaque to LLVM's libcall machinery, so without this
 // pass the identities are unreachable in the default configuration. The
