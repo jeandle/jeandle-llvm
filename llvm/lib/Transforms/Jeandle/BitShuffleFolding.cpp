@@ -25,6 +25,9 @@
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Transforms/Utils/Local.h"
 
+#define DEBUG_TYPE "bit-shuffle-folding"
+#include "llvm/Transforms/Utils/InstructionWorklist.h"
+
 using namespace llvm;
 using namespace llvm::PatternMatch;
 
@@ -120,22 +123,22 @@ PreservedAnalyses BitShuffleFoldingPass::run(Function &F,
   if (!M || !M->getNamedMetadata(jeandle::Metadata::JavaMethodCompilation))
     return PreservedAnalyses::all();
 
-  SmallVector<WeakTrackingVH, 16> Worklist;
+  InstructionWorklist Worklist;
   auto Enqueue = [&](Value *V) {
     if (auto *II = dyn_cast<IntrinsicInst>(V))
       if (II->getFunction() == &F && isBitShuffle(*II))
-        Worklist.push_back(II);
+        Worklist.push(II);
   };
   for (Instruction &I : instructions(F))
     Enqueue(&I);
-  if (Worklist.empty())
+  if (Worklist.isEmpty())
     return PreservedAnalyses::all();
 
   AssumptionCache &AC = FAM.getResult<AssumptionAnalysis>(F);
   DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
   bool Changed = false;
-  while (!Worklist.empty()) {
-    auto *II = dyn_cast_or_null<IntrinsicInst>(Worklist.pop_back_val());
+  while (!Worklist.isEmpty()) {
+    auto *II = dyn_cast_or_null<IntrinsicInst>(Worklist.removeOne());
     if (!II || !isBitShuffle(*II))
       continue;
     Value *Replacement = foldBitShuffle(*II, AC, DT);
@@ -145,25 +148,33 @@ PreservedAnalyses BitShuffleFoldingPass::run(Function &F,
     for (User *U : II->users())
       Enqueue(U);
     II->replaceAllUsesWith(Replacement);
-    // Recursive deletion can expose single-use producers and invalidate queued
-    // instructions. Weak handles follow replacements and null out on deletion.
+    // The callback runs before operands are dropped. Keep weak handles until
+    // recursive deletion finishes, including when an operand occurs twice or
+    // is itself deleted. Remove deleted instructions from the worklist before
+    // their addresses can be reused.
+    SmallVector<WeakTrackingVH, 16> AffectedOperands;
     RecursivelyDeleteTriviallyDeadInstructions(
         II, nullptr, nullptr, [&](Value *Dead) {
+          Worklist.remove(cast<Instruction>(Dead));
           for (Value *Operand : cast<Instruction>(Dead)->operands()) {
             auto *Producer = dyn_cast<Instruction>(Operand);
             if (!Producer || Producer->getFunction() != &F)
               continue;
-            Enqueue(Producer);
-            for (User *U : Producer->users())
-              Enqueue(U);
+            AffectedOperands.push_back(Producer);
           }
         });
+    // Only a single remaining use can expose a one-use fold. Inspecting that
+    // use is constant time even for operands shared by many bitshuffle calls.
+    for (WeakTrackingVH &Operand : AffectedOperands)
+      if (Value *V = Operand)
+        if (V->hasOneUse())
+          Enqueue(*V->user_begin());
     Changed = true;
   }
 
   // Every successful fold decreases the number of bitshuffle calls. New
   // low-mask PEXT calls cannot match an inverse composition, so revisiting
-  // affected users/producers terminates without a whole-function rescan.
+  // affected users terminates without a whole-function rescan.
   return Changed ? PreservedAnalyses::allInSet<CFGAnalyses>()
                  : PreservedAnalyses::all();
 }
