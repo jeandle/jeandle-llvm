@@ -8759,6 +8759,11 @@ void Analyzer::recordDeoptBundleMappings(CallBase *CB) {
                   }
                   AddScalarField(*Offset, BasicType, Element);
                 }
+                // An offset overflow or a failed AddScalarField already made
+                // this node undescribable; stop the whole element walk
+                // instead of filling further slots of a discarded descriptor.
+                if (!Node.Describable)
+                  break;
               } else {
                 AddFieldValue(*Offset, It->second);
                 ++Index;
