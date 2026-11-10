@@ -10,10 +10,10 @@
 ; A virtual-array descriptor represents exactly one canonical cell per Java
 ; element. Primitive groups that cover complete physical elements project
 ; their memory bits into those elements. Partial, misaligned, out-of-bounds
-; and pointer-bearing groups reject the descriptor. boolean[] uses i8 physical
-; storage for its i1 logical element type. The fallback reuses the original
-; allocation, replays the tracked store before the safepoint, and leaves the
-; real oop in the bundle.
+; and pointer-bearing groups reject the descriptor. Partial, misaligned and
+; out-of-bounds stores materialize at the original store. boolean[] uses i8
+; physical storage for its i1 logical element type. The fallback reuses the
+; original allocation and leaves the real oop in the bundle.
 
 @arrayOopDesc.element_size.object = private constant i32 8
 @arrayOopDesc.element_size.long = private constant i32 4
@@ -43,9 +43,8 @@ unwind:
 
 ; CHECK-LABEL: define void @noncanonical_byte_cell(
 ; CHECK-COUNT-1: invoke hotspotcc ptr addrspace(1) @jeandle.new_array
-; CHECK: %[[SLOT:[-A-Za-z$._0-9]+]] = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 17
-; CHECK-NEXT: store atomic i8 7, ptr addrspace(1) %[[SLOT]] unordered, align 1
-; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
+; CHECK: %partial = getelementptr inbounds i8, ptr addrspace(1) %base, i64 1
+; CHECK-NEXT: store atomic i8 7, ptr addrspace(1) %partial unordered, align 1
 ; CHECK-NEXT: call void @safepoint() [ "deopt"(i32 1, i32 1, i64 12, ptr addrspace(1) %arr) ]
 ; CHECK-NOT: i64 262157
 ; CHECK-NOT: i64 524300
@@ -71,7 +70,6 @@ unwind:
 ; CHECK-COUNT-1: invoke hotspotcc ptr addrspace(1) @jeandle.new_array
 ; CHECK: %[[SLOT:[-A-Za-z$._0-9]+]] = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
 ; CHECK-NEXT: store atomic i16 4660, ptr addrspace(1) %[[SLOT]] unordered, align 2
-; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @safepoint() [ "deopt"(i32 2, i32 2, i64 12, ptr addrspace(1) %arr) ]
 ; CHECK-NOT: i64 262157
 ; CHECK-NOT: i64 524300
@@ -250,9 +248,9 @@ unwind:
 ; CHECK-NOT: i64 262157
 ; CHECK-NOT: i64 524300
 
-; Descriptor planning independently validates the touched store's complete
-; byte range.  This canonical byte address records an i64 cell at offset 16,
-; but the 8-byte store cannot fit one 4-byte VM element or the length-1 array.
+; An oversized store keeps the array real, including at a later safepoint.
+; The address starts at a canonical element, but the 8-byte span does not fit
+; the length-1 array with 4-byte VM elements.
 define void @descriptor_store_size_mismatch_materializes() gc "hotspotgc"
     personality ptr @__gxx_personality_v0 {
 entry:
@@ -274,7 +272,6 @@ unwind:
 ; CHECK-COUNT-1: invoke hotspotcc ptr addrspace(1) @jeandle.new_array
 ; CHECK: %[[LONG_SLOT:[-A-Za-z$._0-9]+]] = getelementptr inbounds i8, ptr addrspace(1) %arr, i64 16
 ; CHECK-NEXT: store atomic i64 456, ptr addrspace(1) %[[LONG_SLOT]] unordered, align 8
-; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @safepoint() [ "deopt"(i32 13, i32 13, i64 12, ptr addrspace(1) %arr) ]
 ; CHECK-NOT: i64 262157
 ; CHECK-NOT: i64 524300

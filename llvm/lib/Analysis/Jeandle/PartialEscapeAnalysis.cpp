@@ -6371,9 +6371,20 @@ bool Analyzer::processStore(StoreInst *SI) {
 
   if (hasPrimitiveArrayGroups(VObj)) {
     auto FD = fieldForValue(VObj, *Offset, PhysicalVal->getType(), DL);
+    int64_t BaseOffset = static_cast<int64_t>(VObj.ArrayBaseOffset);
+    auto ArrayEnd = jeandle::pea::checkedArrayElementOffset(
+        BaseOffset, VObj.ArrayLength, VObj.ArrayIndexScale);
+    auto StoreEnd = FD ? jeandle::pea::checkedOffsetAdd(*Offset, FD->ByteSize)
+                       : std::nullopt;
     auto Fields = activeFields(VObj, FieldStates[*BaseID], DL);
-    if (!FD ||
-        !isCompleteGroupWindow(Fields, *Offset, *Offset + FD->ByteSize)) {
+    // Each virtual span covers complete physical elements. This keeps scalar
+    // entries disjoint across predecessors and lets wider groups share the
+    // same element-based merge and deopt representation.
+    if (!FD || !VObj.ArrayIndexScale || *Offset < BaseOffset ||
+        (*Offset - BaseOffset) % VObj.ArrayIndexScale != 0 ||
+        FD->ByteSize % VObj.ArrayIndexScale != 0 || !ArrayEnd || !StoreEnd ||
+        *StoreEnd > *ArrayEnd ||
+        !isCompleteGroupWindow(Fields, *Offset, *StoreEnd)) {
       materializeOperandsAtStore();
       return true;
     }
