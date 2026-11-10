@@ -519,7 +519,11 @@ bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
   if (!KlassConstant)
     return false;
 
-  KnownKlasses.insert(Klass);
+  // A failed lookup must not seed the provenance set: address zero is never
+  // a Klass. klassPointerConstant already rejects it; the explicit guard
+  // keeps the set's invariant independent of that helper's contract.
+  if (Klass != 0)
+    KnownKlasses.insert(Klass);
   CI->replaceAllUsesWith(KlassConstant);
   CI->eraseFromParent();
   return true;

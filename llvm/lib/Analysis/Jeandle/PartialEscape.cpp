@@ -782,7 +782,11 @@ void PEAResult::resumeOwnedUses() {
   for (const auto &Saved : SuspendedOperands) {
     auto *I = dyn_cast_or_null<Instruction>((Value *)Saved.User);
     Value *Operand = Saved.Operand;
-    assert(I && Operand && "cached PEA plan outlived its input IR");
+    // A nulled handle means the owning IR was destroyed while this result
+    // stayed cached; restoring would corrupt the use lists. Fail loudly
+    // instead of dereferencing null in a release build.
+    if (!I || !Operand)
+      report_fatal_error("cached PEA plan outlived its input IR");
     I->setOperand(Saved.Index, Operand);
   }
   SuspendedOperands.clear();

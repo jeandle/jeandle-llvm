@@ -60,6 +60,13 @@ namespace llvm::jeandle {
 /// protocols retain their own fences and target instructions. Their ordering
 /// must not be weakened or made removable through object virtualization.
 /// Atomic and volatile accesses likewise retain their access ordering.
+// The Acquire, Release, Full, CPUOrder kinds and the three object kinds have
+// frontend or transform producers today (Unsafe fences, @Stable release, clone
+// source ordering, allocation/copy/freeze ownership). LoadLoad, LoadStore,
+// StoreStore and StoreLoad currently have no producer; they complete the C2
+// MemBar taxonomy, map onto the acquire/release/seq_cst fences above during
+// lowering, and stay in the protocol so a future producer needs no
+// cross-repo enum change.
 enum class MemoryBarrierKind : uint8_t {
   LoadLoad,
   LoadStore,
