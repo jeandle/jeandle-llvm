@@ -285,6 +285,7 @@
 #include "llvm/Transforms/Jeandle/SafepointCoverageVerifier.h"
 #include "llvm/Transforms/Jeandle/SafepointPollElimination.h"
 #include "llvm/Transforms/Jeandle/SafepointStripMining.h"
+#include "llvm/Transforms/Jeandle/StringIntrinsicSpecialization.h"
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/ObjCARC.h"

@@ -18,7 +18,7 @@
 @Klass.super_check_offset_offset = constant i32 20
 @personality = global ptr null
 
-declare "java-klass"="202" ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare "java-klass"="202" ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @jeandle.copy(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, ptr, ptr, i64, i64)
 declare hotspotcc i1 @jeandle.check_klass_subtype(ptr, ptr)
 declare hotspotcc ptr @jeandle.load_array_element_klass(ptr)
@@ -32,7 +32,7 @@ declare hotspotcc void @SharedRuntime_slow_arraycopy_C(ptr addrspace(1), i32, pt
 
 define ptr addrspace(1) @copyof(ptr addrspace(1) "java-klass"="201" %src) #0 personality ptr @personality {
 entry:
-  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000)
+  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 false)
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dest, i64 0, i64 8, ptr null, ptr null, i64 8, i64 8) #1 [ "deopt"(i32 0) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %dest
@@ -52,7 +52,7 @@ exception:
 
 define ptr addrspace(1) @copyof_range(ptr addrspace(1) "java-klass"="201" %src) #0 personality ptr @personality {
 entry:
-  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000)
+  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 false)
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 1, ptr addrspace(1) %dest, i64 0, i64 7, ptr null, ptr null, i64 8, i64 8) #2 [ "deopt"(i32 0) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %dest
@@ -74,7 +74,7 @@ exception:
 ; including the checkcast path and its partial-copy slow continuation.
 define ptr addrspace(1) @checkcast_fresh(ptr addrspace(1) "java-klass"="201" %src, ptr %src_klass, ptr %dest_klass) #0 personality ptr @personality {
 entry:
-  %dest = call "java-klass"="202" ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000)
+  %dest = call "java-klass"="202" ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 false)
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dest, i64 0, i64 8, ptr %src_klass, ptr %dest_klass, i64 8, i64 8) #3 [ "deopt"(i32 0) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %dest
@@ -120,7 +120,7 @@ exception:
 ; from the copied prefix when a checkcast stub fails.
 define ptr addrspace(1) @copyof_checkcast(ptr addrspace(1) %src, ptr %src_klass, ptr %dest_klass) #0 personality ptr @personality {
 entry:
-  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000)
+  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 false)
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dest, i64 0, i64 8, ptr %src_klass, ptr %dest_klass, i64 8, i64 8) #5 [ "deopt"(i32 1) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %dest
@@ -140,7 +140,7 @@ exception:
 
 define ptr addrspace(1) @copyof_range_checkcast(ptr addrspace(1) %src, ptr %src_klass, ptr %dest_klass) #0 personality ptr @personality {
 entry:
-  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000)
+  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 false)
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 1, ptr addrspace(1) %dest, i64 0, i64 7, ptr %src_klass, ptr %dest_klass, i64 8, i64 8) #6 [ "deopt"(i32 1) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %dest
@@ -164,10 +164,10 @@ exception:
 ; each destination's publication ordering after expanding both copies.
 define ptr addrspace(1) @two_copies(ptr addrspace(1) %src) #0 personality ptr @personality {
 entry:
-  %first = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000)
+  %first = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 false)
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %first, i64 0, i64 8, ptr null, ptr null, i64 8, i64 8) #1 [ "deopt"(i32 1) ] to label %second_copy unwind label %exception
 second_copy:
-  %second = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000)
+  %second = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 false)
   invoke void @jeandle.copy(ptr addrspace(1) %first, i64 1, ptr addrspace(1) %second, i64 0, i64 7, ptr null, ptr null, i64 8, i64 8) #2 [ "deopt"(i32 1) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %second

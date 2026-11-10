@@ -11,7 +11,7 @@
 ; difference, so these functions pin the conservative contract.
 
 target datalayout = "e-p:64:64"
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @jeandle.copy(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, ptr, ptr, i64, i64)
 declare i32 @__gxx_personality_v0(...)
 
@@ -24,11 +24,11 @@ declare i32 @__gxx_personality_v0(...)
 define i32 @derived_gep_src() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
          to label %alloc unwind label %u
 alloc:
   %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
          to label %init unwind label %u
 init:
   %s0 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16
@@ -57,11 +57,11 @@ u:
 define i32 @derived_freeze_src() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
          to label %alloc unwind label %u
 alloc:
   %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
          to label %init unwind label %u
 init:
   %s0 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16

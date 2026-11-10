@@ -7,18 +7,18 @@
 ; CHECK-NOT: @jeandle.copy
 ; CHECK: ret i8 0
 target datalayout = "e-p:64:64"
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @jeandle.copy(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, ptr, ptr, i64, i64)
 declare i32 @__gxx_personality_v0(...)
 define i8 @chained_complete_groups(i8 %value) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %alloc unwind label %u
 alloc:
-  %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+  %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %third_alloc unwind label %u
 third_alloc:
-  %last = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+  %last = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %init unwind label %u
 init:
   %sp = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16
@@ -48,13 +48,13 @@ attributes #0 = { "jeandle.copy.kind"="arraycopy" "jeandle.copy.validated" }
 ; CHECK: ret i8 41
 define i8 @store_after_group_replacement(i8 %value) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %alloc unwind label %u
 alloc:
-  %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+  %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %third_alloc unwind label %u
 third_alloc:
-  %last = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+  %last = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %init unwind label %u
 init:
   %sp = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16
@@ -83,13 +83,13 @@ u:
 ; CHECK: ret i8 0
 define i8 @branch_histories(i8 %value, i1 %choose) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %alloc unwind label %u
 alloc:
-  %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+  %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %third_alloc unwind label %u
 third_alloc:
-  %last = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+  %last = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
       to label %init unwind label %u
 init:
   %sp = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16

@@ -14,7 +14,7 @@
 ; cleared, the store's EliminateStore effect survives the drop as an
 ; unobserved dead store and the transform deletes it.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc i1 @jeandle.check_if_value_based(ptr addrspace(1))
 declare void @sink_i1(i1)
@@ -29,7 +29,7 @@ define i32 @copy_fold_drop_dead_reaching_def(
     gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %dest = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false)
          to label %do_store unwind label %u
 do_store:
   %dx0 = getelementptr inbounds i8, ptr addrspace(1) %dest, i64 16
@@ -147,7 +147,7 @@ u:
 define i32 @selfoverlap_drop_reaching_defs() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
          to label %stores unwind label %u
 stores:
   %p1 = getelementptr inbounds i8, ptr addrspace(1) %a, i64 16
@@ -191,13 +191,13 @@ u:
 define i32 @v2v_late_src_escape_drop() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false)
          to label %stores unwind label %u
 stores:
   %sx = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16
   store atomic i32 7, ptr addrspace(1) %sx unordered, align 4
   %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false)
          to label %do_copy unwind label %u
 do_copy:
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dst, i64 0, i64 2,
@@ -231,13 +231,13 @@ u:
 define i32 @v2v_postcopy_store_drop() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false)
          to label %stores unwind label %u
 stores:
   %sx = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16
   store atomic i32 7, ptr addrspace(1) %sx unordered, align 4
   %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false)
          to label %do_copy unwind label %u
 do_copy:
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dst, i64 0, i64 2,
@@ -268,7 +268,7 @@ u:
 define i32 @selfoverlap_postcopy_store_drop() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
          to label %stores unwind label %u
 stores:
   %p1 = getelementptr inbounds i8, ptr addrspace(1) %a, i64 16

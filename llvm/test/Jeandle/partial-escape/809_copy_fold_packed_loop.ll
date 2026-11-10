@@ -5,7 +5,7 @@
 ; Active groups survive loop merges and retries. A forced overflow must replay
 ; the current group without retaining speculative field or copy effects.
 target datalayout = "e-p:64:64"
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @jeandle.copy(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, ptr, ptr, i64, i64)
 declare i32 @__gxx_personality_v0(...)
 
@@ -16,9 +16,9 @@ declare i32 @__gxx_personality_v0(...)
 
 define i16 @packed_loop(i16 %input) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576) to label %alloc unwind label %u
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false) to label %alloc unwind label %u
 alloc:
-  %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576) to label %head unwind label %u
+  %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false) to label %head unwind label %u
 head:
   %d0 = getelementptr inbounds i8, ptr addrspace(1) %dst, i64 16
   %d1 = getelementptr inbounds i8, ptr addrspace(1) %dst, i64 17

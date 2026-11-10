@@ -6,7 +6,7 @@
 ; check (Offset >= ArrayBaseOffset + ArrayLength*scale) bails, so the array
 ; materializes at the offending store and the store survives.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 
 declare i32 @__gxx_personality_v0(...)
 
@@ -14,7 +14,7 @@ define void @test_oob_byte_gep_array_bails() gc "hotspotgc" personality ptr @__g
 entry:
   ; length 3, ArrayBaseOffset 16, Int element (scale 4) via the cblog.
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 3, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 3, i32 32, i32 16, i32 1048576, i1 false, i1 false)
        to label %n unwind label %u
 n:
   ; In-bounds element 0 store, so the array is otherwise virtualizable.

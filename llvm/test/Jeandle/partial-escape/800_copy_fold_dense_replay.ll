@@ -7,21 +7,21 @@
 ; Sparse windows replay only the tracked entries; default slots replay
 ; nothing; clone chains fold end to end.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @jeandle.copy(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, ptr, ptr, i64, i64)
 declare void @publish(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define i32 @sparse_escape() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %init unwind label %u
 init:
   %s0 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16
   store atomic i32 1, ptr addrspace(1) %s0 unordered, align 4
   %s1 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 20
   store atomic i32 2, ptr addrspace(1) %s1 unordered, align 4
-  %dst0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %dst0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %copy0 unwind label %u
 copy0:
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dst0, i64 0, i64 16, ptr null, ptr null, i64 16, i64 16) #0
@@ -42,7 +42,7 @@ u:
 
 define i32 @dense_escape() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %init unwind label %u
 init:
   %s0 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16
@@ -77,7 +77,7 @@ init:
   store atomic i32 15, ptr addrspace(1) %s14 unordered, align 4
   %s15 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 76
   store atomic i32 16, ptr addrspace(1) %s15 unordered, align 4
-  %dst0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %dst0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %copy0 unwind label %u
 copy0:
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dst0, i64 0, i64 16, ptr null, ptr null, i64 16, i64 16) #0
@@ -99,7 +99,7 @@ u:
 
 define i32 @small_escape() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %init unwind label %u
 init:
   %s0 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16
@@ -134,7 +134,7 @@ init:
   store atomic i32 15, ptr addrspace(1) %s14 unordered, align 4
   %s15 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 76
   store atomic i32 16, ptr addrspace(1) %s15 unordered, align 4
-  %dst0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %dst0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %copy0 unwind label %u
 copy0:
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dst0, i64 0, i64 8, ptr null, ptr null, i64 16, i64 16) #0
@@ -155,7 +155,7 @@ u:
 
 define i32 @dense_clone_escape() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 12, i32 64, i32 16, i32 1048576)
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 12, i32 64, i32 16, i32 1048576, i1 false, i1 false)
       to label %init unwind label %u
 init:
   %s0 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16
@@ -182,7 +182,7 @@ init:
   store atomic i32 11, ptr addrspace(1) %s10 unordered, align 4
   %s11 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 60
   store atomic i32 12, ptr addrspace(1) %s11 unordered, align 4
-  %dst0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 12, i32 64, i32 16, i32 1048576)
+  %dst0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 12, i32 64, i32 16, i32 1048576, i1 false, i1 false)
       to label %copy0 unwind label %u
 copy0:
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 8, ptr addrspace(1) %dst0, i64 8, i64 7, ptr null, ptr null, i64 12, i64 12) #1
@@ -204,7 +204,7 @@ u:
 
 define i32 @mixed_folds() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %init unwind label %u
 init:
   %s0 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16
@@ -239,19 +239,19 @@ init:
   store atomic i32 15, ptr addrspace(1) %s14 unordered, align 4
   %s15 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 76
   store atomic i32 16, ptr addrspace(1) %s15 unordered, align 4
-  %dst0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %dst0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %copy0 unwind label %u
 copy0:
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dst0, i64 0, i64 16, ptr null, ptr null, i64 16, i64 16) #0
       to label %after0 unwind label %u
 after0:
   call void @publish(ptr addrspace(1) %dst0)
-  %local_src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %local_src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %local_init unwind label %u
 local_init:
   %local_first = getelementptr inbounds i8, ptr addrspace(1) %local_src, i64 16
   store atomic i32 3, ptr addrspace(1) %local_first unordered, align 4
-  %tmp = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %tmp = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %copy_tmp unwind label %u
 copy_tmp:
   invoke void @jeandle.copy(ptr addrspace(1) %local_src, i64 0, ptr addrspace(1) %tmp, i64 0, i64 16, ptr null, ptr null, i64 16, i64 16) #0
@@ -274,7 +274,7 @@ u:
 
 define i32 @clone_chain() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %init unwind label %u
 init:
   %s0 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16
@@ -309,19 +309,19 @@ init:
   store atomic i32 15, ptr addrspace(1) %s14 unordered, align 4
   %s15 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 76
   store atomic i32 16, ptr addrspace(1) %s15 unordered, align 4
-  %dst0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %dst0 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %copy0 unwind label %u
 copy0:
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 8, ptr addrspace(1) %dst0, i64 8, i64 9, ptr null, ptr null, i64 16, i64 16) #1
       to label %after0 unwind label %u
 after0:
-  %dst1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %dst1 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %copy1 unwind label %u
 copy1:
   invoke void @jeandle.copy(ptr addrspace(1) %dst0, i64 8, ptr addrspace(1) %dst1, i64 8, i64 9, ptr null, ptr null, i64 16, i64 16) #1
       to label %after1 unwind label %u
 after1:
-  %dst2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %dst2 = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %copy2 unwind label %u
 copy2:
   invoke void @jeandle.copy(ptr addrspace(1) %dst1, i64 8, ptr addrspace(1) %dst2, i64 8, i64 9, ptr null, ptr null, i64 16, i64 16) #1
@@ -343,12 +343,12 @@ u:
 
 define i32 @multiple_replay_sites(i1 %choose) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %init unwind label %u
 init:
   %s0 = getelementptr inbounds i8, ptr addrspace(1) %src, i64 16
   store atomic i32 1, ptr addrspace(1) %s0 unordered, align 4
-  %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %copy unwind label %u
 copy:
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dst, i64 0, i64 16, ptr null, ptr null, i64 16, i64 16) #0
@@ -391,10 +391,10 @@ u:
 
 define i32 @empty_replay(i1 %choose) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
-  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %src = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %init unwind label %u
 init:
-  %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576)
+  %dst = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 16, i32 80, i32 16, i32 1048576, i1 false, i1 false)
       to label %copy unwind label %u
 copy:
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dst, i64 0, i64 16, ptr null, ptr null, i64 16, i64 16) #0

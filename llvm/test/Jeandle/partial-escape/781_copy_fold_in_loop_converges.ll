@@ -9,14 +9,14 @@
 ; the call site, and the in-loop destination load folds to the cached load.
 ; The second RUN stresses convergence with a tightened iteration cap.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @jeandle.copy(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, ptr, ptr, i64, i64)
 declare i32 @__gxx_personality_v0(...)
 
 define i32 @copy_fold_in_loop(ptr addrspace(1) "java-klass"="12345" %src) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %dest = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576)
+            ptr inttoptr (i64 12345 to ptr), i32 2, i32 24, i32 16, i32 1048576, i1 false, i1 false)
          to label %head unwind label %u
 head:
   br label %loop

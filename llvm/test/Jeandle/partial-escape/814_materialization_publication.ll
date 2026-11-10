@@ -5,7 +5,7 @@
 ; clone barrier. Publish those delayed writes before escape or lock replay.
 ; Repeated PEA must reuse both stores and their publication barrier.
 target datalayout = "e-p:64:64"
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
 declare hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
 declare hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1), ptr) nounwind
@@ -25,7 +25,7 @@ define void @nested_publication(i8 %value) gc "hotspotgc" personality ptr @__gxx
 entry:
   %outer = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 23456 to ptr), i32 24, i1 false) to label %alloc unwind label %unwind
 alloc:
-  %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 1, i32 24, i32 16, i32 1048576) to label %init unwind label %unwind
+  %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 12345 to ptr), i32 1, i32 24, i32 16, i32 1048576, i1 false, i1 false) to label %init unwind label %unwind
 init:
   %element = getelementptr inbounds i8, ptr addrspace(1) %array, i64 16
   store atomic i8 %value, ptr addrspace(1) %element unordered, align 1

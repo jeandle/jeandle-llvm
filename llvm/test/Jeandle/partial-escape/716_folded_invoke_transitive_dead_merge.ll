@@ -9,7 +9,7 @@
 ; available for load folding and deopt description.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1) nounwind
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32) nounwind
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1) nounwind
 declare hotspotcc i32 @jeandle.arraylength(ptr addrspace(1) readonly)
 declare void @may_throw()
 declare void @safepoint()
@@ -31,7 +31,7 @@ entry:
   store atomic ptr addrspace(1) %inner, ptr addrspace(1) %outer.field unordered, align 8
 
   %array = call hotspotcc ptr addrspace(1) @jeandle.new_array(
-      ptr inttoptr (i64 71603 to ptr), i32 7, i32 4, i32 16, i32 1048576)
+      ptr inttoptr (i64 71603 to ptr), i32 7, i32 4, i32 16, i32 1048576, i1 false, i1 false)
       [ "deopt"(i32 716031) ]
   %len = invoke hotspotcc i32 @jeandle.arraylength(
       ptr addrspace(1) %array)

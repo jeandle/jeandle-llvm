@@ -7,7 +7,7 @@
 ; pointer in the locals slot (enc 12 + ptr), neither rewritten to a VORef
 ; (enc 524300) nor preceded by a T_ARRAY descriptor header (enc 262157).
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @escape(ptr addrspace(1))
 declare void @sink(i32)
 declare i32 @__gxx_personality_v0(...)
@@ -15,7 +15,7 @@ declare i32 @__gxx_personality_v0(...)
 define void @array_escapes_no_descriptor(i32 %x) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 55005 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 55005 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
          to label %n unwind label %u
 n:
   ; int[] base 16, scale 4: index 1 @ byte offset 20.

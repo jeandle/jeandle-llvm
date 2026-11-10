@@ -20,7 +20,7 @@
 ; referencing that real array — never poison.
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @escape(ptr addrspace(1))
 declare void @use(i32)
 declare i32 @__gxx_personality_v0(...)
@@ -33,7 +33,7 @@ entry:
        to label %prep unwind label %u
 prep:
   %inner = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-               ptr inttoptr (i64 2222 to ptr), i32 1, i32 32, i32 24, i32 262144)
+               ptr inttoptr (i64 2222 to ptr), i32 1, i32 32, i32 24, i32 262144, i1 false, i1 false)
            to label %c0 unwind label %u
 c0:
   %fw = getelementptr inbounds i8, ptr addrspace(1) %o, i64 16
