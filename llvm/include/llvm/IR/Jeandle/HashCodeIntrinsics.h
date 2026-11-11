@@ -58,10 +58,10 @@ inline std::optional<uint8_t> decodeVectorizedHashCode(const CallBase &CB) {
   }
 }
 
-// Upper bound on the element count the PEA fold walks cell by cell, in the
-// spirit of StringScalarLimit: beyond it the call keeps the (materializing)
-// op, whose expanded body vectorizes the whole range anyway.
-inline constexpr unsigned HashCodeScalarLimit = 16;
+// Bound both cell inspection and generated scalar work. Constant segments
+// collapse to one multiply/add pair independently of their element count.
+inline constexpr unsigned HashCodeMaxFoldLength = 128;
+inline constexpr unsigned HashCodeScalarCostLimit = 64;
 
 } // namespace llvm::jeandle
 

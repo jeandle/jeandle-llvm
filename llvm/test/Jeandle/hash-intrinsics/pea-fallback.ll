@@ -1,7 +1,7 @@
 ; RUN: opt -S -passes='require<partial-escape-analysis>,partial-escape-transform,instcombine,simplifycfg' -jeandle-vm-callback-log=%S/Inputs/layout.cblog -verify-each %s | FileCheck %s
 
 ; Negative shapes keep the original op and materialize the virtual array:
-; non-constant or oversized lengths, out-of-range ranges, unreadable cells,
+; non-constant lengths, out-of-range ranges, unreadable cells,
 ; non-virtual receivers, and utf16 payloads with non-constant bytes.
 
 target datalayout = "e-p:64:64-p1:64:64"
@@ -29,13 +29,12 @@ u:
   resume i64 %lp
 }
 
-; The scalar limit keeps long constant hashes on the vectorized op body.
-; CHECK-LABEL: @too_long(
-; CHECK: @jeandle.new_array
-; CHECK: call i32 @jeandle.vectorized_hashcode
-; CHECK-NOT: poison
-; CHECK: ret i32
-define i32 @too_long() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+; A segment of default cells has no dynamic scalar cost.
+; CHECK-LABEL: @constant_segment(
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.vectorized_hashcode
+; CHECK: ret i32 0
+define i32 @constant_segment() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10001 to ptr), i32 24, i32 48, i32 16, i32 100, i1 false, i1 false) to label %work unwind label %u
 work:

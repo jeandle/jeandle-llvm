@@ -7430,12 +7430,11 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
 
 // Fold jeandle.vectorizedHashCode over a virtual array with a constant,
 // in-range length, in the spirit of foldStringIntrinsic: the array stays
-// virtual (no materialization, matching Graal's plain-loop treatment of
-// constant-length hashes), all-constant cells fold to a constant result, and
-// scalar cells lower to a placed Horner chain. Anything not provable —
-// non-constant fromIndex/length, lengths above HashCodeScalarLimit, layout
-// mismatch, or unreadable cells — returns false so the generic escape path
-// materializes the array exactly like C2's ArgEscape treatment.
+// virtual, all-constant cells fold to a constant result, and scalar cells
+// lower to a placed Horner chain with constant segments combined. Both cell
+// inspection and generated scalar cost are bounded. Anything not provable
+// returns false so the generic escape path materializes the array, like
+// C2's ArgEscape treatment of a retained hash intrinsic.
 bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
   using namespace jeandle;
   using namespace jeandle::pea;
@@ -7454,7 +7453,7 @@ bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
   auto From = N(1);
   auto Length = N(2);
   if (!From || !Length || *From < 0 || *Length < 0 ||
-      *Length > HashCodeScalarLimit)
+      *Length > HashCodeMaxFoldLength)
     return false;
   Value *Initial = CB->getArgOperand(3);
   while (Value *Alias = Aliases.getScalarAlias(Initial))
@@ -7530,7 +7529,7 @@ bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
 
   // Validate every cell before mutating any abstract state; a failure must
   // leave the original op untouched for the generic escape path.
-  SmallVector<Value *, HashCodeScalarLimit> Cells;
+  SmallVector<Value *, 16> Cells;
   // utf16 pairs advance two byte cells per hashed code unit; every other
   // layout addresses cells in the array's own element scale.
   const int64_t ElementScale = Ly == Layout::Utf16Pairs ? 2 : Scale;
@@ -7557,6 +7556,27 @@ bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
       Cells.push_back(V);
     }
   }
+
+  // Charge a conservative upper bound before creating any effects. Each
+  // scalar cell needs at most an extension, multiply and add; a constant
+  // segment costs at most one multiply/add pair, regardless of its length.
+  unsigned ScalarCost = 0;
+  bool ConstantSegment = false;
+  for (Value *V : Cells) {
+    if (isa<ConstantInt>(V)) {
+      ConstantSegment = true;
+      continue;
+    }
+    if (ConstantSegment) {
+      ScalarCost += 2;
+      ConstantSegment = false;
+    }
+    ScalarCost += CellBits == 32 ? 2 : 3;
+  }
+  if (ConstantSegment)
+    ScalarCost += 2;
+  if (ScalarCost > HashCodeScalarCostLimit)
+    return false;
 
   // Widen one cell to i32: constants evaluate immediately, scalars place the
   // extension instruction before the call.
@@ -7618,14 +7638,40 @@ bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
     }
   }
 
-  // Scalar path: h = 31*h + widen(cell), all ops placed before the call.
+  // A run of constants is an affine update h = Factor*h + Bias. Combining
+  // it with the next scalar step avoids rebuilding a long dependent chain
+  // for arrays whose initialized contents are mostly known.
   Value *H = Initial;
+  uint32_t Factor = 1;
+  uint32_t Bias = 0;
+  auto ApplyConstants = [&](uint32_t Mul, uint32_t Add) {
+    if (auto *C = dyn_cast<ConstantInt>(H)) {
+      H = ConstantInt::get(I32, uint32_t(C->getZExtValue()) * Mul + Add);
+      return;
+    }
+    if (Mul != 1)
+      H = Place(
+          BinaryOperator::CreateMul(H, ConstantInt::get(I32, Mul), "vhc.mul"));
+    if (Add != 0)
+      H = Place(
+          BinaryOperator::CreateAdd(H, ConstantInt::get(I32, Add), "vhc.add"));
+  };
   for (Value *CellV : Cells) {
     Value *W = Widen(CellV);
-    Value *HMul = Place(
-        BinaryOperator::CreateMul(H, ConstantInt::get(I32, 31), "vhc.mul"));
-    H = Place(BinaryOperator::CreateAdd(HMul, W, "vhc.add"));
+    if (auto *C = dyn_cast<ConstantInt>(W)) {
+      Factor *= 31;
+      Bias = Bias * 31 + uint32_t(C->getZExtValue());
+      continue;
+    }
+    ApplyConstants(Factor * 31, Bias * 31);
+    if (auto *C = dyn_cast<ConstantInt>(H); C && C->isZero())
+      H = W;
+    else
+      H = Place(BinaryOperator::CreateAdd(H, W, "vhc.add"));
+    Factor = 1;
+    Bias = 0;
   }
+  ApplyConstants(Factor, Bias);
   observeFieldDefinitions(*ID, FieldDefinitions);
   emitReplaceCall(CB, H, *ID);
   return true;
