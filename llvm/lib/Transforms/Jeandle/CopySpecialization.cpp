@@ -10,8 +10,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/CopySpecialization.h"
+#include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
 #include "llvm/Analysis/LazyValueInfo.h"
+#include "llvm/Analysis/SimplifyQuery.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -119,10 +122,36 @@ bool isAllocTightlyCoupled(const CallBase &CI) {
 
 struct CopyFacts {
   CallBase *CB = nullptr;
+  CallBase *DeadCloneAllocation = nullptr;
   jeandle::JBasicType SrcElem = jeandle::JBasicType::Count;
   jeandle::JBasicType DestElem = jeandle::JBasicType::Count;
   std::optional<jeandle::CloneInstanceInfoResult> CloneInstanceInfo;
 };
+
+// Removing an unused clone does not require enumerating its array elements.
+// Its source checks and ordering remain at their original program points.
+static CallBase *findDeadArrayCloneAllocation(CallBase &CI, DominatorTree &DT) {
+  if ((!isArrayClone(CI) && !isReferenceArrayClone(CI)) ||
+      !isAllocTightlyCoupled(CI))
+    return nullptr;
+  auto *Allocation = dyn_cast<CallBase>(CI.getArgOperand(2));
+  if (!Allocation || !jeandle::pea::isJeandleNewArrayCall(Allocation) ||
+      !Allocation->hasOneUse() ||
+      &*Allocation->use_begin() != &CI.getArgOperandUse(2))
+    return nullptr;
+
+  // An arbitrary length can throw NegativeArraySizeException independently
+  // of allocation failure. A clone uses its source array length.
+  Value *Length = jeandle::pea::getJeandleNewArrayLength(Allocation);
+  auto *LengthCall = dyn_cast<CallBase>(Length);
+  Value *Source = CI.getArgOperand(0);
+  if (!LengthCall || !jeandle::pea::isJeandleArrayLength(LengthCall) ||
+      LengthCall->arg_size() != 1 || LengthCall->getArgOperand(0) != Source ||
+      !isKnownNonZero(Source, SimplifyQuery(CI.getModule()->getDataLayout(),
+                                            &DT, nullptr, &CI)))
+    return nullptr;
+  return Allocation;
+}
 
 // Jeandle counterpart of C2's
 // AllocateArrayNode::Ideal_array_allocation(ac->in(ArrayCopyNode::Dest)).
@@ -1665,7 +1694,11 @@ PreservedAnalyses CopySpecialization::run(Function &F,
       }
     }
 
-    CopyFacts Facts = analyzeCopy(*CB, DT, IsNullEdge);
+    CopyFacts Facts;
+    Facts.CB = CB;
+    Facts.DeadCloneAllocation = findDeadArrayCloneAllocation(*CB, DT);
+    if (!Facts.DeadCloneAllocation)
+      Facts = analyzeCopy(*CB, DT, IsNullEdge);
     if (Facts.CloneInstanceInfo.has_value()) {
       const auto &[Status, Count, Fields] = *Facts.CloneInstanceInfo;
       if (Status == static_cast<int>(jeandle::CloneInstanceInfoStatus::Ready) &&
@@ -1685,6 +1718,22 @@ PreservedAnalyses CopySpecialization::run(Function &F,
     CallBase *CB = Facts.CB;
     if (CB->getParent() == nullptr)
       continue;
+
+    if (CallBase *Allocation = Facts.DeadCloneAllocation) {
+      eraseCopyPseudoCall(*CB);
+      assert(Allocation->use_empty() && "dead clone allocation has a user");
+      if (auto *Invoke = dyn_cast<InvokeInst>(Allocation)) {
+        BasicBlock *Parent = Invoke->getParent();
+        BasicBlock *NormalDest = Invoke->getNormalDest();
+        Invoke->getUnwindDest()->removePredecessor(Parent);
+        Invoke->eraseFromParent();
+        BranchInst::Create(NormalDest, Parent);
+      } else {
+        Allocation->eraseFromParent();
+      }
+      Changed = true;
+      continue;
+    }
 
     bool CallChanged = false;
     if (tryScalarizeCopy(*CB, Facts))

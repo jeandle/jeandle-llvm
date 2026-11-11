@@ -2049,7 +2049,9 @@ private:
   bool foldStringIntrinsic(CallBase *CB);
   bool foldStringGetChar(CallBase *CB);
   std::optional<jeandle::ObjectID> resolveStringArray(Value *V);
-  Value *readStringCell(jeandle::ObjectID ID, int64_t Offset, unsigned Bits);
+  Value *readStringCell(jeandle::ObjectID ID, int64_t Offset, unsigned Bits,
+                        Instruction *InsertContext = nullptr);
+  Value *placeStringInstruction(Instruction *I, Instruction *InsertContext);
   // Known non-escaping LLVM intrinsics (assume, lifetime/invariant
   // markers, debug, annotations, branch hints, ...) are no-ops for PEA;
   // launder/strip.invariant.group forward the argument's virtual alias.
@@ -2111,7 +2113,8 @@ private:
   // the copy by its own PlaceInstructionEffect, inheriting the call's full
   // control context (validated guards, null checks) for bounds/type safety.
   Value *getOrCreateCopyElementSemanticLoad(CallBase *Copy, Value *ConcreteSrc,
-                                            Type *ElemTy, int64_t SrcOff);
+                                            Type *ElemTy, int64_t SrcOff,
+                                            uintptr_t ValueKlass);
   // Clear the reaching-def entries of every destination slot inside
   // [Lo, Hi) when a copy fold takes the slot over (written or erased). The
   // copy call itself becomes the slot's reaching definition, and
@@ -7604,28 +7607,85 @@ std::optional<jeandle::ObjectID> Analyzer::resolveStringArray(Value *V) {
   return ID;
 }
 
+Value *Analyzer::placeStringInstruction(Instruction *I,
+                                        Instruction *InsertContext) {
+  I->setDebugLoc(InsertContext->getDebugLoc());
+  Result.OwnedInsts.emplace_back(I);
+  auto E = std::make_unique<jeandle::PlaceInstructionEffect>();
+  E->Block = InsertContext->getParent();
+  E->Target = InsertContext;
+  E->InstructionToPlace = I;
+  E->SeqNo = Result.nextSeqNo();
+  Result.addBlockEffect(std::move(E));
+  return I;
+}
+
 Value *Analyzer::readStringCell(jeandle::ObjectID ID, int64_t Offset,
-                                unsigned Bits) {
+                                unsigned Bits, Instruction *InsertContext) {
   using namespace jeandle;
   const VirtualObject &VO = *Result.VirtualObjects[ID];
   Type *Ty = Type::getIntNTy(F.getContext(), Bits);
-  for (const auto &Field : VO.Fields) {
+  for (const auto &Field : activeFields(VO, FieldStates[ID], DL)) {
     auto Overlap = Field.overlaps(Offset, Bits / 8);
-    if (!Overlap ||
-        (*Overlap && (Field.Offset != Offset || Field.LLVMType != Ty)))
+    if (!Overlap)
       return nullptr;
+    if (!*Overlap)
+      continue;
+    // A missing starting offset is a default only when no active group
+    // intersects the read. Packed values can contain the entire cell.
+    if (Field.Offset > Offset ||
+        Field.Offset + Field.ByteSize < Offset + Bits / 8)
+      return nullptr;
+    const FieldValue &FV = FieldStates[ID].find(Field.Offset)->second;
+    if (!FV.isScalar())
+      return nullptr;
+    Value *V = FV.getScalar();
+    while (Value *Alias = Aliases.getScalarAlias(V))
+      V = Alias;
+    if (isa<UndefValue>(V))
+      return nullptr;
+    unsigned GroupBits = Field.ByteSize * 8;
+    Type *GroupTy = Type::getIntNTy(F.getContext(), GroupBits);
+    if (!CastInst::isBitCastable(V->getType(), GroupTy))
+      return nullptr;
+    unsigned Shift = DL.isLittleEndian()
+                         ? (Offset - Field.Offset) * 8
+                         : (Field.Offset + Field.ByteSize - Offset) * 8 - Bits;
+    // Constant-only consumers must not leave speculative instructions when
+    // a later cell prevents folding the String operation.
+    if (auto *C = dyn_cast<Constant>(V)) {
+      Constant *Part =
+          ConstantFoldCastOperand(Instruction::BitCast, C, GroupTy, DL);
+      if (!Part)
+        return nullptr;
+      if (Shift)
+        Part = ConstantFoldBinaryOpOperands(
+            Instruction::LShr, Part, ConstantInt::get(GroupTy, Shift), DL);
+      if (GroupBits != Bits && Part)
+        Part = ConstantFoldCastOperand(Instruction::Trunc, Part, Ty, DL);
+      if (Part && !isa<UndefValue>(Part)) {
+        observeFieldDefinition(ID, Field.Offset, FieldDefinitions);
+        return Part;
+      }
+      return nullptr;
+    }
+    if (!InsertContext && (V->getType() != Ty || Shift))
+      return nullptr;
+    observeFieldDefinition(ID, Field.Offset, FieldDefinitions);
+    if (V->getType() != GroupTy)
+      V = placeStringInstruction(new BitCastInst(V, GroupTy, "string.bits"),
+                                 InsertContext);
+    if (Shift)
+      V = placeStringInstruction(
+          BinaryOperator::CreateLShr(V, ConstantInt::get(GroupTy, Shift),
+                                     "string.cell.shift"),
+          InsertContext);
+    if (GroupBits != Bits)
+      V = placeStringInstruction(new TruncInst(V, Ty, "string.cell"),
+                                 InsertContext);
+    return V;
   }
-  auto It = FieldStates[ID].find(Offset);
-  if (It == FieldStates[ID].end())
-    return ConstantInt::get(Ty, 0);
-  if (!It->second.isScalar())
-    return nullptr;
-  Value *V = It->second.getScalar();
-  while (Value *Alias = Aliases.getScalarAlias(V))
-    V = Alias;
-  if (V->getType() != Ty || isa<UndefValue>(V))
-    return nullptr;
-  return V;
+  return ConstantInt::get(Ty, 0);
 }
 
 bool Analyzer::foldStringGetChar(CallBase *CB) {
@@ -7650,10 +7710,10 @@ bool Analyzer::foldStringGetChar(CallBase *CB) {
   auto Offset = pea::checkedArrayElementOffset(VO.ArrayBaseOffset, *N, 2);
   if (!Offset || !pea::isUsableFieldOffset(*Offset))
     return false;
-  Value *Word = readStringCell(*ID, *Offset, 16);
+  Value *Word = readStringCell(*ID, *Offset, 16, CB);
   if (!Word) {
-    Value *First = readStringCell(*ID, *Offset, 8);
-    Value *Second = readStringCell(*ID, *Offset + 1, 8);
+    Value *First = readStringCell(*ID, *Offset, 8, CB);
+    Value *Second = readStringCell(*ID, *Offset + 1, 8, CB);
     if (!First || !Second)
       return false;
     // Only virtual byte cells participate. Keep both reaching definitions
@@ -7860,26 +7920,108 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
       AddWrite(Offset + 1, 8, DL.isLittleEndian() ? V >> 8 : V & 255);
     }
   }
-  // Validate the entire transaction before changing any abstract cell or
-  // layout entry. A failure must leave the original op and state untouched.
-  for (const Write &W : Writes)
-    for (const auto &Field : Dst.Fields) {
-      auto Overlap = Field.overlaps(W.Offset, W.Value->getBitWidth() / 8);
-      if (!Overlap || (*Overlap && (Field.Offset != W.Offset ||
-                                    Field.LLVMType != W.Value->getType())))
-        return false;
+  // Build a transaction against the active spans. Each write updates complete
+  // physical elements, while a containing packed group retains its untouched
+  // bits. No abstract state or instruction effects change until validation is
+  // complete, including the prefix written by an unsuccessful compression.
+  struct GroupWrite {
+    int64_t Offset;
+    Value *OldValue;
+    APInt Mask;
+    APInt Bits;
+  };
+  SmallVector<GroupWrite, 32> Groups;
+  DenseMap<int64_t, unsigned> GroupIndices;
+  auto Fields = activeFields(Dst, FieldStates[*Right], DL);
+  unsigned CellBits = Dst.ArrayIndexScale * 8;
+  if (!CellBits || !hasPrimitiveArrayGroups(Dst))
+    return false;
+  for (const Write &W : Writes) {
+    unsigned WriteBits = W.Value->getBitWidth();
+    if (WriteBits % CellBits)
+      return false;
+    for (unsigned Byte = 0; Byte < WriteBits / 8; Byte += Dst.ArrayIndexScale) {
+      int64_t Offset = W.Offset + Byte;
+      int64_t GroupOffset = Offset;
+      unsigned GroupBits = CellBits;
+      Value *OldValue = nullptr;
+      for (const auto &Field : Fields) {
+        auto Overlap = Field.overlaps(Offset, Dst.ArrayIndexScale);
+        if (!Overlap)
+          return false;
+        if (!*Overlap)
+          continue;
+        if (Field.Offset > Offset ||
+            Field.Offset + Field.ByteSize < Offset + Dst.ArrayIndexScale)
+          return false;
+        const FieldValue &FV = FieldStates[*Right].find(Field.Offset)->second;
+        if (!FV.isScalar())
+          return false;
+        OldValue = FV.getScalar();
+        while (Value *Alias = Aliases.getScalarAlias(OldValue))
+          OldValue = Alias;
+        GroupOffset = Field.Offset;
+        GroupBits = Field.ByteSize * 8;
+        if (!CastInst::isBitCastable(
+                OldValue->getType(),
+                Type::getIntNTy(F.getContext(), GroupBits)))
+          return false;
+        break;
+      }
+      auto [It, Inserted] =
+          GroupIndices.try_emplace(GroupOffset, Groups.size());
+      if (Inserted)
+        Groups.push_back(
+            {GroupOffset, OldValue, APInt(GroupBits, 0), APInt(GroupBits, 0)});
+      GroupWrite &G = Groups[It->second];
+      unsigned Shift = DL.isLittleEndian()
+                           ? (Offset - GroupOffset) * 8
+                           : GroupBits - (Offset - GroupOffset) * 8 - CellBits;
+      unsigned WriteShift =
+          DL.isLittleEndian() ? Byte * 8 : WriteBits - Byte * 8 - CellBits;
+      APInt Mask = APInt::getBitsSet(GroupBits, Shift, Shift + CellBits);
+      APInt Bits = W.Value->getValue()
+                       .extractBits(CellBits, WriteShift)
+                       .zext(GroupBits)
+                       .shl(Shift);
+      G.Mask |= Mask;
+      G.Bits = (G.Bits & ~Mask) | Bits;
     }
+  }
+  for (const GroupWrite &G : Groups)
+    if (!G.Mask.isAllOnes() && isa_and_nonnull<UndefValue>(G.OldValue))
+      return false;
+
   observeFieldDefinitions(*Left, FieldDefinitions);
   observeFieldDefinitions(*Right, FieldDefinitions);
-  for (const Write &W : Writes) {
-    int Index = Result.VirtualObjects[*Right]->getOrCreateFieldIndex(
-        W.Offset, W.Value->getType(), DL);
-    assert(Index >= 0 && "validated string destination cell");
-    (void)Index;
-    FieldStates[*Right][W.Offset] = FieldValue::scalar(W.Value);
-    // The retained JavaOp supplies these writes if the owner is ineligible;
-    // no individual eliminated StoreInst defines the new cell.
-    FieldDefinitions[*Right][W.Offset].clear();
+  for (const GroupWrite &G : Groups) {
+    Type *Ty = Type::getIntNTy(F.getContext(), G.Mask.getBitWidth());
+    Value *V = ConstantInt::get(Ty, G.Bits);
+    if (!G.Mask.isAllOnes() && G.OldValue) {
+      if (auto *C = dyn_cast<Constant>(G.OldValue)) {
+        Constant *Old =
+            ConstantFoldCastOperand(Instruction::BitCast, C, Ty, DL);
+        Old = ConstantFoldBinaryOpOperands(Instruction::And, Old,
+                                           ConstantInt::get(Ty, ~G.Mask), DL);
+        V = ConstantFoldBinaryOpOperands(Instruction::Or, Old,
+                                         cast<Constant>(V), DL);
+      } else {
+        Value *Old = G.OldValue;
+        if (Old->getType() != Ty)
+          Old = placeStringInstruction(new BitCastInst(Old, Ty, "string.bits"),
+                                       CB);
+        Old = placeStringInstruction(
+            BinaryOperator::CreateAnd(Old, ConstantInt::get(Ty, ~G.Mask),
+                                      "string.keep"),
+            CB);
+        V = placeStringInstruction(
+            BinaryOperator::CreateOr(Old, V, "string.write"), CB);
+      }
+    }
+    FieldStates[*Right][G.Offset] = FieldValue::scalar(V);
+    // Retaining the JavaOp also retains its reaching destination stores;
+    // together they supply the updated group if virtualization is cancelled.
+    FieldDefinitions[*Right][G.Offset].clear();
   }
   return Finish(Return, *Right);
 }
@@ -8201,6 +8343,7 @@ bool Analyzer::processCopyCall(CallBase *CB) {
   const bool SrcVirtual = SrcIdentity.isDefined();
   const jeandle::VirtualObject *Src = nullptr;
   uintptr_t CheckedElementKlass = 0;
+  uintptr_t ConcreteElementKlass = 0;
   if (SrcVirtual) {
     jeandle::ObjectID SrcID = SrcIdentity.getObjectID();
     if (!Eligible.lookup(SrcID))
@@ -8273,6 +8416,10 @@ bool Analyzer::processCopyCall(CallBase *CB) {
     if (!copyElementKindsCompatible(SrcJT.Klass, Dest.Klass,
                                     SrcElem == jeandle::JBasicType::Object, CB))
       return false;
+    if (SrcElem == jeandle::JBasicType::Object)
+      if (const auto *Callbacks = jeandle::getVMCallbacks();
+          Callbacks && Callbacks->ArrayElementKlass)
+        ConcreteElementKlass = Callbacks->ArrayElementKlass(SrcJT.Klass);
     // Source bounds: the analyzer cannot see the concrete array's length, so
     // the proof must come from the call shape — a constant srcLength operand,
     // the clone identity (arg4 IS the source length, srcPos == 0), or the
@@ -8326,6 +8473,34 @@ bool Analyzer::processCopyCall(CallBase *CB) {
                                   *SrcPos, *DestPos, *Len, PackedValues))
       return false;
   } else {
+    // Descriptors are sorted and non-overlapping. Validate the entire
+    // reference window once, independently of the memmove traversal order.
+    // This also avoids retaining iterators while a same-VO copy adds fields.
+    if (SrcVirtual && *Len > 0) {
+      auto Lo = checkedArrayElementOffset(Src->ArrayBaseOffset, *SrcPos,
+                                          Src->ArrayIndexScale);
+      auto EndIndex = checkedOffsetAdd(*SrcPos, *Len);
+      auto Hi = EndIndex
+                    ? checkedArrayElementOffset(Src->ArrayBaseOffset, *EndIndex,
+                                                Src->ArrayIndexScale)
+                    : std::nullopt;
+      if (!Lo || !Hi)
+        return false;
+      for (const auto &FD : Src->Fields) {
+        auto FieldEnd = checkedOffsetAdd(FD.Offset, FD.ByteSize);
+        if (!FieldEnd)
+          return false;
+        if (*FieldEnd <= *Lo)
+          continue;
+        if (FD.Offset >= *Hi)
+          break;
+        if (FD.Offset < *Lo || *FieldEnd > *Hi ||
+            (FD.Offset - *Lo) % Src->ArrayIndexScale != 0 ||
+            FD.ByteSize != Src->ArrayIndexScale ||
+            FD.LLVMType != Src->ArrayElementType)
+          return false;
+      }
+    }
     Offsets.reserve(*Len);
     for (int64_t K = 0; K < *Len; ++K) {
       int64_t I = Reverse ? (*Len - 1 - K) : K;
@@ -8343,26 +8518,6 @@ bool Analyzer::processCopyCall(CallBase *CB) {
           !isUsableFieldOffset(*DestOff))
         return false;
       if (SrcVirtual) {
-        // An element may intersect a packed store that starts at another
-        // offset. Only transfer whole slots in the array's physical element
-        // representation; all other overlaps require the real memory copy.
-        std::optional<int64_t> SrcElemEnd =
-            checkedOffsetAdd(*SrcOff, Src->ArrayIndexScale);
-        if (!SrcElemEnd)
-          return false;
-        for (const auto &FD : Src->Fields) {
-          std::optional<int64_t> FieldEnd =
-              checkedOffsetAdd(FD.Offset, FD.ByteSize);
-          if (!FieldEnd)
-            return false;
-          if (*FieldEnd <= *SrcOff)
-            continue;
-          if (FD.Offset >= *SrcElemEnd)
-            break;
-          if (FD.Offset != *SrcOff || FD.ByteSize != Src->ArrayIndexScale ||
-              FD.LLVMType != Src->ArrayElementType)
-            return false;
-        }
         const auto SrcFieldsIt = FieldStates.find(SrcIdentity.getObjectID());
         if (SrcFieldsIt != FieldStates.end()) {
           auto It = SrcFieldsIt->second.find(*SrcOff);
@@ -8383,9 +8538,19 @@ bool Analyzer::processCopyCall(CallBase *CB) {
                 while (Value *Alias = Aliases.getScalarAlias(Entry))
                   Entry = Alias;
                 IsNull = isa<ConstantPointerNull>(Entry);
-                if (!IsNull)
+                if (!IsNull) {
+                  // Analysis-owned values have no CFG position until effects
+                  // are applied. Their type comes from the producer metadata
+                  // and identity chain; LVI can only query parented values.
+                  auto *EntryI = dyn_cast<Instruction>(Entry);
+                  bool Deferred = EntryI && !EntryI->getParent();
                   EntryKlass =
-                      jeandle::getJavaType(Entry, &DT, CB, IsNullEdge).Klass;
+                      (Deferred
+                           ? jeandle::getJavaType(Entry, nullptr, nullptr,
+                                                  nullptr)
+                           : jeandle::getJavaType(Entry, &DT, CB, IsNullEdge))
+                          .Klass;
+                }
               }
               if (!IsNull) {
                 if (!EntryKlass)
@@ -8444,7 +8609,8 @@ bool Analyzer::processCopyCall(CallBase *CB) {
       }
     } else {
       Value *Load = getOrCreateCopyElementSemanticLoad(
-          CB, CB->getArgOperand(0), Dest.ArrayElementType, SrcOff);
+          CB, CB->getArgOperand(0), Dest.ArrayElementType, SrcOff,
+          ConcreteElementKlass);
       DestFields[DestOff] = jeandle::FieldValue::scalar(Load);
     }
   }
@@ -8522,7 +8688,8 @@ bool Analyzer::processCopyCall(CallBase *CB) {
 Value *Analyzer::getOrCreateCopyElementSemanticLoad(CallBase *Copy,
                                                     Value *ConcreteSrc,
                                                     Type *ElemTy,
-                                                    int64_t SrcOff) {
+                                                    int64_t SrcOff,
+                                                    uintptr_t ValueKlass) {
   // Registration order fixes the physical order: each instruction's
   // PlaceInstructionEffect inserts it immediately before the copy, so
   // ascending SeqNos land as Addr, Load, Cast.
@@ -8575,6 +8742,18 @@ Value *Analyzer::getOrCreateCopyElementSemanticLoad(CallBase *Copy,
                             static_cast<Instruction *>(nullptr));
   Load->setAtomic(AtomicOrdering::Unordered);
   Load->setDebugLoc(Copy->getDebugLoc());
+  // The source component/declared field bounds every non-null loaded oop.
+  // Keep this fact on the load at the copy's control position; a folded
+  // destination load may have stronger, path-local metadata of its own.
+  const auto *Callbacks = jeandle::getVMCallbacks();
+  if (ValueKlass && (!Callbacks || !Callbacks->IsUnverifiedInterface ||
+                     Callbacks->IsUnverifiedInterface(ValueKlass)))
+    ValueKlass = 0;
+  if (ElemTy->isPointerTy() && ValueKlass)
+    Load->setMetadata(
+        jeandle::Metadata::JavaKlass,
+        MDNode::get(
+            Ctx, {ConstantAsMetadata::get(ConstantInt::get(I64, ValueKlass))}));
   Result.OwnedCopyLoads.emplace_back(Addr);
   Result.OwnedCopyLoads.emplace_back(Load);
   Place(Addr);
@@ -8672,7 +8851,12 @@ bool Analyzer::foldCloneInstanceConcreteSource(
   // getOrCreateFieldIndex may insert an inert FieldDesc on the validation
   // path — the accepted processStore pattern; a bail here materializes the
   // destination immediately.
-  SmallVector<std::pair<int64_t, Type *>, 8> Fields;
+  struct CloneField {
+    int64_t Offset;
+    Type *StorageTy;
+    uintptr_t ValueKlass;
+  };
+  SmallVector<CloneField, 8> Fields;
   for (const jeandle::CloneInstanceFieldInfo &Field : std::get<2>(Info)) {
     int64_t Off = std::get<0>(Field);
     auto BasicType = static_cast<jeandle::JBasicType>(std::get<1>(Field));
@@ -8690,7 +8874,11 @@ bool Analyzer::foldCloneInstanceConcreteSource(
       return false;
     if (Dest.getOrCreateFieldIndex(Off, StorageTy, DL) < 0)
       return false;
-    Fields.emplace_back(Off, StorageTy);
+    uintptr_t ValueKlass = 0;
+    if (StorageTy->isPointerTy() && VMCB->GetFieldType &&
+        Off <= std::numeric_limits<int>::max())
+      ValueKlass = VMCB->GetFieldType(Dest.Klass, static_cast<int>(Off));
+    Fields.push_back({Off, StorageTy, ValueKlass});
   }
 
   // Commit: no failure paths beyond this point. Materialize the outer map
@@ -8699,16 +8887,16 @@ bool Analyzer::foldCloneInstanceConcreteSource(
   if (!FieldStates.count(DestID))
     (void)FieldStates[DestID];
   auto &DestFields = FieldStates[DestID];
-  for (const auto &[Off, StorageTy] : Fields) {
+  for (const auto &[Off, StorageTy, ValueKlass] : Fields) {
     Value *Load = getOrCreateCopyElementSemanticLoad(
-        CB, CB->getArgOperand(0), StorageTy, Off);
+        CB, CB->getArgOperand(0), StorageTy, Off, ValueKlass);
     DestFields[Off] = jeandle::FieldValue::scalar(Load);
   }
   // Window slots that are not declared fields revert to their defaults: the
   // full-coverage clone overwrote whatever a stale store had put there.
   DenseSet<int64_t> FieldOffsets;
-  for (const auto &[Off, StorageTy] : Fields)
-    FieldOffsets.insert(Off);
+  for (const auto &Field : Fields)
+    FieldOffsets.insert(Field.Offset);
   SmallVector<int64_t, 8> Stale;
   for (const auto &[Off, FV] : DestFields)
     if (Off >= BaseOff && Off < PayloadEnd && !FieldOffsets.count(Off))

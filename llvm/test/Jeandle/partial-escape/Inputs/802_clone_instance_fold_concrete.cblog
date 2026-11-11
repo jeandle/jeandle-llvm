@@ -21,3 +21,4 @@ CanVirtualize 30009 = true
 IsInterface 30009 = false
 GetSecondarySupers 30009 = []
 GetCloneInstanceInfo 30009 true 0 = (4, 2, [(16, 0), (20, 4)])
+GetFieldType 30001 24 = 0
