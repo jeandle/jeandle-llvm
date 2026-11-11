@@ -22,7 +22,7 @@ namespace llvm {
 class Function;
 class BasicBlock;
 class Instruction;
-class CallInst;
+class CallBase;
 class Loop;
 class LoopInfo;
 class PHINode;
@@ -74,14 +74,14 @@ struct AncestorPollRequirements {
   bool AnyLatchlessUncoveredAncestor = false;
   SmallVector<BasicBlock *, 4> Latches;
 
-  bool isRequired(const CallInst &Poll, DominatorTree &DT) const;
+  bool isRequired(const CallBase &Poll, DominatorTree &DT) const;
 };
 
 AncestorPollRequirements computeAncestorPollRequirements(Loop &L, LoopInfo &LI,
                                                          DominatorTree &DT,
                                                          ScalarEvolution &SE);
 
-using RequiredPolls = SmallPtrSet<CallInst *, 8>;
+using RequiredPolls = SmallPtrSet<CallBase *, 8>;
 
 // Phase 1 (C2 IdealLoopTree::check_safepts). Process loops innermost-first:
 // for each loop, decide whether it already reaches a safepoint every iteration
@@ -94,7 +94,7 @@ void analyzeLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
 // owns on the dominator chain, preferring one an ancestor requires (it must
 // survive anyway). Returns null if no single poll dominates every back-edge
 // path.
-CallInst *findKeepOne(Loop &L, LoopInfo &LI, DominatorTree &DT,
+CallBase *findKeepOne(Loop &L, LoopInfo &LI, DominatorTree &DT,
                       const RequiredPolls &Required);
 
 // A safepoint poll that SafepointStripMining relocated onto the outer
