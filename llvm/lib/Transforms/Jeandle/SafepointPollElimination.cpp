@@ -14,6 +14,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CFG.h"
+#include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
@@ -27,6 +28,7 @@
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Jeandle/SafepointUtils.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 
@@ -90,7 +92,9 @@ bool collapseRedundantPolls(BasicBlock &BB) {
     // Delete all safepoint polls.
     for (Instruction &I : llvm::make_early_inc_range(BB)) {
       if (isSafepointPoll(I)) {
-        auto *P = cast<CallInst>(&I);
+        auto *P = dyn_cast<CallInst>(&I);
+        if (!P)
+          continue;
         LLVM_DEBUG(dbgs() << "  collapse: erased a redundant poll in "
                           << BB.getName() << "\n");
         P->eraseFromParent();
@@ -108,13 +112,35 @@ bool collapseRedundantPolls(BasicBlock &BB) {
       break;
     if (!isSafepointPoll(I))
       continue;
-    auto *P = cast<CallInst>(&I);
+    auto *P = dyn_cast<CallInst>(&I);
+    if (!P)
+      continue;
     LLVM_DEBUG(dbgs() << "  collapse: erased a redundant poll in "
                       << BB.getName() << "\n");
     P->eraseFromParent();
     Changed = true;
   }
   return Changed;
+}
+
+bool eraseLoopPoll(CallBase *Poll, Loop &L, DomTreeUpdater &DTU) {
+  if (auto *Invoke = dyn_cast<InvokeInst>(Poll)) {
+    // General EH-edge deletion can make another loop unreachable and invalidate
+    // this traversal's LoopInfo. Only remove a redundant inner invoke when the
+    // enclosing strip-mined latch still reaches the same external handler.
+    Loop *Outer = L.getParentLoop();
+    BasicBlock *OuterLatch = Outer ? Outer->getLoopLatch() : nullptr;
+    auto *Keeper = OuterLatch
+                       ? dyn_cast<InvokeInst>(OuterLatch->getTerminator())
+                       : nullptr;
+    if (!Keeper || !jeandle::isStripMinedPoll(*Keeper) ||
+        Keeper->getUnwindDest() != Invoke->getUnwindDest() ||
+        Outer->contains(Invoke->getUnwindDest()))
+      return false;
+    Poll = changeToCall(Invoke, &DTU);
+  }
+  Poll->eraseFromParent();
+  return true;
 }
 
 // ===--------------------------------------------------------------------===//
@@ -136,17 +162,17 @@ bool collapseRedundantPolls(BasicBlock &BB) {
 // otherwise it keeps one dominating poll (prune gate: no dominating keeper ⇒
 // delete nothing).
 static bool deleteLoopPolls(Loop &L, LoopInfo &LI, DominatorTree &DT,
-                            ScalarEvolution &SE,
+                            DomTreeUpdater &DTU, ScalarEvolution &SE,
                             const SmallPtrSetImpl<Loop *> &HasSfpt,
                             const RequiredPolls &Required,
                             SafepointPollEliminationMode Mode) {
-  SmallVector<CallInst *, 4> OwnPolls;
+  SmallVector<CallBase *, 4> OwnPolls;
   for (BasicBlock *BB : L.blocks()) {
     if (LI.getLoopFor(BB) != &L)
       continue;
     for (Instruction &I : *BB)
       if (isSafepointPoll(I))
-        OwnPolls.push_back(cast<CallInst>(&I));
+        OwnPolls.push_back(cast<CallBase>(&I));
   }
   if (OwnPolls.empty())
     return false;
@@ -159,7 +185,7 @@ static bool deleteLoopPolls(Loop &L, LoopInfo &LI, DominatorTree &DT,
     return false;
   }
 
-  auto IsDeleteable = [&](CallInst *P) { return !Required.contains(P); };
+  auto IsDeleteable = [&](CallBase *P) { return !Required.contains(P); };
 
   jeandle::LoopSafepointFacts Facts = jeandle::LoopSafepointFacts::get(L, SE);
   const char *Reason = nullptr;
@@ -176,11 +202,12 @@ static bool deleteLoopPolls(Loop &L, LoopInfo &LI, DominatorTree &DT,
   if (DeleteAll) {
     bool Changed = false;
     [[maybe_unused]] unsigned Erased = 0;
-    for (CallInst *P : OwnPolls) {
+    for (CallBase *P : OwnPolls) {
       if (IsDeleteable(P)) {
-        P->eraseFromParent();
-        Changed = true;
-        ++Erased;
+        if (eraseLoopPoll(P, L, DTU)) {
+          Changed = true;
+          ++Erased;
+        }
       } else {
         LLVM_DEBUG(dbgs() << "    poll-elimination: kept ancestor-required "
                              "poll in "
@@ -197,7 +224,7 @@ static bool deleteLoopPolls(Loop &L, LoopInfo &LI, DominatorTree &DT,
   }
 
   // keep-one: retain one dominating poll, erase the rest.
-  CallInst *Keep = findKeepOne(L, LI, DT, Required);
+  CallBase *Keep = findKeepOne(L, LI, DT, Required);
   if (!Keep) {
     // no single poll dominates all paths — prune gate
     LLVM_DEBUG(dbgs() << "  poll-elimination<" << modeName(Mode) << "> loop "
@@ -207,16 +234,19 @@ static bool deleteLoopPolls(Loop &L, LoopInfo &LI, DominatorTree &DT,
   }
   bool Changed = false;
   [[maybe_unused]] unsigned Erased = 0;
-  for (CallInst *P : OwnPolls)
+  for (CallBase *P : OwnPolls)
     if (P != Keep && IsDeleteable(P)) {
-      P->eraseFromParent();
-      Changed = true;
-      ++Erased;
+      if (eraseLoopPoll(P, L, DTU)) {
+        Changed = true;
+        ++Erased;
+      }
     }
   LLVM_DEBUG(dbgs() << "  poll-elimination<" << modeName(Mode) << "> loop "
                     << L.getHeader()->getName() << ": keep-one (keeper in "
                     << Keep->getParent()->getName() << "), erased " << Erased
                     << " of " << OwnPolls.size() << " poll(s)\n");
+  if (Changed)
+    SE.forgetLoop(&L);
   return Changed;
 }
 
@@ -312,7 +342,10 @@ buildEmptyLoopPollRemovalPlan(Loop *L, LoopInfo &LI, DominatorTree &DT,
   for (BasicBlock *BB : L->blocks()) {
     for (Instruction &I : *BB) {
       if (isSafepointPoll(I)) {
-        Polls.push_back(cast<CallInst>(&I));
+        auto *Poll = dyn_cast<CallInst>(&I);
+        if (!Poll)
+          return std::nullopt;
+        Polls.push_back(Poll);
         continue;
       }
       if (isa<CallBase>(I) || I.mayReadOrWriteMemory() ||
@@ -443,10 +476,12 @@ static bool completeLoopPollDeletion(Function &F, LoopInfo &LI,
     analyzeLoop(*L, LI, DT, HasSfpt, Required);
 
   bool Changed = false;
+  DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Eager);
   for (Loop *L : llvm::reverse(Loops)) {
     if (DeferredEmptyLoops.contains(L))
       continue;
-    Changed |= deleteLoopPolls(*L, LI, DT, SE, HasSfpt, Required, Mode);
+    if (deleteLoopPolls(*L, LI, DT, DTU, SE, HasSfpt, Required, Mode))
+      Changed = true;
   }
   return Changed;
 }
