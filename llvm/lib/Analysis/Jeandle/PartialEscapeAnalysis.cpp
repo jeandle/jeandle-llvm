@@ -8146,6 +8146,8 @@ std::optional<int64_t> Analyzer::getCopyConstantI64(Value *V) {
     if (Cast->getOpcode() == Instruction::SExt ||
         Cast->getOpcode() == Instruction::ZExt)
       V = Cast->getOperand(0);
+  // TODO: Chase scalar aliases after peeling sext/zext so copy operands can
+  // fold to constants within the same PEA round.
   auto *CI = dyn_cast<ConstantInt>(V);
   if (!CI)
     return std::nullopt;
