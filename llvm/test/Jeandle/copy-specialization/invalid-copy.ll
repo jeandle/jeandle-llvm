@@ -28,11 +28,11 @@ attributes #1 = { "jeandle.copy.kind"="arraycopy" }
 
 ;--- allocation.ll
 @personality = global ptr null
-declare ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @jeandle.copy(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, ptr, ptr, i64, i64)
 
 define ptr addrspace(1) @hidden_allocation(ptr addrspace(1) %src) #0 personality ptr @personality {
-  %alloc = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000)
+  %alloc = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 false)
   %dst = freeze ptr addrspace(1) %alloc
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dst, i64 0, i64 8, ptr null, ptr null, i64 8, i64 8) #1 [ "deopt"(i32 0) ] to label %normal unwind label %exception
 normal:

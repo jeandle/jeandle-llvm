@@ -29,7 +29,9 @@
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
+#include "llvm/IR/Jeandle/StringIntrinsics.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
+#include "llvm/IR/Jeandle/VMConstants.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/Support/Debug.h"
@@ -44,6 +46,8 @@
 using namespace llvm;
 
 STATISTIC(NumFieldsFolded, "Number of constant field loads folded");
+STATISTIC(NumArrayLengthsFolded, "Number of jeandle.arraylength calls folded");
+STATISTIC(NumStringCharsFolded, "Number of StringUTF16.getChar calls folded");
 STATISTIC(NumKlassesFolded, "Number of jeandle.load_klass calls folded");
 STATISTIC(NumMirrorKlassesFolded,
           "Number of jeandle.load_mirror_klass calls folded");
@@ -325,6 +329,70 @@ Constant *klassPointerConstant(LLVMContext &Ctx, Type *Ty, uintptr_t Klass) {
     return nullptr;
   return ConstantExpr::getIntToPtr(
       ConstantInt::get(Type::getInt64Ty(Ctx), Klass), Ty);
+}
+
+bool foldStringGetCharCall(CallInst *CI, const jeandle::VMCallbacks &CB,
+                           const DenseMap<Value *, int> &ConstOops,
+                           const jeandle::VMConstants &VMConsts,
+                           LazyValueInfo &LVI) {
+  std::optional<int> OopId = lookupConstOop(CI->getArgOperand(0), ConstOops);
+  if (!OopId)
+    return false;
+  auto *Index = dyn_cast<ConstantInt>(CI->getArgOperand(1));
+  if (!Index)
+    Index = dyn_cast_or_null<ConstantInt>(
+        LVI.getConstant(CI->getArgOperand(1), CI));
+  int64_t Base = VMConsts.arrayBaseOffsetFor(jeandle::JBasicType::Byte);
+  if (!Index || Index->isNegative() || Base < 0 || Base >= INT_MAX ||
+      Index->getSExtValue() > (INT_MAX - Base - 1) / 2)
+    return false;
+  int Offset = Base + Index->getSExtValue() * 2;
+  // Both byte cells must be independently authorized. Unresolved characters
+  // retain the JavaOp and eventually lower to one atomic word read.
+  auto [FirstType, First] = CB.GetConstantField(*OopId, Offset);
+  if (FirstType != T_BYTE)
+    return false;
+  auto [SecondType, Second] = CB.GetConstantField(*OopId, Offset + 1);
+  if (SecondType != T_BYTE)
+    return false;
+  uint16_t A = static_cast<uint8_t>(First);
+  uint16_t B = static_cast<uint8_t>(Second);
+  uint16_t Character = CI->getModule()->getDataLayout().isLittleEndian()
+                           ? A | (B << 8)
+                           : (A << 8) | B;
+  LLVM_DEBUG(dbgs() << "CFF: StringUTF16.getChar in "
+                    << CI->getFunction()->getName() << " oop=" << *OopId
+                    << " offset=" << Offset << " value=" << Character << "\n");
+  CI->replaceAllUsesWith(ConstantInt::get(CI->getType(), Character));
+  CI->eraseFromParent();
+  return true;
+}
+
+bool isArrayLengthCall(CallInst *CI) {
+  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+  return Callee && Callee->getName() == "jeandle.arraylength" &&
+         CI->getFunctionType() == Callee->getFunctionType() &&
+         !CI->getFunctionType()->isVarArg() && CI->arg_size() == 1 &&
+         CI->getType()->isIntegerTy(32) &&
+         isWideOopType(CI->getArgOperand(0)->getType()) &&
+         !CI->hasOperandBundles() && !CI->isMustTailCall();
+}
+
+bool foldArrayLengthCall(CallInst *CI, const jeandle::VMCallbacks &CB,
+                         const DenseMap<Value *, int> &ConstOops,
+                         const jeandle::VMConstants &VMConsts) {
+  std::optional<int> OopId = lookupConstOop(CI->getArgOperand(0), ConstOops);
+  int64_t Offset = VMConsts.arrayLengthOffset();
+  if (!OopId || Offset < 0 || Offset > INT_MAX)
+    return false;
+
+  auto [BasicType, RawValue] = CB.GetConstantField(*OopId, Offset);
+  if (BasicType != T_INT || RawValue < 0 || RawValue > INT_MAX)
+    return false;
+
+  CI->replaceAllUsesWith(ConstantInt::get(CI->getType(), RawValue));
+  CI->eraseFromParent();
+  return true;
 }
 
 bool isLoadKlassCall(CallInst *CI) {
@@ -737,6 +805,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
   assert(CB && CB->GetConstantField && "VMCallbacks must be set");
 
   const DataLayout &DL = M->getDataLayout();
+  const jeandle::VMConstants VMConsts = jeandle::VMConstants::fromModule(*M);
 
   // Share Java type results across folding rounds, notifying the cache while
   // each replaced value and its old users are still live. A changed run does
@@ -759,6 +828,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     ReversePostOrderTraversal<Function *> RPOT(&F);
     DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
 
+    SmallVector<CallInst *, 16> ArrayLengthCalls;
+    SmallVector<CallInst *, 16> StringGetCharCalls;
     SmallVector<CallInst *, 16> LoadKlassCalls;
     SmallVector<CallInst *, 16> LoadMirrorKlassCalls;
     SmallVector<CallInst *, 16> GetClassCalls;
@@ -768,6 +839,10 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (BasicBlock *BB : RPOT) {
       for (Instruction &I : *BB) {
         if (auto *CI = dyn_cast<CallInst>(&I)) {
+          if (jeandle::isStringGetChar(*CI))
+            StringGetCharCalls.push_back(CI);
+          if (isArrayLengthCall(CI))
+            ArrayLengthCalls.push_back(CI);
           if (isLoadKlassCall(CI))
             LoadKlassCalls.push_back(CI);
           if (isLoadMirrorKlassCall(CI))
@@ -781,6 +856,22 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
         }
         if (auto *LI = dyn_cast<LoadInst>(&I))
           Loads.push_back(LI);
+      }
+    }
+
+    for (CallInst *CI : ArrayLengthCalls) {
+      if (foldArrayLengthCall(CI, *CB, ConstOops, VMConsts)) {
+        ++NumArrayLengthsFolded;
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
+    for (CallInst *CI : StringGetCharCalls) {
+      if (foldStringGetCharCall(CI, *CB, ConstOops, VMConsts, LVI)) {
+        ++NumStringCharsFolded;
+        RoundChanged = true;
+        Changed = true;
       }
     }
 

@@ -6,14 +6,14 @@
 ; guards both instance and array header offsets, so this access is rejected and
 ; the array stays real.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
 define void @test_array_header_offset_guard() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 9999 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 9999 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
        to label %n unwind label %u
 n:
   ; Raw i8 GEP into the array header (offset 4 < ArrayBaseOffset 16).

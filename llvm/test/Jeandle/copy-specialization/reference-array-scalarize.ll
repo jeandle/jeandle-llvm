@@ -16,7 +16,7 @@ target datalayout = "e-p:64:64-p3:32:32"
 @WordSize = constant i64 8
 @personality = global ptr null
 
-declare "java-klass"="202" ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare "java-klass"="202" ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @jeandle.copy(ptr addrspace(1), i64, ptr addrspace(1), i64, i64, ptr, ptr, i64, i64)
 declare void @StubRoutines_arrayof_oop_disjoint_arraycopy(ptr addrspace(1), ptr addrspace(1), i64)
 declare void @StubRoutines_arrayof_oop_disjoint_arraycopy_uninit(ptr addrspace(1), ptr addrspace(1), i64)
@@ -28,7 +28,7 @@ declare hotspotcc void @jeandle.post_barrier(ptr addrspace(1), ptr addrspace(1))
 
 define ptr addrspace(1) @small_copyof(ptr addrspace(1) "java-klass"="201" %src) #0 personality ptr @personality {
 entry:
-  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 80, i32 16, i32 1000)
+  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 80, i32 16, i32 1000, i1 false, i1 false)
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dest, i64 0, i64 8, ptr null, ptr null, i64 8, i64 8) #1 [ "deopt"(i32 0) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %dest
@@ -66,7 +66,7 @@ exception:
 
 define ptr addrspace(1) @small_range(ptr addrspace(1) "java-klass"="201" %src) #0 personality ptr @personality {
 entry:
-  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 9, i32 88, i32 16, i32 1000)
+  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 9, i32 88, i32 16, i32 1000, i1 false, i1 false)
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 1, ptr addrspace(1) %dest, i64 0, i64 1, ptr null, ptr null, i64 2, i64 9) #2 [ "deopt"(i32 0) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %dest
@@ -89,7 +89,7 @@ exception:
 
 define ptr addrspace(1) @empty_copyof(ptr addrspace(1) "java-klass"="201" %src) #0 personality ptr @personality {
 entry:
-  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 0, i32 16, i32 16, i32 1000)
+  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 0, i32 16, i32 16, i32 1000, i1 false, i1 false)
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dest, i64 0, i64 0, ptr null, ptr null, i64 8, i64 0) #1 [ "deopt"(i32 0) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %dest
@@ -108,7 +108,7 @@ exception:
 
 define ptr addrspace(1) @large_copyof(ptr addrspace(1) "java-klass"="201" %src) #0 personality ptr @personality {
 entry:
-  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 9, i32 88, i32 16, i32 1000)
+  %dest = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 9, i32 88, i32 16, i32 1000, i1 false, i1 false)
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dest, i64 0, i64 9, ptr null, ptr null, i64 9, i64 9) #1 [ "deopt"(i32 0) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %dest
@@ -143,7 +143,7 @@ exception:
 ; Validated System.arraycopy into a fresh array shares the same safe policy.
 define ptr addrspace(1) @fresh_arraycopy(ptr addrspace(1) "java-klass"="201" %src) #0 personality ptr @personality {
 entry:
-  %dest = call "java-klass"="202" ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 80, i32 16, i32 1000)
+  %dest = call "java-klass"="202" ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 80, i32 16, i32 1000, i1 false, i1 false)
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dest, i64 0, i64 8, ptr null, ptr null, i64 8, i64 8) #4 [ "deopt"(i32 0) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %dest

@@ -14,14 +14,14 @@
 @arrayOopDesc.base_offset_in_bytes.int = private constant i32 24
 @arrayOopDesc.element_size.int         = private constant i32 4
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 
 declare i32 @__gxx_personality_v0(...)
 
 define i32 @test_base_offset_24() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 54321 to ptr), i32 2, i32 32, i32 24, i32 1048576)
+            ptr inttoptr (i64 54321 to ptr), i32 2, i32 32, i32 24, i32 1048576, i1 false, i1 false)
          to label %n unwind label %u
 n:
   ; Note: base offset is 24, not the compile-time default 16.

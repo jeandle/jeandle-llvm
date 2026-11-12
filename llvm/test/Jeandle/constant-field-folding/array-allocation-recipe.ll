@@ -10,7 +10,7 @@
 @oop_handle_Test_0 = external global ptr addrspace(1)
 declare hotspotcc ptr @jeandle.load_klass(ptr addrspace(1))
 declare hotspotcc i32 @jeandle.layout_helper(ptr)
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare i32 @personality(...)
 declare void @observe_exception()
 
@@ -28,7 +28,7 @@ entry:
   %size = and i32 %rounded, -8
   %scale = sub i32 3, %shift
   %limit = shl i32 131072, %scale
-  %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %klass, i32 %length, i32 %size, i32 %header, i32 %limit) [ "deopt"(ptr addrspace(1) %obj) ] to label %normal unwind label %exception
+  %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %klass, i32 %length, i32 %size, i32 %header, i32 %limit, i1 false, i1 false) [ "deopt"(ptr addrspace(1) %obj) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %array
 exception:
@@ -41,7 +41,7 @@ exception:
 ; CHECK-NOT: call hotspotcc {{.*}}@jeandle.{{(load_klass|layout_helper)}}
 ; CHECK: %body = shl i32 %length, [[SHIFT]]
 ; CHECK: %total = add i32 %body, [[HEADER]]
-; CHECK: invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 [[KLASS]] to ptr), i32 %length, i32 %size, i32 [[HEADER]], i32 [[LIMIT]]) [ "deopt"(ptr addrspace(1) %obj) ]
+; CHECK: invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 [[KLASS]] to ptr), i32 %length, i32 %size, i32 [[HEADER]], i32 [[LIMIT]], i1 false, i1 false) [ "deopt"(ptr addrspace(1) %obj) ]
 ; CHECK: to label %normal unwind label %exception
 ; CHECK: ret ptr addrspace(1) %array
 ; CHECK: resume { ptr, i32 } %ex
@@ -65,7 +65,7 @@ merge:
   %size = and i32 %rounded, -8
   %scale = sub i32 3, %shift
   %limit = shl i32 131072, %scale
-  %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %klass, i32 %length, i32 %size, i32 %header, i32 %limit) [ "deopt"(i32 %length) ] to label %normal unwind label %exception
+  %array = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %klass, i32 %length, i32 %size, i32 %header, i32 %limit, i1 false, i1 false) [ "deopt"(i32 %length) ] to label %normal unwind label %exception
 normal:
   ret ptr addrspace(1) %array
 exception:
@@ -79,7 +79,7 @@ exception:
 ; CHECK: %layout = call hotspotcc i32 @jeandle.layout_helper(ptr %klass)
 ; CHECK: %body = shl i32 %length, %shift
 ; CHECK: %limit = shl i32 131072, %scale
-; CHECK: invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %klass, i32 %length, i32 %size, i32 %header, i32 %limit) [ "deopt"(i32 %length) ]
+; CHECK: invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr %klass, i32 %length, i32 %size, i32 %header, i32 %limit, i1 false, i1 false) [ "deopt"(i32 %length) ]
 ; CHECK: to label %normal unwind label %exception
 ; CHECK: ret ptr addrspace(1) %array
 

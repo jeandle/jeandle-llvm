@@ -7,7 +7,7 @@
 ; Keep these as separate ordered checks: LLVM prints pass parameters, and
 ; target-specific passes can be inserted between the semantic stages.
 ; PEA-ON: {{.*jeandle-inline-driver,}}
-; PEA-ON: function(java-op-length-folding,loop-simplify,
+; PEA-ON: function(java-op-length-folding,string-intrinsic-specialization,loop-simplify,
 ; PEA-ON: {{.*loop\(loop-rotate.*indvars,loop-deletion\),}}
 ; PEA-ON: loop-unroll<no-partial;no-runtime;no-upperbound;full-unroll-max=128;O3>,
 ; PEA-ON: {{.*function\(partial-escape-iterative\),}}

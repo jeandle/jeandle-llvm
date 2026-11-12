@@ -12,14 +12,14 @@
 ; rebuilding an array (uniform elements indexed by offset) rather than walking
 ; an InstanceKlass field layout.
 
-declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32)
+declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i1, i1)
 declare void @sink(i32, i32)
 declare i32 @__gxx_personality_v0(...)
 
 define void @array_int_deopt() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %arr = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(
-            ptr inttoptr (i64 51001 to ptr), i32 4, i32 32, i32 16, i32 1048576)
+            ptr inttoptr (i64 51001 to ptr), i32 4, i32 32, i32 16, i32 1048576, i1 false, i1 false)
          to label %n unwind label %u
 n:
   ; int[] base 16, scale 4: index 1 @ byte offset 20, index 3 @ offset 28.
