@@ -1,0 +1,16 @@
+GetCHAOptInfo 100 200 300 0 false 5 5 = (601, 700, 13, "Optimized_target")
+GetCHAOptInfo 100 200 300 22 false 0 -1 = (22, 700, 48, "Optimized_target")
+GetCHAOptInfo 100 200 300 22 true 0 -1 = (22, 700, 48, "Optimized_target")
+GetSignatureArgType 700 -1 = 12
+GetSignatureArgType 700 0 = 12
+GetSignatureArgTypeKlass 700 0 = 22
+IsSubtype 22 22 = true
+IsInterface 22 = false
+IsObjectKlass 22 = false
+IsEffectivelyFinal 22 = false
+GetSecondarySupers 22 = []
+GetCommonSuperKlass 22 22 = 22
+UpdateCallSite 42 0 true 700 = true
+UpdateCallSite 42 2 false 700 = true
+UpdateCallSite 43 0 true 700 = true
+UpdateCallSite 43 2 false 700 = true

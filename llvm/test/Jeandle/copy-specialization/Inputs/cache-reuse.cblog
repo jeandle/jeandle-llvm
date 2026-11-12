@@ -1,0 +1,5 @@
+# A non-exact source with an existing subclass declines field scalarization.
+# Both original copy sites therefore expand to the defined bulk clone helper.
+IsInterface 43 = false
+GetSecondarySupers 43 = []
+GetCloneInstanceInfo 43 false = (1, -1, [])

@@ -1,0 +1,14 @@
+{
+  "base": {
+    "opt": "/absolute/path/to/baseline/build/bin/opt",
+    "replay": "/absolute/path/to/replay-base",
+    "opt_flags": [],
+    "source_revision": "record the exact source commit and any local patch"
+  },
+  "new": {
+    "opt": "/absolute/path/to/candidate/build/bin/opt",
+    "replay": "/absolute/path/to/replay-new",
+    "opt_flags": [],
+    "source_revision": "record the exact source commit and any local patch"
+  }
+}

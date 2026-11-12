@@ -1,0 +1,7 @@
+# Receiver klass 123 is an exact, non-final class with the compile-time klass
+# constant 777, so jeandle.load_klass folds, while its Java mirror is
+# unavailable (-1), so jeandle.get_class stays and keeps issuing type queries.
+GetKlassConstant 123 = 777
+GetJavaMirror 123 = -1
+IsInterface 123 = false
+GetSecondarySupers 123 = []
