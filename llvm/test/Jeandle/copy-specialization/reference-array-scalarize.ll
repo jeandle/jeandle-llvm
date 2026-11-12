@@ -1,3 +1,6 @@
+; RUN: opt -S -verify-each -jeandle-verify-java-type-cache -passes=copy-specialization -jeandle-vm-callback-log=%S/Inputs/uninitialized-destination.cblog %s -o %t.cached.ll
+; RUN: opt -S -verify-each -jeandle-disable-java-type-cache -passes=copy-specialization -jeandle-vm-callback-log=%S/Inputs/uninitialized-destination.cblog %s -o %t.uncached.ll
+; RUN: diff %t.cached.ll %t.uncached.ll
 ; RUN: opt -S -verify-each -passes='copy-specialization' -jeandle-vm-callback-log=%S/Inputs/uninitialized-destination.cblog %s | FileCheck %s --check-prefixes=COMMON,SCALAR,NARROW
 ; RUN: sed 's/@heapOopSize = constant i32 4/@heapOopSize = constant i32 8/;s/@arrayOopDesc.element_size.object = constant i32 4/@arrayOopDesc.element_size.object = constant i32 8/' %s | opt -S -verify-each -passes='copy-specialization' -jeandle-vm-callback-log=%S/Inputs/uninitialized-destination.cblog | FileCheck %s --check-prefixes=COMMON,SCALAR,WIDE
 ; RUN: sed 's/@VMOptions.ReduceInitialCardMarks = constant i1 true/@VMOptions.ReduceInitialCardMarks = constant i1 false/' %s | opt -S -verify-each -passes='copy-specialization' -jeandle-vm-callback-log=%S/Inputs/uninitialized-destination.cblog | FileCheck %s --check-prefixes=COMMON,BULK
