@@ -16,6 +16,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
+#include "llvm/Analysis/Jeandle/JavaTypeAnalysis.h"
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
@@ -26,7 +27,6 @@
 #include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 
 #define DEBUG_TYPE "type-check-elimination"
 
@@ -67,14 +67,7 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
   if (!CheckFn && !SubtypeFn)
     return PreservedAnalyses::all();
 
-  DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
-  // The LVI snapshot stays safe for the whole pass because TCE only erases
-  // non-terminator CallInsts and never splits blocks: LVI's ValueHandles purge
-  // erased/RAUW'd values from its caches, and block-value state stays valid
-  // while the CFG is unchanged. A fold that touches terminators or blocks
-  // would need to drop the oracle first.
-  LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
-  LVINullEdgeOracle IsNullEdge{LVI};
+  auto &JavaTypes = FAM.getResult<jeandle::JavaTypeAnalysis>(F);
 
   // Collect check_instanceof and check_klass_subtype calls. CallInst only:
   // the check helpers are never emitted as invokes, and an invoke must not be
@@ -136,8 +129,7 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
     // helper's IR contract requires this oop operand to be non-null, so
     // check_instanceof-derived sharpening remains sound even though JavaType
     // itself does not model nullability.
-    jeandle::JavaType ObjType =
-        jeandle::getJavaType(Obj, &DT, CheckCB, IsNullEdge);
+    jeandle::JavaType ObjType = JavaTypes.getJavaType(Obj, CheckCB);
 
     // --- Fold to true: known subtype ---
     if ((ObjType.isKnown() && CB->IsSubtype(ObjType.Klass, SuperKlass)) ||
@@ -174,6 +166,13 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
   }
 
   // --- Apply all folds ---
+  // Notify before RAUW removes the old use graph. Batch notifications so
+  // checks with shared users traverse those users only once.
+  SmallVector<Value *, 16> ChangedChecks;
+  for (const FoldDecision &Fold : Folds)
+    ChangedChecks.push_back(Fold.Check);
+  if (!ChangedChecks.empty())
+    JavaTypes.invalidate(ChangedChecks);
   bool Changed = false;
   for (const FoldDecision &F : Folds)
     Changed |= foldCheckToConstant(F.Check, F.Result);
@@ -181,8 +180,13 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
   if (!Changed)
     return PreservedAnalyses::all();
 
+  // Replacing a check changes edge predicates even when CFG edges stay put.
+  FAM.getResult<LazyValueAnalysis>(F).clear();
+
   PreservedAnalyses PA;
   PA.preserveSet<CFGAnalyses>();
   PA.preserve<DominatorTreeAnalysis>();
+  PA.preserve<LazyValueAnalysis>();
+  PA.preserve<jeandle::JavaTypeAnalysis>();
   return PA;
 }
