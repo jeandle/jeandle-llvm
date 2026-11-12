@@ -25,9 +25,12 @@ flowchart TD
   H -->|否| S
   S --> Q[五参数 getJavaType，共享底层求解]
   Q --> V[Base / Defined / valueDimension / factsAt]
-  V --> E[Facts.getNullEdge / getGuard]
+  V --> D{共享 Paths 命中?}
+  D -->|是| T[合并值类型与路径事实]
+  D -->|否| E[路径模式直接算边 / 其他模式查边缓存]
+  E -->|边命中| T
   E -->|未命中或旁路| K[原 computeNullEdge / computeEdgeGuard]
-  V --> T[合并值类型与路径事实]
+  K --> T
   T --> I[包装按需写入顶层 Final]
   I --> X[退出包装时 Base.endQuery]
   X --> R
@@ -102,6 +105,7 @@ AnalysisResult 拥有缓存，引用 FAM 的 DT/LVI。StatsAnalysis 的 Function
 | --- | --- | --- | --- |
 | Base | `Value* → JavaType` | 与查询点无关的基础类型；可跨查询保留完成结果 | 删除受影响值；CFG 修改额外删除非叶子项 |
 | Defined | `Value* → bool` | 已完成的 definedness 证明，包括“未证明” | 使用同一受影响列表；CFG 修改额外删除其非叶子项 |
+| Facts.Paths | `(V, BB) → JavaType` | 到达块入口的完整累计 CFG 约束，命中跳过前驱子图 | IR/oracle 通知时整体清空 |
 | Facts.Guards | `(V, From, To) → JavaType` | 完整根 guard 调用从边条件提取的类型约束 | IR/oracle 通知时整体清空 |
 | Facts.NullEdges | `(V, From, To) → bool` | 同一 oracle 有效期内“是否证明 V 在该边为 null” | IR/oracle 通知时整体清空 |
 | Final | `(V, ContextBB) → JavaType` | 顶层查询的最终返回结果，Context 取所在块 | IR/oracle 通知时整体清空 |
@@ -123,10 +127,15 @@ Final 只在包装的顶层入口读写，不代替递归 `factsAt`、PHI incomi
 回调；模式、查找、写入、统计均在缓存类中处理。原求解器只保留计算
 helper，并在相应位置委托缓存类；回调只在本次调用期间使用，不被保存。
 
-| 配置 | Guards | NullEdges | Final |
+| 配置 | Paths | Guards / NullEdges | Final |
 | --- | --- | --- | --- |
-| 默认 `GuardOnly` | 根调用复用 | 每次调用 oracle/结构判断 | 不启用 |
-| `StableOracleEpoch` | 根调用复用 | 允许复用 | `EnableFinal` 为 true 时启用 |
+| 默认 `GuardOnly` | 不启用 | 根 guard 复用，null 判断每次计算 | 不启用 |
+| `StableOracleEpoch` | 默认共享完整累计事实 | 路径模式直接算边；关闭 Paths 时复用边表 | `EnableFinal` 为 true 时启用 |
+
+Paths 在 `factsAt` 的 seed cuts 后、`Processed` 和前驱遍历前查找，不限制
+根 Value 类型或全函数块数。预算耗尽或未切断循环设置 `FactsTruncated`，
+之后完成的块结果只留在查询内；此前已完成的结果仍可复用。完整 unknown
+也可保存。路径命中不消耗求解预算，暖查询可能比同预算冷查询更精确。
 
 `getGuard` 还接收 `ConditionDepth`。只有深度为 0 的根调用读写表，嵌套
 追踪旁路缓存，以保留原算法的递归深度限制。key 保留实际传入的 V，
@@ -141,7 +150,8 @@ Base/Defined；Analysis 接口只提供更保守的 `clear()`，它还清理 LVI
 
 共享求解器通过 `DefinedMemo` 选择自己的本地 bool 表或外部 Defined
 缓存；`JavaTypeQueryContext` 同样选择本地或外部 Base。递归工作栈、
-SCC 工作图、`Processed`、`ValueTypes`、PHI 环检测和求解预算仍查询内持有。
+SCC 工作图、`Processed`、`ValueTypes`、PHI 环检测和求解预算仍查询内持有；
+未截断的完成块事实可另外发布到 Facts.Paths。
 
 原 Base 使用 SCC 求解循环依赖；Defined 保守证明输入是否已定义。只有
 证明输入已定义，才能把 freeze 当成 identity 并继承输入的 Java 类型。
@@ -243,6 +253,8 @@ Facts helper 次数、LVI 内部 solve 次数和总耗时也不能互相替代�
 
 `-jeandle-disable-java-type-cache` 使用四参数路径；
 `-jeandle-verify-java-type-cache` 用该路径重算并比较完整 JavaType。
+若结果不同且冷查询实际发生 Facts 预算或循环截断，冷结果不足以要求
+严格相等，该次比较不报错，也不计为验证通过；未截断的差异仍报错。
 它与缓存路径使用同一求解器、同一个 DT/LVI，不是独立算法或全新 LVI
 实例，因此主要检查复用和失效一致性；独立构建 DT/AC/LVI 的测试另作补充。
 

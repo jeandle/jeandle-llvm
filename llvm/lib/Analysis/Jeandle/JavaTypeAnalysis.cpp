@@ -108,8 +108,8 @@ AnalysisKey JavaTypeAnalysis::Key;
 
 /// Query through caller-owned caches. Each cache owns its counters; the optional
 /// observer receives only this query's deltas. Verification reruns the shared
-/// solver without external caches and compares complete types, including
-/// truncated and cyclic queries with their query-local evaluation semantics.
+/// solver without external caches and compares complete types. A truncated
+/// cold reference cannot verify a more precise result obtained from warm paths.
 JavaType JavaTypeAnalysisResult::getJavaType(Value *V, Instruction *Context) {
   assert(V && "cannot query the Java type of a null Value");
   assert((!Context || Context->getFunction() == &F) &&
@@ -119,7 +119,7 @@ JavaType JavaTypeAnalysisResult::getJavaType(Value *V, Instruction *Context) {
   LVINullEdgeQuery OracleQuery(Observer != nullptr);
   LVINullEdgeOracle IsNullEdge{LVI, &OracleQuery};
   const bool Bypassed = DisableJavaTypeCache;
-  const bool Verified = VerifyJavaTypeCache && !Bypassed;
+  bool Verified = VerifyJavaTypeCache && !Bypassed;
   auto Query = [&] {
     JavaType Result = Bypassed
                           ? jeandle::getJavaType(V, &DT, Context, IsNullEdge)
@@ -127,9 +127,14 @@ JavaType JavaTypeAnalysisResult::getJavaType(Value *V, Instruction *Context) {
                                                 Cache);
     if (Verified) {
       LVINullEdgeOracle ReferenceOracle{LVI};
-      JavaType Fresh = jeandle::getJavaType(V, &DT, Context, ReferenceOracle);
-      if (Result != Fresh)
-        reportVerificationFailure(F, V, ContextBB, Result, Fresh);
+      bool FactsTruncated = false;
+      JavaType Fresh =
+          jeandle::getJavaType(V, &DT, Context, ReferenceOracle, &FactsTruncated);
+      if (Result != Fresh) {
+        if (!FactsTruncated)
+          reportVerificationFailure(F, V, ContextBB, Result, Fresh);
+        Verified = false;
+      }
     }
     return Result;
   };
@@ -192,6 +197,12 @@ void JavaTypeAnalysisResult::invalidate(Value &Changed) {
   invalidate({V});
 }
 
+void JavaTypeAnalysisResult::invalidatePreservingContext(Value &Changed) {
+  Value *V = &Changed;
+  invalidateImpl({V}, false, ForceFullJavaTypeInvalidation,
+                 JavaTypeContextPreservation::Preserved);
+}
+
 void JavaTypeAnalysisResult::invalidate(ArrayRef<Value *> Changed,
                                         bool CFGChanged) {
   invalidateImpl(Changed, CFGChanged, ForceFullJavaTypeInvalidation);
@@ -203,7 +214,8 @@ void JavaTypeAnalysisResult::invalidateForCFGChange(Value &Changed) {
 }
 
 void JavaTypeAnalysisResult::invalidateImpl(ArrayRef<Value *> Changed,
-                                            bool CFGChanged, bool ForceFull) {
+                                            bool CFGChanged, bool ForceFull,
+                                            JavaTypeContextPreservation Context) {
   auto Start = Observer ? QueryClock::now() : QueryClock::time_point{};
   JavaTypeCacheInvalidationInfo Info;
   if (ForceFull) {
@@ -218,12 +230,14 @@ void JavaTypeAnalysisResult::invalidateImpl(ArrayRef<Value *> Changed,
         Changed, CFGChanged,
         ForceBaseScanJavaTypeInvalidation
             ? JavaTypeBaseInvalidationMode::Scan
-            : JavaTypeBaseInvalidationMode::SelectiveKeys);
+            : JavaTypeBaseInvalidationMode::SelectiveKeys, Context);
   }
   // Even an unrelated instruction edit can change LVI's bounded reasoning.
-  // Drop its old results before mutation; Facts and Final have also been
+  // By default drop its old results before mutation; Facts and Final have also been
   // cleared, so no result depending on the old oracle state is retained.
-  LVI.clear();
+  if (ForceFull || Info.FullClear || CFGChanged ||
+      Context != JavaTypeContextPreservation::Preserved)
+    LVI.clear();
   if (!Observer)
     return;
   JavaTypeInvalidationEvent Event;

@@ -15,7 +15,7 @@ namespace llvm::jeandle {
 
 /// Query the shared JavaType algorithm with caches. The caller owns
 /// all four caches and maintains their invalidation before IR changes. Base
-/// and definedness share completed value results; Facts shares edge work;
+/// and definedness share completed value results; Facts shares cumulative paths;
 /// Final shares complete top-level queries until an IR/oracle notification.
 /// Cache classes own their counters. No query stacks or budgets persist.
 LLVM_ABI JavaType getCachedJavaType(Value *V, DominatorTree *DT,

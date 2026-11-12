@@ -1,42 +1,38 @@
-# Budget-safe JavaType path reuse
+# Accumulated JavaType path reuse
 
-The Facts owner additionally retains completed `(Value, BasicBlock)` path
-results during a StableOracleEpoch. This restores V1-style prefix reuse for
-argument queries and entry-block selects, while retaining V2's strict cold/warm
-budget, PHI, definedness and oracle contracts.
+The Facts owner retains completed `(Value, BasicBlock)` path results during a
+StableOracleEpoch. This uses V1-style prefix reuse for all value shapes,
+including PHI incoming queries and non-entry forwarders. The shared solver's
+definedness and type rules remain unchanged.
 
-Admission is deliberately conservative:
+Lookup and publication follow these rules:
 
-* The root must be an Argument or an entry-block SelectInst. Arguments do not
-  recursively query other value facts. In valid SSA an entry-block select's
-  complete operand graph is in entry or consists of arguments/constants; the
-  shared base solver already computes its value type. No operand definition
-  point contributes CFG facts there, so the value dimension returns Base.
-* The function's block count must fit the initial facts budget. A single-value
-  query can expand at most one frame per block. Reusing completed prefixes
-  cannot hide a budget exhaustion because a cold traversal already fits.
-  The admission block count is computed once per unchanged CFG; LLVM list
-  size() is linear. Oracle/non-CFG notifications preserve only this structural
-  count, never cached type or oracle results. CFG changes and clear() reset it.
-* Any uncut CFG cycle taints the rest of that query for publication. Previously
-  completed, cycle-free subgraphs remain safe; active/cycle-cut results never
-  become shared path entries. PHI and other forwarder queries retain the
-  original per-query memoization and edge caches.
+* After the entry/definition/unreachable seed cuts, `factsAt` checks Paths
+  before its local Processed table, budget and predecessor traversal. A hit
+  returns the accumulated result and skips the entire predecessor subgraph.
+* No root-kind or whole-function block-count admission is required. Only newly
+  expanded frames consume the existing per-query facts budget. A cached prefix
+  does not spend that budget, so a warm query can be more precise than a cold
+  query even with the same configured budget.
+* Budget exhaustion or an uncut CFG cycle sets the query's sticky
+  `FactsTruncated` flag. Subsequent completed frames stay in local Processed
+  rather than entering Paths. Entries completed before truncation remain
+  reusable. A complete unknown result can also be shared.
 * GuardOnly mode never shares path results. IR/CFG invalidation, explicit oracle
   maintenance and clear() drop Paths together with the other Facts tables.
   Existing all-context Final invalidation is unchanged: an unrelated edit can
   change LVI's bounded reasoning, so SSA independence alone does not justify
   retaining oracle-dependent results.
 
-On an admitted query, cold edge guards/null decisions are computed directly;
+When path reuse is enabled, edge guards/null decisions are computed directly;
 the completed accumulated path is the reusable unit. Avoiding a redundant
 second cache of every constituent edge reduces fills/clears in transformation
 passes which invalidate after each query. Completed path publication removes
 the redundant completed per-query slot, retaining only active recursion frames.
 
-PathHits and PathMisses expose path reuse independently of edge counters.
-EntriesAdded includes paths. Direct cold edge computations remain counted. setPathEnabled(false) isolates edge-cache tests
-and supports ablation. Existing Base/edge tests disable this upper reuse layer,
-just as they already disable Final; dedicated tests exercise path reuse,
-budget changes, irreducible cycles and epoch invalidation. Non-entry selects
-retain operand definition-point refinement.
+PathHits and PathMisses expose path reuse independently of edge counters;
+path lookups also contribute to the common Facts hit/miss counters.
+EntriesAdded includes paths. Direct edge computations remain counted.
+`setPathEnabled(false)` retains the edge-cache path for tests and ablation;
+GuardOnly also continues to use edge guards without retaining null decisions.
+Traversal stacks, active Processed frames and budgets remain query-local.

@@ -29,7 +29,8 @@ join:
 
 ; CHECK-LABEL: JavaTypeAnalysis for function: shallow
 ; CHECK:         queries: 4
-; CHECK:         edge facts misses: 8
+; One path lookup and two direct edge computations per query.
+; CHECK:         edge facts misses: 12
 ; CHECK:         guard edge computations: 4
 ; CHECK:         null edge computations: 4
 ; CHECK:         final type hits: 0

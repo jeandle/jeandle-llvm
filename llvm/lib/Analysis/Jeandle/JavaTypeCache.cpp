@@ -300,19 +300,14 @@ JavaType JavaTypeFactsCache::getGuard(Value *V, BasicBlock *From, BasicBlock *To
   return Result;
 }
 
-bool JavaTypeFactsCache::fitsPathBudget(unsigned Budget) {
-  assert(Owner && "unbound facts cache");
-  if (!PathBlockCount)
-    PathBlockCount = Owner->size();
-  return PathBlockCount <= Budget;
-}
-
 JavaType *JavaTypeFactsCache::lookupPath(Value *V, BasicBlock *BB) {
   auto It = Paths.find({V, BB});
   if (StatsEnabled) {
     if (It == Paths.end()) {
+      ++Counters.Misses;
       ++Counters.PathMisses;
     } else {
+      ++Counters.Hits;
       ++Counters.PathHits;
     }
   }
@@ -333,17 +328,13 @@ void JavaTypeFactsCache::clear() {
   NullEdges.clear();
   Guards.clear();
   Paths.clear();
-  PathBlockCount = 0;
 }
 
-size_t JavaTypeFactsCache::invalidate(bool CFGChanged) {
+size_t JavaTypeFactsCache::invalidate() {
   size_t Removed = size();
-  size_t OldBlockCount = PathBlockCount;
   if (StatsEnabled)
     ++Counters.Invalidations;
   clear();
-  if (!CFGChanged)
-    PathBlockCount = OldBlockCount;
   return Removed;
 }
 
@@ -417,13 +408,14 @@ void JavaTypeCache::clear() {
 }
 
 void JavaTypeCache::notifyOracleChanged() {
-  Facts.invalidate(/*CFGChanged=*/false);
+  Facts.invalidate();
   Final.notifyOracleChanged();
 }
 
 JavaTypeCacheInvalidationInfo
 JavaTypeCache::invalidate(ArrayRef<Value *> Changed, bool CFGChanged,
-                            JavaTypeBaseInvalidationMode Mode) {
+                            JavaTypeBaseInvalidationMode Mode,
+                            JavaTypeContextPreservation Context) {
   JavaTypeCacheInvalidationInfo Info;
   size_t OldBase = Base.size();
   size_t OldDefined = Defined.size();
@@ -496,7 +488,35 @@ JavaTypeCache::invalidate(ArrayRef<Value *> Changed, bool CFGChanged,
       Base.invalidate(Affected, CFGChanged, Mode, Info.BaseSlotsScanned);
   Info.DefinedRemoved = Defined.invalidate(Affected, CFGChanged, Mode,
                                            Info.DefinedSlotsScanned);
-  Info.FactsRemoved = Facts.invalidate(CFGChanged);
-  Info.FinalRemoved = Final.invalidate();
+  if (Context == JavaTypeContextPreservation::Preserved && !CFGChanged &&
+      getMode() == JavaTypeFactsCache::Mode::StableOracleEpoch) {
+    auto EraseAffected = [&](auto &Map, size_t &Scanned) {
+      size_t Removed = 0;
+      for (auto It = Map.begin(); It != Map.end();) {
+        auto Current = It++;
+        ++Scanned;
+        if (Seen.contains(Current->first.first)) {
+          Map.erase(Current);
+          ++Removed;
+        }
+      }
+      return Removed;
+    };
+    Info.FactsRemoved = EraseAffected(Facts.Paths, Info.PathFactsSlotsScanned);
+    Info.FactsRemoved += EraseAffected(Facts.Guards, Info.PathFactsSlotsScanned);
+    Info.FactsRemoved += EraseAffected(Facts.NullEdges, Info.PathFactsSlotsScanned);
+    Info.FinalRemoved = EraseAffected(Final.Memo, Info.FinalTypesSlotsScanned);
+    if (Facts.StatsEnabled) {
+      ++Facts.Counters.Invalidations;
+      Facts.Counters.EntriesRemoved += Info.FactsRemoved;
+    }
+    if (Final.StatsEnabled) {
+      ++Final.Counters.Invalidations;
+      Final.Counters.EntriesRemoved += Info.FinalRemoved;
+    }
+  } else {
+    Info.FactsRemoved = Facts.invalidate();
+    Info.FinalRemoved = Final.invalidate();
+  }
   return Info;
 }

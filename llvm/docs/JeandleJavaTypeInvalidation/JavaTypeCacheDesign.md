@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | `Base` / `JavaTypeBaseCache` | `Value* → JavaType` 的基础类型结果 | 相同 IR、VM 类型环境；修改后可保留不受影响的值 |
 | `Defined` / `JavaTypeDefinedCache` | `Value* → bool` 的完成 definedness 证明 | 同上；`false` 表示未能证明 defined |
-| `Facts` / `JavaTypeFactsCache` | `(V, From, To)` 的根 guard 和完整 null-edge 判断 | 本次有效期内跨查询复用；IR 修改后清空 |
+| `Facts` / `JavaTypeFactsCache` | `(V, BB)` 的累计路径事实；边缓存保留为另一查询模式 | 稳定 oracle 下跨查询复用；IR/oracle 修改后清空 |
 | `Final` / `JavaTypeFinalCache` | `(V, ContextBB)` 的完整顶层查询结果 | 通知之间复用；IR 修改或 oracle 维护后整体清空 |
 
 Analysis 及现有调用方仍使用最外层的单个缓存引用：
@@ -56,7 +56,8 @@ JavaType getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
 `resetStats()`；`clear()` 清结果但保留累计计数。Base 的跨查询命中细分
 需另开详细统计，才建立查询开始时的键快照。Analysis 的 Observer
 汇总这些计数的差分及查询时间；无 Observer 时不复制计数快照、不读时钟。
-Facts 计数衡量 helper 请求/计算，不能直接解释为 LVI 内部求解次数或耗时。
+Facts 计数包含路径命中及边 helper 请求/计算，不能直接解释为 LVI 内部
+求解次数或耗时。
 
 ## Base 与 Defined：共享修改前的 users 闭包
 
@@ -74,7 +75,17 @@ Defined 的冻结结果等是否为叶子，按其自身证明规则判断。
 超过 4096 个值或 16384 条 use 边、遇到非局部修改或跨函数值，
 聚合类回退全清。该预算仅限制失效工作，不修改查询求解预算。
 
-## Facts：边粒度复用，修改时保守清空
+## Facts：累计路径复用，修改时保守清空
+
+稳定 oracle 下，默认保存完整的 `(V, BB) → JavaType` 累计路径事实。
+`factsAt` 在 seed cuts 后、查询内 `Processed` 和前驱遍历前查表；命中
+直接返回，跳过整段前驱求解。不再限制根 Value 为 Argument/entry-select，
+也不以全函数块数作为准入条件。预算耗尽或未切断循环设置查询内
+`FactsTruncated`，之后不再发布块结果；此前完成的结果和完整 unknown
+仍可复用。命中不消耗预算，暖查询可能比同预算冷查询更精确。
+
+路径模式直接执行边计算，不同时填边表，以减少重复写入。
+`setPathEnabled(false)` 可关闭路径复用并继续使用下述边缓存。
 
 两个表分别保存根 guard 和 null-edge 判断，键都保留实际传入的
 `(V, From, To)`。它们表示沿哪条边成立的事实，单个 Context 不能区分
@@ -84,14 +95,14 @@ Defined 的冻结结果等是否为叶子，按其自身证明规则判断。
 它们接收边和 Value，以及一个执行原计算的 `Compute` 回调；负责模式
 检查、命中、未命中后的写入和统计。`getGuard` 还接收当前条件追踪深度。
 原 `JavaType.cpp` 保留 `computeNullEdge` / `computeEdgeGuard` 的算法，
-在有缓存时将原计算交给上述方法包装，无缓存时直接计算。
+在未共享 Paths 时将原计算交给上述方法包装，路径模式或无缓存时直接计算。
 
 根 guard 仅在 `ConditionDepth == 0` 时读写缓存，递归条件追踪保留
 原来的深度约束。默认 `GuardOnly` 不缓存 null 判断，也不启用 Final；
 因此允许任意随调用变化的 oracle。
 
 显式选择 `StableOracleEpoch` 后，调用方承诺通知之间 oracle 判断可复用，
-才启用 null 表和 Final。IR 修改时 Facts 整体清空。只维护/重置 oracle、
+才允许共享 Paths、null 判断及 Final。IR 修改时 Facts 整体清空。只维护/重置 oracle、
 IR 不变时，也必须调用聚合类 `notifyOracleChanged()`。
 
 ## Final：轻量结果表，通知时整体清空
@@ -124,9 +135,11 @@ Final 只记录共性的命中、未命中、插入、删除、失效和清空�
 走缓存实现。其主动修改通知转发给聚合类，并执行 `LVI.clear()`；
 DT 仍由调用方在下一次查询前更新。完整 `clear()` 清四类缓存及 LVI。
 `-jeandle-verify-java-type-cache` 使用同一求解器的无跨查询缓存入口重新
-计算，严格比较完整结果；不会因为预算截断或 PHI 环跳过验证。
-该严格相等检查用于固定求解配置；测试若主动更改预算，已有缓存的精度
-可能不同于新预算下的冷查询。需要继续做严格冷查询对照时应先清缓存。
+计算并比较完整结果。若结果不同且冷查询实际发生 Facts 预算或未切断
+CFG 循环的截断，该次比较不报错，也不计为验证通过；未截断的差异仍报错。
+累计路径命中省下预算，因此即使配置不变，暖查询也可能比冷查询更精确。
+这类跳过比较不构成结果正确性的证明；需要精度对照时应选用预算充足、
+完整求解的参考查询。
 
 普通 IR API 不会自动调用 JavaType 的失效方法。这里有两种不同入口：
 

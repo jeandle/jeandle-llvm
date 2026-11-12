@@ -1025,12 +1025,10 @@ struct JavaTypeQueryContext {
   unsigned FactsBudget = MaxFactsJoinBlocks;
   unsigned PhiBudget = MaxFactsJoinBlocks;
   unsigned ConditionDepth = 0;
-  // Shared path reuse is restricted to a single-value block walk whose whole
-  // function fits the initial facts budget. Skipping a cached prefix therefore
-  // cannot change a later budget decision. Cycle-contaminated results never
-  // enter the shared table.
+  // Completed path facts are shared across queries. A hit skips the predecessor
+  // walk without spending budget. Truncated results stay local to this query.
   bool SharePaths = false;
-  unsigned FactsCycles = 0;
+  bool FactsTruncated = false;
 };
 
 } // namespace
@@ -2128,11 +2126,12 @@ static JavaType factsAt(Value *V, BasicBlock *BB, JavaTypeQueryContext &Q) {
   if (!Inserted) {
     if (It->second)
       return *It->second;
-    ++Q.FactsCycles;
+    Q.FactsTruncated = true;
     return {}; // On the evaluation stack: a cycle the back-edge rule cannot
                // cut (irreducible) — empty contribution to that join arm.
   }
   if (Q.FactsBudget == 0) {
+    Q.FactsTruncated = true;
     ++NumJavaTypeBudgetExhausted;
     LLVM_DEBUG(dbgs() << "JavaType: per-query block budget exhausted at "
                       << BB->getName() << " for " << *V << "\n");
@@ -2159,7 +2158,7 @@ static JavaType factsAt(Value *V, BasicBlock *BB, JavaTypeQueryContext &Q) {
   // The join loop above recursed through factsAt, which may have rehashed
   // Processed and invalidated It — re-look the slot up by key.
   JavaType Result = std::move(Joined);
-  if (Q.SharePaths && Q.FactsCycles == 0) {
+  if (Q.SharePaths && !Q.FactsTruncated) {
     Q.Cache->Facts.insertPath(V, BB, Result);
     Q.Processed.erase(Key);
   } else {
@@ -2304,9 +2303,12 @@ JavaType jeandle::sharpen(Value *V, Instruction *Context, DominatorTree &DT,
 // =============================================================================
 
 JavaType jeandle::getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
-                              IsNullEdgeOracle IsNullEdge) {
+                              IsNullEdgeOracle IsNullEdge,
+                              bool *FactsTruncated) {
   assert(getVMCallbacks() && getVMCallbacks()->IsSubtype &&
          "VMCallbacks must be set");
+  if (FactsTruncated)
+    *FactsTruncated = false;
   if (!DT || !Context) {
     DefinedMemo Defined;
     return getBaseJavaType(V, nullptr, &Defined);
@@ -2314,7 +2316,10 @@ JavaType jeandle::getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
 
   JavaTypeQueryContext Q{*DT, IsNullEdge};
   JavaType T = valueDimension(V, Q);
-  return typeIntersect(T, factsAt(V, Context->getParent(), Q));
+  JavaType Result = typeIntersect(T, factsAt(V, Context->getParent(), Q));
+  if (FactsTruncated)
+    *FactsTruncated = Q.FactsTruncated;
+  return Result;
 }
 
 // =============================================================================
@@ -2359,15 +2364,7 @@ JavaType jeandle::getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
   }
 
   JavaTypeQueryContext Q{*DT, IsNullEdge, &Cache};
-  // Arguments and entry-block selects do not recursively request other
-  // value/block facts. Each block can consume budget at most once. Other
-  // shapes keep the original per-query memo and edge caches, including PHIs,
-  // nested forwarders, tight budgets and arbitrary changing oracles.
-  bool SingleValue = isa<Argument>(V);
-  if (auto *SI = dyn_cast<SelectInst>(V))
-    SingleValue |= SI->getParent()->isEntryBlock();
-  Q.SharePaths = Cache.pathsEnabled() && SingleValue &&
-                 Cache.Facts.fitsPathBudget(MaxFactsJoinBlocks);
+  Q.SharePaths = Cache.pathsEnabled();
   JavaType T = valueDimension(V, Q);
   return typeIntersect(T, factsAt(V, Context->getParent(), Q));
 }
