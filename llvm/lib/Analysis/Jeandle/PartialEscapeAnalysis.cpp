@@ -4816,7 +4816,8 @@ bool Analyzer::hasObservableIdentityUse(
         // Initialization publication does not inspect the receiver's identity.
         // Its virtual-receiver fold also applies in exits not yet visited by
         // the loop traversal, so it cannot block a virtual identity merge.
-        if (jeandle::isObjectMemoryBarrier(CB))
+        if (jeandle::isObjectMemoryBarrier(CB) ||
+            jeandle::isReplayPublicationBarrier(CB))
           continue;
         unsigned Operand = Use.getOperandNo();
         if (CB->isBundleOperand(Operand) &&
@@ -5638,6 +5639,11 @@ void Analyzer::processInstruction(Instruction *I) {
     }
   }
 
+  // TODO: Canonicalize pure scalar consumers with their current scalar aliases
+  // in this PEA round. An intervening canonicalization pass in iterative PEA
+  // cannot propagate through an arbitrarily long load/cast/copy chain within
+  // one analysis. Preserve integer width/poison semantics and invalidate
+  // derived folds when a supporting virtual object becomes ineligible.
   // Other virtual-input consumers (access folding + scalar-replaced inputs).
   if (Aliases.hasVirtualInputs(I)) {
     // Pointer-derivation forwards the virtual alias to the derived pointer so
@@ -8036,6 +8042,42 @@ bool Analyzer::processJavaOp(CallBase *CB) {
   if (jeandle::decodeStringIntrinsic(*CB))
     return foldStringIntrinsic(CB);
   using namespace jeandle::pea;
+  if (jeandle::isReplayPublicationBarrier(CB)) {
+    auto Owners = jeandle::getReplayPublicationOwners(*CB);
+    // Materialize unsupported virtual inputs first. This may recursively
+    // materialize another listed owner, whose entry must then remain real.
+    for (const auto &Owner : Owners) {
+      auto Identity =
+          resolveVirtualIdentity(Owner.Receiver, CurrentState, Aliases, DL,
+                                 VirtualIdentityMode::WholeObject);
+      if (Identity.isDefined() && Eligible.lookup(Identity.getObjectID()))
+        continue;
+      if (auto ID =
+              resolveVirtualRef(Owner.Receiver, CurrentState, Aliases, DL))
+        materializeAt(*ID, CB, MatReason::Unhandled);
+    }
+    auto E = std::make_unique<jeandle::RewriteMemoryBarrierEffect>();
+    E->Block = CB->getParent();
+    E->Target = CB;
+    E->SeqNo = Result.nextSeqNo();
+    bool Transferred = false;
+    for (const auto &Owner : Owners) {
+      jeandle::ObjectID ID = jeandle::InvalidObjectID;
+      auto Identity =
+          resolveVirtualIdentity(Owner.Receiver, CurrentState, Aliases, DL,
+                                 VirtualIdentityMode::WholeObject);
+      if (Identity.isDefined() && Eligible.lookup(Identity.getObjectID())) {
+        ID = Identity.getObjectID();
+        CurrentState.getObjectStateForModification(ID).addPendingBarriers(
+            Owner.Obligations);
+        Transferred = true;
+      }
+      E->Owners.push_back({Owner.Receiver, Owner.Obligations, ID});
+    }
+    if (Transferred)
+      Result.addBlockEffect(std::move(E));
+    return true;
+  }
   if (jeandle::isObjectMemoryBarrier(CB)) {
     auto Identity =
         resolveVirtualIdentity(CB->getArgOperand(0), CurrentState, Aliases, DL,
@@ -10808,9 +10850,14 @@ void Analyzer::commit() {
       // catches future PHI incomings in cyclic RPO regions that were unresolved
       // when their block was processed.
       DenseSet<Instruction *> RemovedTargets;
+      DenseMap<Instruction *, const jeandle::RewriteMemoryBarrierEffect *>
+          BarrierRewrites;
       DenseSet<jeandle::ObjectID> HasMaterialize;
       for (const auto &Kv : Result.BlockEffects)
         for (const jeandle::Effect &E : Kv.second) {
+          if (const auto *Rewrite =
+                  dyn_cast<jeandle::RewriteMemoryBarrierEffect>(&E))
+            BarrierRewrites[Rewrite->getTarget()] = Rewrite;
           if (!E.hasMutationOwner())
             continue;
           bool OwnerEligible = Eligible.lookup(E.getMutationOwner());
@@ -10845,6 +10892,9 @@ void Analyzer::commit() {
               }
               if (UserI && RemovedTargets.count(UserI))
                 return true;
+              if (const auto *Rewrite = BarrierRewrites.lookup(UserI))
+                if (Rewrite->removesOwnerUse(U, ID))
+                  return true;
               auto *CB = dyn_cast_or_null<CallBase>(UserI);
               if (!CB)
                 return false;

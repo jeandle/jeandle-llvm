@@ -285,10 +285,9 @@ merge:
 ; IR-NEXT: %owner = phi ptr addrspace(1) [ %a, %left ], [ %b, %right ]
 ; IR-NEXT: %[[CHILD_SLOT:pea.matslot[^ ]*]] = getelementptr inbounds i8, ptr addrspace(1) %child, i64 8
 ; IR-NEXT: store atomic i32 123, ptr addrspace(1) %[[CHILD_SLOT]] unordered, align 4
-; IR-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; IR-NEXT: %[[OWNER_SLOT:pea.matslot[^ ]*]] = getelementptr inbounds i8, ptr addrspace(1) %owner, i64 16
 ; IR-NEXT: store atomic ptr addrspace(1) %child, ptr addrspace(1) %[[OWNER_SLOT]] unordered, align 8
-; IR-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
+; IR-NEXT: call hotspotcc void (i32, ...) @jeandle.membar_replay_publish(i32 2, ptr addrspace(1){{[^,%]*}} %child, i32 1, ptr addrspace(1){{[^,%]*}} %owner, i32 1)
 ; IR-NEXT: call void @sink(ptr addrspace(1) %owner)
 ; IR-NOT: store atomic
 ; IR-NOT: call void @sink

@@ -382,7 +382,7 @@ unwind:
 ; CHECK-NEXT: store atomic i8 9, ptr addrspace(1) %[[BAD]] unordered, align 1
 ; CHECK-NEXT: %[[ELEM:[-A-Za-z$._0-9]+]] = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 24
 ; CHECK-NEXT: store atomic ptr addrspace(1) %a, ptr addrspace(1) %[[ELEM]] unordered, align 8
-; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
+; CHECK-NEXT: call hotspotcc void (i32, ...) @jeandle.membar_replay_publish(i32 3, ptr addrspace(1){{[^,%]*}} %b, i32 1, ptr addrspace(1){{[^,%]*}} %a, i32 1, ptr addrspace(1){{[^,%]*}} %outer, i32 1)
 ; CHECK-NEXT: call void @safepoint()
 ; CHECK-SAME: [ "deopt"(i32 7, i32 7, i64 12,
 ; CHECK-SAME: ptr addrspace(1) %outer,

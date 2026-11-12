@@ -816,7 +816,7 @@ ObjectID PEAResult::createVirtualObject(std::unique_ptr<VirtualObject> VO) {
 
 void PEAResult::addBlockEffect(std::unique_ptr<Effect> E) {
   assert(E && E->hasValidMutationOwner() &&
-         "only deopt-pool or placement effects may be ownerless");
+         "invalid PEA effect mutation owner");
   assert(E->Block);
   BasicBlock *BB = E->Block;
   BlockEffects[BB].add(std::move(E));
@@ -858,6 +858,16 @@ bool PEAResult::hasLegalMaterializationAtomicTypes(const DataLayout &DL) const {
   return true;
 }
 
+bool RewriteMemoryBarrierEffect::removesOwnerUse(const Use &U,
+                                                 ObjectID ID) const {
+  auto *CB = dyn_cast_or_null<CallBase>(getTarget());
+  if (!CB || U.getUser() != CB || !CB->isArgOperand(&U))
+    return false;
+  unsigned Arg = CB->getArgOperandNo(&U);
+  return Arg % 2 == 1 && Arg / 2 < Owners.size() &&
+         Owners[Arg / 2].VirtualOwner == ID;
+}
+
 void Effect::dump(raw_ostream &OS) const {
   OS << "PEA: ";
   switch (getKind()) {
@@ -866,6 +876,9 @@ void Effect::dump(raw_ostream &OS) const {
     break;
   case Kind::ReplaceCall:
     OS << "ReplaceCall";
+    break;
+  case Kind::RewriteMemoryBarrier:
+    OS << "RewriteMemoryBarrier";
     break;
   case Kind::EliminateStore:
     OS << "EliminateStore";

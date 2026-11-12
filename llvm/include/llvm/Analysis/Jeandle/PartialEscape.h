@@ -566,6 +566,7 @@ public:
   enum class Kind : uint8_t {
     ReplaceLoad,
     ReplaceCall,
+    RewriteMemoryBarrier,
     EliminateStore,
     EliminateAllocation,
     PlaceInstruction,
@@ -601,7 +602,8 @@ private:
   // ineligible. InvalidObjectID denotes an effect that is deliberately
   // independent of any one VO: RewriteDeoptPool rewrites one complete
   // safepoint pool and may cover several (or no) VOs, while
-  // PlaceInstruction only parents an analysis-created instruction at its
+  // RewriteMemoryBarrier retains per-entry owners in one call transaction,
+  // and PlaceInstruction only parents an analysis-created instruction at its
   // program point. Ownerless effects must therefore not participate in the
   // per-VO ineligibility cascade.
   ObjectID MutationOwner = InvalidObjectID;
@@ -626,7 +628,8 @@ public:
 
   bool hasValidMutationOwner() const {
     return (getKind() == Kind::RewriteDeoptPool ||
-            getKind() == Kind::PlaceInstruction)
+            getKind() == Kind::PlaceInstruction ||
+            getKind() == Kind::RewriteMemoryBarrier)
                ? !hasMutationOwner()
                : hasMutationOwner();
   }
@@ -698,6 +701,35 @@ public:
   void apply(TransformContext &Ctx) override;
   std::unique_ptr<Effect> clone() const override {
     return std::make_unique<ReplaceCallEffect>(*this);
+  }
+};
+
+// Atomically remove only the publication entries whose obligations moved to
+// eligible virtual owners. Other entries, including late-ineligible owners,
+// retain their original receiver and mask. No single VO owns this rewrite.
+class RewriteMemoryBarrierEffect : public Effect {
+public:
+  struct OwnerEntry {
+    WeakTrackingVH Receiver;
+    uint8_t Obligations;
+    ObjectID VirtualOwner = InvalidObjectID;
+  };
+  WeakTrackingVH Target;
+  SmallVector<OwnerEntry, 4> Owners;
+
+  Kind getKind() const override { return Kind::RewriteMemoryBarrier; }
+  static bool classof(const Effect *E) {
+    return E->getKind() == Kind::RewriteMemoryBarrier;
+  }
+  Instruction *getTarget() const override {
+    return dyn_cast_or_null<Instruction>((Value *)Target);
+  }
+  // Identify one exact owner argument; masks/count and retained owners are
+  // never treated as removed semantic uses by an allocation-deletion audit.
+  bool removesOwnerUse(const Use &U, ObjectID ID) const;
+  void apply(TransformContext &Ctx) override;
+  std::unique_ptr<Effect> clone() const override {
+    return std::make_unique<RewriteMemoryBarrierEffect>(*this);
   }
 };
 

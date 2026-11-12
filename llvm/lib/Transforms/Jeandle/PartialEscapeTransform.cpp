@@ -298,6 +298,7 @@ struct ExpectedReplayFieldGroup {
   bool HasDistinctRealAllocation = false;
   SmallVector<ExpectedReplayOperation, 4> Fields;
   SmallVector<jeandle::MemoryBarrierKind, 2> Barriers;
+  uint8_t PublicationMask = 0;
 };
 
 // The concrete value a replay store must write for a field entry, or null
@@ -496,6 +497,10 @@ static bool matchExistingReplaySuffix(
     }
     Group.Barriers = jeandle::getReplayMemoryBarriers(
         Effect->PendingBarriers, !Group.Fields.empty());
+    Group.PublicationMask =
+        (Effect->PendingBarriers & (jeandle::AllocationInitObligation |
+                                    jeandle::ConstructorFreezeObligation)) |
+        (Group.Fields.empty() ? 0 : jeandle::AllocationInitObligation);
     FieldGroups.push_back(std::move(Group));
 
     if (ReplayBatch && Effect->SeqNo == ReplayBatch->EmitterSeqNo) {
@@ -544,15 +549,6 @@ static bool matchExistingReplaySuffix(
           SmallVectorImpl<Instruction *> &Matched, Instruction *&Before) {
         Instruction *At = Start;
         SmallVector<Instruction *, 8> Candidate;
-        for (auto Kind : llvm::reverse(Group.Barriers)) {
-          if (!isReplayPublicationBarrier(At) ||
-              jeandle::getMemoryBarrierKind(
-                  cast<CallInst>(At)->getCalledFunction()->getName()) != Kind ||
-              cast<CallInst>(At)->getArgOperand(0) != Group.Receiver)
-            return false;
-          Candidate.push_back(At);
-          At = previousNonDebugInstruction(At);
-        }
         for (const ExpectedReplayOperation &Op : llvm::reverse(Group.Fields)) {
           auto *Store = dyn_cast_or_null<StoreInst>(At);
           if (!Store || Store->isVolatile() || !Store->isAtomic() ||
@@ -625,38 +621,156 @@ static bool matchExistingReplaySuffix(
                         GroupForReceiver.try_emplace(Group.Receiver, I).second;
   }
 
-  if (MayPermuteGroups && NonEmptyGroups.size() > 1) {
-    // Permuted matching: walk the IR backward from the escape point, identify
-    // the group owning the current store's receiver, and consume that whole
-    // group. Each group is consumed at most once.
-    SmallVector<uint8_t, 4> Consumed(FieldGroups.size(), 0);
-    for (unsigned Remaining = NonEmptyGroups.size(); Remaining; --Remaining) {
+  SmallVector<uint8_t, 4> Consumed(FieldGroups.size(), 0);
+  unsigned Remaining = NonEmptyGroups.size();
+  auto hasClone = [&](unsigned Index) {
+    return llvm::is_contained(FieldGroups[Index].Barriers,
+                              jeandle::MemoryBarrierKind::CloneSource);
+  };
+  unsigned LastGroup = NonEmptyGroups.size();
+  auto lastRemaining = [&] {
+    while (LastGroup && Consumed[NonEmptyGroups[LastGroup - 1]])
+      --LastGroup;
+    assert(LastGroup && "no remaining replay group");
+    return NonEmptyGroups[LastGroup - 1];
+  };
+  auto singleKind =
+      [](Instruction *I) -> std::optional<jeandle::MemoryBarrierKind> {
+    if (!isReplayPublicationBarrier(I))
+      return std::nullopt;
+    return jeandle::getMemoryBarrierKind(
+        cast<CallInst>(I)->getCalledFunction()->getName());
+  };
+  auto consumeGroup = [&](unsigned Index) {
+    SmallVector<Instruction *, 8> Matched;
+    Instruction *Before = nullptr;
+    if (!matchFieldGroup(FieldGroups[Index], Cursor, Matched, Before))
+      return false;
+    MatchedReverse.append(Matched.begin(), Matched.end());
+    Cursor = Before;
+    Consumed[Index] = 1;
+    --Remaining;
+    return true;
+  };
+
+  while (Remaining) {
+    // Clone source ordering terminates a publication interval. It remains a
+    // separate operation immediately after that interval's init/freeze node.
+    std::optional<unsigned> CloneGroup;
+    if (singleKind(Cursor) == jeandle::MemoryBarrierKind::CloneSource) {
+      Value *Receiver = cast<CallInst>(Cursor)->getArgOperand(0);
+      unsigned Index = MayPermuteGroups ? GroupForReceiver.lookup(Receiver)
+                                        : lastRemaining();
+      if ((MayPermuteGroups && !GroupForReceiver.count(Receiver)) ||
+          Consumed[Index] || FieldGroups[Index].Receiver != Receiver ||
+          !hasClone(Index))
+        return false;
+      CloneGroup = Index;
+      MatchedReverse.push_back(Cursor);
+      Cursor = previousNonDebugInstruction(Cursor);
+      if (!FieldGroups[Index].PublicationMask) {
+        if (!consumeGroup(Index))
+          return false;
+        continue;
+      }
+    }
+
+    auto *Batch = dyn_cast_or_null<CallInst>(Cursor);
+    if (jeandle::isReplayPublicationBarrier(Batch)) {
+      if (Batch->getTailCallKind() != CallInst::TCK_None)
+        return false;
+      DenseMap<Value *, uint8_t> ActualOwners;
+      for (const auto &Owner : jeandle::getReplayPublicationOwners(*Batch))
+        if (!ActualOwners.try_emplace(Owner.Receiver, Owner.Obligations).second)
+          return false;
+      SmallVector<unsigned, 4> Selected;
+      if (MayPermuteGroups) {
+        for (const auto &Owner : jeandle::getReplayPublicationOwners(*Batch)) {
+          auto It = GroupForReceiver.find(Owner.Receiver);
+          if (It == GroupForReceiver.end() || Consumed[It->second])
+            return false;
+          Selected.push_back(It->second);
+        }
+      } else {
+        lastRemaining();
+        for (unsigned At = LastGroup; At; --At) {
+          unsigned Index = NonEmptyGroups[At - 1];
+          if (Consumed[Index])
+            continue;
+          if (!ActualOwners.count(FieldGroups[Index].Receiver) ||
+              (hasClone(Index) && CloneGroup != Index))
+            break;
+          Selected.push_back(Index);
+        }
+      }
+      DenseMap<Value *, uint8_t> ExpectedOwners;
+      bool FoundClone = !CloneGroup;
+      for (unsigned Index : Selected) {
+        const auto &Group = FieldGroups[Index];
+        if (!Group.PublicationMask || (hasClone(Index) && CloneGroup != Index))
+          return false;
+        FoundClone |= CloneGroup == Index;
+        ExpectedOwners[Group.Receiver] |= Group.PublicationMask;
+      }
+      if (!FoundClone || ExpectedOwners != ActualOwners)
+        return false;
+      MatchedReverse.push_back(Cursor);
+      Cursor = previousNonDebugInstruction(Cursor);
+      if (MayPermuteGroups) {
+        SmallDenseSet<unsigned, 4> SelectedSet(Selected.begin(),
+                                               Selected.end());
+        // Barrier-only owners are part of the exact set even though they
+        // contribute no store. Match all other groups in their physical order.
+        for (unsigned Index : Selected)
+          if (FieldGroups[Index].Fields.empty()) {
+            Consumed[Index] = 1;
+            --Remaining;
+          }
+        unsigned FieldsRemaining =
+            llvm::count_if(Selected, [&](unsigned I) { return !Consumed[I]; });
+        while (FieldsRemaining--) {
+          auto *Store = dyn_cast_or_null<StoreInst>(Cursor);
+          auto *GEP =
+              Store ? dyn_cast<GetElementPtrInst>(Store->getPointerOperand())
+                    : nullptr;
+          auto It = GEP ? GroupForReceiver.find(GEP->getPointerOperand())
+                        : GroupForReceiver.end();
+          if (It == GroupForReceiver.end() || Consumed[It->second] ||
+              !SelectedSet.count(It->second) || !consumeGroup(It->second))
+            return false;
+        }
+      } else {
+        for (unsigned Index : Selected)
+          if (!consumeGroup(Index))
+            return false;
+      }
+      continue;
+    }
+
+    unsigned Index = lastRemaining();
+    if (MayPermuteGroups) {
       if (!isReplayPublicationBarrier(Cursor))
         return false;
-      auto It = GroupForReceiver.find(
-          cast<CallInst>(Cursor)->getArgOperand(0));
+      auto It = GroupForReceiver.find(cast<CallInst>(Cursor)->getArgOperand(0));
       if (It == GroupForReceiver.end() || Consumed[It->second])
         return false;
-      unsigned Match = It->second;
-      SmallVector<Instruction *, 8> MatchedGroup;
-      Instruction *MatchedBefore = nullptr;
-      if (!matchFieldGroup(FieldGroups[Match], Cursor, MatchedGroup,
-                           MatchedBefore))
-        return false;
-      Consumed[Match] = true;
-      MatchedReverse.append(MatchedGroup.begin(), MatchedGroup.end());
-      Cursor = MatchedBefore;
+      Index = It->second;
     }
-  } else {
-    // Strict matching: groups must appear in exact reverse emission order.
-    for (unsigned I : llvm::reverse(NonEmptyGroups)) {
-      SmallVector<Instruction *, 8> MatchedGroup;
-      Instruction *Before = nullptr;
-      if (!matchFieldGroup(FieldGroups[I], Cursor, MatchedGroup, Before))
+    if (hasClone(Index) != (CloneGroup == Index))
+      return false;
+    // CloneSource was already consumed above; match the remaining legacy
+    // single-owner marker, then its fields, with the same exact store checks.
+    for (auto Kind : llvm::reverse(FieldGroups[Index].Barriers)) {
+      if (Kind == jeandle::MemoryBarrierKind::CloneSource)
+        continue;
+      if (singleKind(Cursor) != Kind || cast<CallInst>(Cursor)->getArgOperand(
+                                            0) != FieldGroups[Index].Receiver)
         return false;
-      MatchedReverse.append(MatchedGroup.begin(), MatchedGroup.end());
-      Cursor = Before;
+      MatchedReverse.push_back(Cursor);
+      Cursor = previousNonDebugInstruction(Cursor);
     }
+    if (!consumeGroup(Index))
+      return false;
   }
 
   if (!Expected.empty() && isReplayLikePrefix(Cursor, Expected, DL))
@@ -1041,6 +1155,118 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
   return Emitted;
 }
 
+// Every instruction in a record was emitted by replay or certified by the
+// exact suffix matcher. Weak handles survive ordinary-effect erases and RAUW;
+// the effects' live InsertBefore follows edge splitting and eager re-aiming.
+// A reused suffix retains all matching effects so each receiver keeps its own
+// pending init/freeze bits when legacy markers are combined.
+struct ReplayEmissionRecord {
+  SmallVector<const jeandle::MaterializeEffect *, 4> Effects;
+  SmallVector<WeakTrackingVH, 16> Instructions;
+};
+
+static bool finalizeReplayPublications(Function &F,
+                                       ArrayRef<ReplayEmissionRecord> Records) {
+  if (Records.empty())
+    return false;
+  DenseMap<Instruction *, const jeandle::MaterializeEffect *> EmissionOf;
+  DenseMap<Instruction *, uint8_t> PendingPublicationMasks;
+  for (const auto &Record : Records) {
+    DenseMap<Value *, uint8_t> PendingByReceiver;
+    for (const auto *Effect : Record.Effects)
+      PendingByReceiver[Effect->Target] |= Effect->PendingBarriers;
+    for (Value *V : Record.Instructions) {
+      auto *I = dyn_cast_or_null<Instruction>(V);
+      if (!I)
+        continue;
+      EmissionOf[I] = Record.Effects.front();
+      if (auto *Call = dyn_cast<CallInst>(I))
+        if (jeandle::isObjectMemoryBarrier(Call))
+          PendingPublicationMasks[I] =
+              PendingByReceiver.lookup(Call->getArgOperand(0)) &
+              (jeandle::AllocationInitObligation |
+               jeandle::ConstructorFreezeObligation);
+    }
+  }
+
+  bool Changed = false;
+  SmallVector<CallInst *, 4> Markers;
+  SmallVector<jeandle::ReplayPublicationOwner, 4> Owners;
+  DenseMap<Value *, unsigned> OwnerIndex;
+  Instruction *Site = nullptr;
+  auto flush = [&] {
+    if (Markers.size() > 1) {
+      IRBuilder<> B(Markers.back());
+      B.SetCurrentDebugLocation(Markers.back()->getDebugLoc());
+      jeandle::createReplayPublicationBarrier(B, Owners);
+      for (CallInst *Marker : Markers)
+        Marker->eraseFromParent();
+      Changed = true;
+    }
+    Markers.clear();
+    Owners.clear();
+    OwnerIndex.clear();
+    Site = nullptr;
+  };
+  auto addOwner = [&](Value *Receiver, uint8_t Mask) {
+    auto [It, Inserted] = OwnerIndex.try_emplace(Receiver, Owners.size());
+    if (Inserted)
+      Owners.push_back({Receiver, Mask});
+    else
+      Owners[It->second].Obligations |= Mask;
+  };
+
+  for (BasicBlock &BB : F) {
+    for (Instruction &I : make_early_inc_range(BB)) {
+      if (I.isDebugOrPseudoInst())
+        continue;
+      const auto *Effect = EmissionOf.lookup(&I);
+      auto *ActualSite =
+          Effect ? dyn_cast_or_null<Instruction>((Value *)Effect->InsertBefore)
+                 : nullptr;
+      if (!ActualSite || (Site && Site != ActualSite))
+        flush();
+      if (!ActualSite)
+        continue;
+      Site = ActualSite;
+      auto *Call = dyn_cast<CallInst>(&I);
+      if (jeandle::isReplayPublicationBarrier(Call)) {
+        Markers.push_back(Call);
+        for (const auto &Owner : jeandle::getReplayPublicationOwners(*Call))
+          addOwner(Owner.Receiver, Owner.Obligations);
+        continue;
+      }
+      if (jeandle::isObjectMemoryBarrier(Call)) {
+        auto Kind = *jeandle::getMemoryBarrierKind(
+            Call->getCalledFunction()->getName());
+        if (Kind == jeandle::MemoryBarrierKind::AllocationInit ||
+            Kind == jeandle::MemoryBarrierKind::ConstructorFreeze) {
+          Markers.push_back(Call);
+          addOwner(Call->getArgOperand(0),
+                   jeandle::getMemoryBarrierObligation(Kind) |
+                       PendingPublicationMasks.lookup(Call));
+          continue;
+        }
+      }
+      // Publication can cover later certified replay writes at this site.
+      // Calls, clone observation, locks, loads, stronger atomics and unrelated
+      // original instructions end the interval. Stores and locks never move.
+      if (auto *Store = dyn_cast<StoreInst>(&I)) {
+        if (!Store->isVolatile() && Store->isAtomic() &&
+            Store->getOrdering() == AtomicOrdering::Unordered &&
+            Store->getSyncScopeID() == SyncScope::System)
+          continue;
+      } else if (!isa<CallBase>(I) && !I.mayReadOrWriteMemory() &&
+                 !I.mayHaveSideEffects() && !I.isTerminator()) {
+        continue;
+      }
+      flush();
+    }
+    flush();
+  }
+  return Changed;
+}
+
 // Bundles the Function, the analysis result, and the shared per-apply state so
 // each Effect subclass's apply() is self-contained.
 //
@@ -1076,6 +1302,8 @@ struct jeandle::TransformContext {
   // iterative driver to observe convergence without hiding an IR mutation.
   DenseSet<Instruction *> &PreservedReplayInstructions;
   DenseSet<const jeandle::MaterializeEffect *> &ReusedMaterializations;
+
+  SmallVectorImpl<ReplayEmissionRecord> &ReplayEmissions;
 
   // Whole-pool effects whose safepoints are guaranteed to be deleted by an
   // ordinary or cfg-kill effect. They were validated as a unit by preflight
@@ -1118,6 +1346,35 @@ void jeandle::ReplaceLoadEffect::apply(jeandle::TransformContext &Ctx) {
   relocateDependentMaterializes(Ctx.InsertBeforeDependents, Target,
                                 Target->getNextNode());
   Target->eraseFromParent();
+  Ctx.Changed = true;
+}
+
+void jeandle::RewriteMemoryBarrierEffect::apply(
+    jeandle::TransformContext &Ctx) {
+  Instruction *Old = getTarget();
+  if (!Old || Ctx.PreservedReplayInstructions.count(Old))
+    return;
+  SmallVector<jeandle::ReplayPublicationOwner, 4> Retained;
+  for (const OwnerEntry &Owner : Owners) {
+    if (Owner.VirtualOwner == jeandle::InvalidObjectID) {
+      Retained.push_back({Owner.Receiver, Owner.Obligations});
+      continue;
+    }
+    auto It = Ctx.Result.EscapeClassification.find(Owner.VirtualOwner);
+    if (It == Ctx.Result.EscapeClassification.end() ||
+        It->second == jeandle::PEAResult::EscapeKind::AlwaysEscapes)
+      Retained.push_back({Owner.Receiver, Owner.Obligations});
+  }
+  if (Retained.size() == Owners.size())
+    return;
+  Instruction *Next = Old->getNextNode();
+  if (!Retained.empty()) {
+    IRBuilder<> B(Old);
+    Next = jeandle::createReplayPublicationBarrier(B, Retained);
+    Next->setDebugLoc(Old->getDebugLoc());
+  }
+  relocateDependentMaterializes(Ctx.InsertBeforeDependents, Old, Next);
+  Old->eraseFromParent();
   Ctx.Changed = true;
 }
 
@@ -1239,9 +1496,19 @@ void jeandle::MaterializeEffect::apply(jeandle::TransformContext &Ctx) {
     Ctx.MaterializedReceiverOf[this] = Target;
     return;
   }
+  auto *IP = dyn_cast_or_null<Instruction>((Value *)InsertBefore);
+  assert(IP);
+  Instruction *Previous = IP->getPrevNode();
   if (applyMaterialize(Ctx.F, Ctx.Result, *this, Ctx.MaterializedReceiverOf,
-                       Ctx.OrigInsertBefore))
+                       Ctx.OrigInsertBefore)) {
+    ReplayEmissionRecord Record{{this}, {}};
+    for (Instruction *I = Previous ? Previous->getNextNode()
+                                   : &IP->getParent()->front();
+         I != IP; I = I->getNextNode())
+      Record.Instructions.push_back(I);
+    Ctx.ReplayEmissions.push_back(std::move(Record));
     Ctx.Changed = true;
+  }
 }
 
 void jeandle::CreatePHIEffect::apply(jeandle::TransformContext &Ctx) {
@@ -1449,7 +1716,7 @@ PreservedAnalyses PartialEscapeTransform::run(Function &F,
   for (const auto &KV : Result.BlockEffects)
     for (const jeandle::Effect &Effect : KV.second)
       assert(Effect.hasValidMutationOwner() &&
-             "only an atomic deopt-pool effect may be ownerless");
+             "invalid PEA effect mutation owner");
 
   DeoptPoolPreflight PoolPreflight;
   if (!preflightDeoptPoolEffects(F, Result, PoolPreflight))
@@ -1467,14 +1734,20 @@ PreservedAnalyses PartialEscapeTransform::run(Function &F,
   // current identity representing the source object, or via an occurrence
   // pruned from the plan).
   DenseSet<Instruction *> RemovedTargets;
+  DenseMap<Instruction *, const jeandle::RewriteMemoryBarrierEffect *>
+      BarrierRewrites;
   // Targets erased by ordinary effects.
   for (const auto &KV : Result.BlockEffects)
-    for (const jeandle::Effect &E : KV.second)
+    for (const jeandle::Effect &E : KV.second) {
+      if (const auto *Rewrite =
+              dyn_cast<jeandle::RewriteMemoryBarrierEffect>(&E))
+        BarrierRewrites[Rewrite->getTarget()] = Rewrite;
       if (isa<jeandle::ReplaceLoadEffect>(E) ||
           isa<jeandle::ReplaceCallEffect>(E) ||
           isa<jeandle::EliminateStoreEffect>(E))
         if (Instruction *Target = E.getTarget())
           RemovedTargets.insert(Target);
+    }
   for (const auto &KV : Result.EscapeClassification) {
     if (KV.second != jeandle::PEAResult::EscapeKind::NeverEscapes)
       continue;
@@ -1490,6 +1763,9 @@ PreservedAnalyses PartialEscapeTransform::run(Function &F,
             return true;
           if (UserI && RemovedTargets.count(UserI))
             return true;
+          if (const auto *Rewrite = BarrierRewrites.lookup(UserI))
+            if (Rewrite->removesOwnerUse(U, KV.first))
+              return true;
           auto *CB = dyn_cast_or_null<CallBase>(UserI);
           if (!CB)
             return false;
@@ -1576,6 +1852,7 @@ PreservedAnalyses PartialEscapeTransform::run(Function &F,
 
   DenseSet<Instruction *> PreservedReplayInstructions;
   DenseSet<const jeandle::MaterializeEffect *> ReusedMaterializations;
+  SmallVector<ReplayEmissionRecord, 8> ReplayEmissions;
   for (auto &KV : MaterializationsAt) {
     SmallVector<Instruction *, 16> MatchingInstructions;
     if (!matchExistingReplaySuffix(KV.first, KV.second, Result,
@@ -1584,6 +1861,11 @@ PreservedAnalyses PartialEscapeTransform::run(Function &F,
     PreservedReplayInstructions.insert(MatchingInstructions.begin(),
                                        MatchingInstructions.end());
     ReusedMaterializations.insert(KV.second.begin(), KV.second.end());
+    ReplayEmissionRecord Record;
+    Record.Effects.append(KV.second.begin(), KV.second.end());
+    for (Instruction *I : MatchingInstructions)
+      Record.Instructions.push_back(I);
+    ReplayEmissions.push_back(std::move(Record));
   }
 
   // -------------------------------------------------------------------------
@@ -1597,6 +1879,7 @@ PreservedAnalyses PartialEscapeTransform::run(Function &F,
                                 OrigInsertBefore,
                                 PreservedReplayInstructions,
                                 ReusedMaterializations,
+                                ReplayEmissions,
                                 PoolPreflight.SkippedEffects};
 
   for (BasicBlock *BB : RPOT) {
@@ -1605,6 +1888,8 @@ PreservedAnalyses PartialEscapeTransform::run(Function &F,
       continue;
     It->second.apply(Ctx, jeandle::Effect::Phase::Ordinary);
   }
+
+  Changed |= finalizeReplayPublications(F, ReplayEmissions);
 
   // -------------------------------------------------------------------------
   // Phase 2: rewrite each surviving safepoint's complete deopt object pool

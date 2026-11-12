@@ -441,14 +441,13 @@ unwind:
 ; INTRA-GROUP: escape.block:
 ; INTRA-GROUP-NEXT: %[[B_SLOT:[A-Za-z0-9._]+]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) %[[B]], i64 8
 ; INTRA-GROUP-NEXT: store atomic i32 %b0, ptr addrspace(1) %[[B_SLOT]] unordered, align 4
-; INTRA-GROUP-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; INTRA-GROUP-NEXT: %[[A_SLOT0:[A-Za-z0-9._]+]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) %[[A]], i64 8
 ; INTRA-GROUP-NEXT: store atomic i32 %a0, ptr addrspace(1) %[[A_SLOT0]] unordered, align 4
 ; INTRA-GROUP-NEXT: %[[A_SLOT1:[A-Za-z0-9._]+]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) %[[A]], i64 12
 ; INTRA-GROUP-NEXT: store atomic i32 %a1, ptr addrspace(1) %[[A_SLOT1]] unordered, align 4
 ; INTRA-GROUP-NEXT: %[[A_REF:[A-Za-z0-9._]+]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) %[[A]], i64 16
 ; INTRA-GROUP-NEXT: store atomic ptr addrspace(1) %[[B]], ptr addrspace(1) %[[A_REF]] unordered, align 8
-; INTRA-GROUP-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
+; INTRA-GROUP-NEXT: call hotspotcc void (i32, ...) @jeandle.membar_replay_publish(i32 2, ptr addrspace(1){{[^,%]*}} %[[B]], i32 1, ptr addrspace(1){{[^,%]*}} %[[A]], i32 1)
 ; INTRA-GROUP-NEXT: call void @sink(ptr addrspace(1) %[[A]])
 
 attributes #0 = { nounwind }

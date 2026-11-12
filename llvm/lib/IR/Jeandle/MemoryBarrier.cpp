@@ -54,6 +54,76 @@ uint8_t getMemoryBarrierObligation(MemoryBarrierKind Kind) {
   }
 }
 
+bool isReplayPublicationBarrier(const CallBase *CB) {
+  const Function *F = CB ? CB->getCalledFunction() : nullptr;
+  if (!F || F->getName() != ReplayPublicationBarrierName ||
+      !isa<CallInst>(CB) || CB->hasOperandBundles() ||
+      !CB->getType()->isVoidTy() || !F->isVarArg() || F->arg_size() != 1 ||
+      !F->getArg(0)->getType()->isIntegerTy(32) ||
+      CB->getCallingConv() != CallingConv::Hotspot_JIT ||
+      F->getCallingConv() != CallingConv::Hotspot_JIT || CB->arg_empty())
+    return false;
+  auto *Count = dyn_cast<ConstantInt>(CB->getArgOperand(0));
+  if (!Count || !Count->getType()->isIntegerTy(32) || Count->isZero() ||
+      Count->getZExtValue() != (CB->arg_size() - 1) / 2 ||
+      CB->arg_size() % 2 != 1)
+    return false;
+  for (unsigned I = 1; I < CB->arg_size(); I += 2) {
+    auto *Mask = dyn_cast<ConstantInt>(CB->getArgOperand(I + 1));
+    if (!isWideOopType(CB->getArgOperand(I)->getType()) || !Mask ||
+        !Mask->getType()->isIntegerTy(32) || Mask->isZero() ||
+        (Mask->getZExtValue() &
+         ~(AllocationInitObligation | ConstructorFreezeObligation)))
+      return false;
+  }
+  return true;
+}
+
+SmallVector<ReplayPublicationOwner, 4>
+getReplayPublicationOwners(const CallBase &CB) {
+  assert(isReplayPublicationBarrier(&CB));
+  SmallVector<ReplayPublicationOwner, 4> Owners;
+  for (unsigned I = 1; I < CB.arg_size(); I += 2)
+    Owners.push_back(
+        {CB.getArgOperand(I),
+         static_cast<uint8_t>(
+             cast<ConstantInt>(CB.getArgOperand(I + 1))->getZExtValue())});
+  return Owners;
+}
+
+CallInst *
+createReplayPublicationBarrier(IRBuilder<> &B,
+                               ArrayRef<ReplayPublicationOwner> Owners) {
+  assert(!Owners.empty());
+  Module &M = *B.GetInsertBlock()->getModule();
+  FunctionType *Ty = FunctionType::get(B.getVoidTy(), {B.getInt32Ty()}, true);
+  GlobalValue *Named = M.getNamedValue(ReplayPublicationBarrierName);
+  Function *F = dyn_cast_or_null<Function>(Named);
+  if (Named && (!F || F->getFunctionType() != Ty))
+    report_fatal_error("invalid Jeandle replay publication declaration");
+  if (!F)
+    F = Function::Create(Ty, GlobalValue::ExternalLinkage,
+                         ReplayPublicationBarrierName, M);
+  F->setCallingConv(CallingConv::Hotspot_JIT);
+  F->addFnAttr(llvm::Attribute::NoUnwind);
+  F->addFnAttr(llvm::Attribute::WillReturn);
+  F->addFnAttr("gc-leaf-function");
+  SmallVector<Value *, 9> Args{B.getInt32(Owners.size())};
+  for (const ReplayPublicationOwner &Owner : Owners) {
+    assert(isWideOopType(Owner.Receiver->getType()) && Owner.Obligations &&
+           !(Owner.Obligations &
+             ~(AllocationInitObligation | ConstructorFreezeObligation)));
+    Args.push_back(Owner.Receiver);
+    Args.push_back(B.getInt32(Owner.Obligations));
+  }
+  CallInst *Call = B.CreateCall(F, Args);
+  Call->setCallingConv(CallingConv::Hotspot_JIT);
+  for (unsigned I = 1; I < Args.size(); I += 2)
+    Call->addParamAttr(I, llvm::Attribute::getWithCaptureInfo(
+                              B.getContext(), CaptureInfo::none()));
+  return Call;
+}
+
 bool isMemoryBarrierCall(const CallBase *CB) {
   const Function *F = CB ? CB->getCalledFunction() : nullptr;
   auto Kind = F ? getMemoryBarrierKind(F->getName()) : std::nullopt;

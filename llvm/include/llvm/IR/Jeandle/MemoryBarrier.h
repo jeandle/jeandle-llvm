@@ -53,8 +53,9 @@ namespace llvm::jeandle {
 /// retaining the marker. An object that remains virtual needs no physical
 /// barrier; materialization replays pending ordering after the field stores
 /// and before surviving locks or observers. Pending ordering also requires
-/// replay when no stores are emitted. Only equivalent replay kind/receiver
-/// pairs may be reused; global or native fences are not object replay markers.
+/// replay when no stores are emitted. A publication batch retains every
+/// receiver and its own init/freeze mask; replay reuse must match the complete
+/// owner set. Global or native fences are not object replay markers.
 ///
 /// Native GC, monitor handoff, code patching/entry and cache persistence
 /// protocols retain their own fences and target instructions. Their ordering
@@ -102,6 +103,25 @@ LLVM_ABI std::optional<MemoryBarrierKind> getMemoryBarrierKind(StringRef Name);
 LLVM_ABI uint8_t getMemoryBarrierObligation(MemoryBarrierKind Kind);
 LLVM_ABI bool isMemoryBarrierCall(const CallBase *CB);
 LLVM_ABI bool isObjectMemoryBarrier(const CallBase *CB);
+
+inline constexpr StringLiteral ReplayPublicationBarrierName =
+    "jeandle.membar_replay_publish";
+
+struct ReplayPublicationOwner {
+  Value *Receiver;
+  uint8_t Obligations;
+};
+
+/// A replay publication retains each owner's init/freeze obligation until PEA
+/// completes. Its checked schema is void hotspotcc (i32 count, ...), followed
+/// by count (AS1 whole-object receiver, constant i32 nonzero mask) pairs.
+/// CloneSource and global ordering are independent and cannot enter this set.
+LLVM_ABI bool isReplayPublicationBarrier(const CallBase *CB);
+LLVM_ABI SmallVector<ReplayPublicationOwner, 4>
+getReplayPublicationOwners(const CallBase &CB);
+LLVM_ABI CallInst *
+createReplayPublicationBarrier(IRBuilder<> &B,
+                               ArrayRef<ReplayPublicationOwner> Owners);
 
 /// Create a bare direct hotspotcc void call, with no operand bundles. Receiver
 /// is required exactly for the three object kinds above. The declaration is

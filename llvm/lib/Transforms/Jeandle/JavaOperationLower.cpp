@@ -42,15 +42,21 @@ runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
       for (Instruction &I : instructions(F))
         if (auto *CB = dyn_cast<CallBase>(&I))
           if (Function *Callee = CB->getCalledFunction())
-            if (jeandle::getMemoryBarrierKind(Callee->getName()))
+            if (jeandle::getMemoryBarrierKind(Callee->getName()) ||
+                Callee->getName() == jeandle::ReplayPublicationBarrierName)
               Calls.insert(CB);
     for (CallBase *CB : Calls) {
-      if (!jeandle::isMemoryBarrierCall(CB))
+      if (!jeandle::isMemoryBarrierCall(CB) &&
+          !jeandle::isReplayPublicationBarrier(CB))
         report_fatal_error("invalid Jeandle memory barrier call");
       Function *Caller = CB->getCaller();
       IRBuilder<> B(CB);
-      jeandle::emitMemoryBarrier(B, *jeandle::getMemoryBarrierKind(
-                                      CB->getCalledFunction()->getName()));
+      // Init and freeze currently share target strength. Keep every owner in
+      // the semantic node; discharge their ordering once only at this phase.
+      auto Kind =
+          jeandle::getMemoryBarrierKind(CB->getCalledFunction()->getName());
+      jeandle::emitMemoryBarrier(
+          B, Kind.value_or(jeandle::MemoryBarrierKind::AllocationInit));
       CB->eraseFromParent();
       if (FAM)
         FAM->invalidate(*Caller, PreservedAnalyses::none());
@@ -61,6 +67,7 @@ runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
 
   auto shouldInline = [Phase](const Function &F) -> bool {
     if (jeandle::getMemoryBarrierKind(F.getName()) ||
+        F.getName() == jeandle::ReplayPublicationBarrierName ||
         !F.hasFnAttribute(jeandle::Attribute::LowerPhase))
       return false;
     int V = 0;

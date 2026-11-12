@@ -105,10 +105,9 @@ unwind:
 ; FINAL-NOT: invoke hotspotcc ptr addrspace(1) @jeandle.new_instance
 ; FINAL: %[[A_SLOT:pea\.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %a, i64 8
 ; FINAL-NEXT: store atomic i32 %left, ptr addrspace(1) %[[A_SLOT]] unordered, align 4
-; FINAL-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; FINAL-NEXT: %[[B_SLOT:pea\.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %b, i64 8
 ; FINAL-NEXT: store atomic i32 %right, ptr addrspace(1) %[[B_SLOT]] unordered, align 4
-; FINAL-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
+; FINAL-NEXT: call hotspotcc void (i32, ...) @jeandle.membar_replay_publish(i32 2, ptr addrspace(1){{[^,%]*}} %a, i32 1, ptr addrspace(1){{[^,%]*}} %b, i32 1)
 ; FINAL-NEXT: call void @sink2(ptr addrspace(1) %a, ptr addrspace(1) %b)
 ; FINAL-SAME: [ "deopt"(i32 99, i32 99, i64 12, ptr addrspace(1) %a, i64 4294967308, ptr addrspace(1) %b) ]
 ; Neither real actual receives a virtual-object descriptor.
@@ -157,12 +156,11 @@ unwind:
 ; Child replay precedes the outer replay that stores the child's real identity.
 ; FINAL: %[[CHILD_SLOT:pea\.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %child, i64 8
 ; FINAL-NEXT: store atomic i32 %child.value, ptr addrspace(1) %[[CHILD_SLOT]] unordered, align 4
-; FINAL-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; FINAL-NEXT: %[[OUTER_INT:pea\.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 8
 ; FINAL-NEXT: store atomic i32 %outer.value, ptr addrspace(1) %[[OUTER_INT]] unordered, align 4
 ; FINAL-NEXT: %[[OUTER_REF:pea\.matslot[0-9]*]] = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
 ; FINAL-NEXT: store atomic ptr addrspace(1) %child, ptr addrspace(1) %[[OUTER_REF]] unordered, align 8
-; FINAL-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
+; FINAL-NEXT: call hotspotcc void (i32, ...) @jeandle.membar_replay_publish(i32 2, ptr addrspace(1){{[^,%]*}} %child, i32 1, ptr addrspace(1){{[^,%]*}} %outer, i32 1)
 ; FINAL-NEXT: call void @sink2(ptr addrspace(1) %outer, ptr addrspace(1) %child)
 ; FINAL-SAME: [ "deopt"(i32 99, i32 99, i64 12, ptr addrspace(1) %outer, i64 4294967308, ptr addrspace(1) %child) ]
 ; FINAL-NOT: i64 262156
