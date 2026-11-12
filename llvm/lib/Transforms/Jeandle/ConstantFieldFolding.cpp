@@ -16,6 +16,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/Jeandle/JavaTypeAnalysis.h"
+#include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/SimplifyQuery.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
@@ -827,6 +828,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     DenseMap<Value *, int> ConstOops = computeConstOops(F);
     ReversePostOrderTraversal<Function *> RPOT(&F);
     DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+    LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
 
     SmallVector<CallInst *, 16> ArrayLengthCalls;
     SmallVector<CallInst *, 16> StringGetCharCalls;
