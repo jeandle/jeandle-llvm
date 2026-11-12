@@ -27,11 +27,12 @@
 //     handles, which propagates through forwarders (PHI / select / casts) and
 //     already-recovered loads — this resolves arbitrary load chains and
 //     loop-carried self-referential PHIs; and
-//   * a context-sensitive getJavaType query on the base at the load's
+//   * a context-sensitive JavaTypeAnalysis query on the base at the load's
 //     position, which additionally exploits sharpening from jeandle
 //     .check_instanceof edge guards (see JavaType.cpp's edge-semantics
 //     engine). The pass mutates no IR until the emit phase, so this query is
-//     constant and is computed once per load.
+//     constant and is computed once per load; the analysis cache also shares
+//     completed results between loads that query the same base.
 //
 // See the header for the high-level guarantees; the invariants that make the
 // fixpoint converge are documented inline below.
@@ -44,6 +45,8 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/Jeandle/JavaTypeAnalysis.h"
+#include "llvm/Analysis/Jeandle/LVINullEdgeOracle.h"
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
@@ -200,6 +203,10 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
   // IR until the metadata-only emit phase, and metadata is invisible to LVI.
   LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
   LVINullEdgeOracle IsNullEdge{LVI};
+
+  // All queries precede the metadata emit phase. Share completed type results
+  // between loads, then let FAM discard the analysis after a changed run.
+  auto &JavaTypes = FAM.getResult<jeandle::JavaTypeAnalysis>(F);
 
   // ---------------------------------------------------------------------------
   // Memoized VM queries. Each distinct (klass, offset) / klass / klass-pair is
@@ -489,7 +496,7 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
   // ---------------------------------------------------------------------------
   // Context-sensitive type queries, computed lazily and memoized.
   //
-  // getCtxType queries a tracked load's base with getJavaType in its
+  // getCtxType queries a tracked load's base through JavaTypeAnalysis in its
   // context-sensitive form: besides attributes, surviving metadata and
   // constant oop handles (all of which the lattice also uses), this exploits
   // sharpening from dominating jeandle.check_instanceof checks that constrain
@@ -523,8 +530,7 @@ PreservedAnalyses RecoverTypeInfo::run(Function &F,
     auto It = CtxCache.find(LI);
     if (It != CtxCache.end())
       return It->second;
-    jeandle::JavaType T =
-        jeandle::getJavaType(LoadInfos[LI].QueryBase, &DT, LI, IsNullEdge);
+    jeandle::JavaType T = JavaTypes.getJavaType(LoadInfos[LI].QueryBase, LI);
     return CtxCache.insert({LI, T}).first->second;
   };
 

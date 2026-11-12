@@ -1,0 +1,13 @@
+ArrayElementKlass 5 = 0
+GetFieldType 5 16 = 7
+GetFieldType 5 24 = 9
+IsUnverifiedInterface 7 = false
+IsEffectivelyFinal 7 = false
+IsUnverifiedInterface 9 = false
+IsEffectivelyFinal 9 = false
+IsInterface 5 = false
+GetSecondarySupers 5 = []
+IsInterface 7 = false
+GetSecondarySupers 7 = []
+IsInterface 9 = false
+GetSecondarySupers 9 = []

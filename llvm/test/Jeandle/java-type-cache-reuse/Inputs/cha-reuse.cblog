@@ -1,0 +1,15 @@
+GetCHAOptInfo 100 200 300 500 false 0 -1 = (600, 100, 50, "caller")
+UpdateCallSite 42 2 false 100 = true
+UpdateCallSite 43 2 false 100 = true
+UpdateCallSite 44 2 false 100 = true
+UpdateCallSite 45 2 false 100 = true
+
+IsObjectKlass 500 = false
+IsInterface 500 = false
+GetSecondarySupers 500 = []
+IsObjectKlass 600 = false
+IsInterface 600 = false
+GetSecondarySupers 600 = []
+IsUnverifiedInterface 600 = false
+IsEffectivelyFinal 600 = false
+IsSubtype 500 600 = true

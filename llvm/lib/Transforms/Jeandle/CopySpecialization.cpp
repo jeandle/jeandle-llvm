@@ -10,9 +10,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/CopySpecialization.h"
-#include "llvm/Analysis/LazyValueInfo.h"
+#include "llvm/Analysis/Jeandle/JavaTypeAnalysis.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
-#include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -166,8 +165,8 @@ void emitStoreStoreBarrier(IRBuilder<> &B, Module &M) {
   B.CreateFence(AtomicOrdering::Release);
 }
 
-CopyFacts analyzeCopy(CallBase &CB, DominatorTree &DT,
-                      jeandle::IsNullEdgeOracle IsNullEdge) {
+CopyFacts analyzeCopy(CallBase &CB,
+                      jeandle::JavaTypeAnalysisResult &JavaTypes) {
   CopyFacts Facts;
   Facts.CB = &CB;
 
@@ -187,14 +186,14 @@ CopyFacts analyzeCopy(CallBase &CB, DominatorTree &DT,
 
   if (isArrayCopy(CB)) {
     const jeandle::JavaType SrcType =
-        jeandle::getJavaType(CB.getArgOperand(0), &DT, &CB, IsNullEdge);
+        JavaTypes.getJavaType(CB.getArgOperand(0), &CB);
     const jeandle::JavaType DestType =
-        jeandle::getJavaType(CB.getArgOperand(2), &DT, &CB, IsNullEdge);
+        JavaTypes.getJavaType(CB.getArgOperand(2), &CB);
     Facts.SrcElem = jeandle::elementTypeForArrayKlass(SrcType.Klass);
     Facts.DestElem = jeandle::elementTypeForArrayKlass(DestType.Klass);
   } else if (isInstanceClone(CB)) {
     const jeandle::JavaType SrcType =
-        jeandle::getJavaType(CB.getArgOperand(0), &DT, &CB, IsNullEdge);
+        JavaTypes.getJavaType(CB.getArgOperand(0), &CB);
     if (SrcType.isKnown() && Callbacks->GetCloneInstanceInfo != nullptr) {
       Facts.CloneInstanceInfo =
           Callbacks->GetCloneInstanceInfo(SrcType.Klass, SrcType.Exact);
@@ -1646,13 +1645,14 @@ PreservedAnalyses CopySpecialization::run(Function &F,
   if (!jeandle::isRootJavaMethodFunction(F))
     return PreservedAnalyses::all();
 
-  DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
-  LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
-  LVINullEdgeOracle IsNullEdge{LVI};
+  auto &JavaTypes = FAM.getResult<jeandle::JavaTypeAnalysis>(F);
 
   // Freeze every dominance-dependent fact before rewriting any pseudo call.
   // CFG expansion invalidates DT and LVI, but the element types and clone
   // callback result remain valid for each original call site.
+  // No JavaType queries run during rewriting below. On a change, returning
+  // PreservedAnalyses::none() discards the cached analysis and its dependencies
+  // at the pass boundary, so no per-rewrite notification is needed.
   SmallVector<CopyFacts, 8> Worklist;
   for (Instruction &I : instructions(F)) {
     auto *CB = dyn_cast<CallBase>(&I);
@@ -1677,7 +1677,7 @@ PreservedAnalyses CopySpecialization::run(Function &F,
       }
     }
 
-    CopyFacts Facts = analyzeCopy(*CB, DT, IsNullEdge);
+    CopyFacts Facts = analyzeCopy(*CB, JavaTypes);
     if (Facts.CloneInstanceInfo.has_value()) {
       const auto &[Status, Count, Fields] = *Facts.CloneInstanceInfo;
       if (Status == static_cast<int>(jeandle::CloneInstanceInfoStatus::Ready) &&

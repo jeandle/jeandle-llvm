@@ -32,6 +32,8 @@ class Value;
 
 namespace jeandle {
 
+class JavaTypeCache;
+
 /// Represents the Java type of an LLVM IR value, including both positive
 /// type knowledge and negative constraints (excluded classes).
 ///
@@ -130,8 +132,18 @@ using IsNullEdgeOracle =
 /// arms equal to neither domain value make the expression check-independent.
 /// And/Or/Xor are matched on i1 only. Unrecognized patterns conservatively
 /// return unknown ({}).
+///
+/// FactsTruncated, when provided, reports an incomplete CFG-facts traversal.
 JavaType getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
-                     IsNullEdgeOracle IsNullEdge);
+                     IsNullEdgeOracle IsNullEdge,
+                     bool *FactsTruncated = nullptr);
+
+/// Shared solver interface for the cached query adapter. Borrows Base/Defined/
+/// Facts storage; Final lookup/publication and the cache lifecycle belong to
+/// the caller. Recursive state stays local. Cache must be bound to the
+/// function.
+JavaType getJavaType(Value *V, DominatorTree *DT, Instruction *Context,
+                     IsNullEdgeOracle IsNullEdge, JavaTypeCache &Cache);
 
 /// Compute the type constraints that CFG edge guards imply for V at Context.
 /// Returns ONLY check-derived constraints (a positive klass when a passing

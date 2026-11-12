@@ -9,6 +9,7 @@
 
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/Analysis/AssumptionCache.h"
+#include "llvm/Analysis/Jeandle/JavaTypeAnalysis.h"
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/AsmParser/Parser.h"
@@ -882,6 +883,7 @@ TEST_F(JavaBaseTypeTest, TypeCheckEliminationFoldsCyclicPhiCheck) {
   FAM.registerPass([] { return AssumptionAnalysis(); });
   FAM.registerPass([] { return DominatorTreeAnalysis(); });
   FAM.registerPass([] { return LazyValueAnalysis(); });
+  FAM.registerPass([] { return JavaTypeAnalysis(); });
   TypeCheckElimination().run(*F, FAM);
   auto *Folded = dyn_cast<ConstantInt>(Use->getArgOperand(0));
   ASSERT_NE(Folded, nullptr);

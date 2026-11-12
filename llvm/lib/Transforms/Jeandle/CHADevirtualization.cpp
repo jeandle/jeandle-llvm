@@ -22,6 +22,7 @@
 #include "llvm/Analysis/BranchProbabilityInfo.h"
 #include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/DominanceFrontier.h"
+#include "llvm/Analysis/Jeandle/JavaTypeAnalysis.h"
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
@@ -93,9 +94,10 @@ void changeCallAttr(InvokeInst &CB, const char *const AttrName,
 // Intersect an oop's inferred type with the target signature and materialize
 // an assume only when the intersection provides additional type information.
 Value *tryNarrowJavaObjType(Value *Receiver, JavaType HolderType,
-                            DominatorTree &DT, InvokeInst &CB,
-                            jeandle::IsNullEdgeOracle IsNullEdge) {
-  JavaType ReceiverType = jeandle::getJavaType(Receiver, &DT, &CB, IsNullEdge);
+                            jeandle::JavaTypeAnalysisResult &JavaTypes,
+                            LazyValueInfo &LVI, InvokeInst &CB,
+                            bool &IRChanged) {
+  JavaType ReceiverType = JavaTypes.getJavaType(Receiver, &CB);
   JavaType CastedReceiverType =
       jeandle::typeIntersect(HolderType, ReceiverType);
   if (CastedReceiverType.Klass == 0) {
@@ -103,7 +105,13 @@ Value *tryNarrowJavaObjType(Value *Receiver, JavaType HolderType,
     return nullptr;
   }
   if (CastedReceiverType != ReceiverType) {
-    return insertJavaTypeAssume(Receiver, CastedReceiverType, &CB);
+    Value *Assume = insertJavaTypeAssume(Receiver, CastedReceiverType, &CB);
+    IRChanged = true;
+    // Later arguments may be queried before this site's rewrite is committed.
+    // The new call has no old users, so independent base results survive.
+    JavaTypes.invalidate(*Assume);
+    LVI.clear();
+    return Assume;
   }
   return Receiver;
 }
@@ -197,12 +205,13 @@ bool hasReceiver(const StringRef &IntrinsicName) {
 // Resolve a linkTo* intrinsic through its constant MemberName and rebuild the
 // invoke with the target's Java signature. _invokeBasic follows the regular
 // CHA path below because it does not require call reconstruction.
-InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
-                                DomTreeUpdater &DTU,
+InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, DomTreeUpdater &DTU,
+                                jeandle::JavaTypeAnalysisResult &JavaTypes,
+                                LazyValueInfo &LVI,
                                 const jeandle::VMCallbacks &Callbacks,
-                                jeandle::IsNullEdgeOracle IsNullEdge,
                                 uintptr_t Caller,
-                                const StringRef &IntrinsicName) {
+                                const StringRef &IntrinsicName,
+                                bool &IRChanged) {
   assert(IntrinsicName != "_invokeBasic" &&
          "_invokeBasic is treated in normal path.");
   const bool CanBeOptimizedIntrinsic =
@@ -256,8 +265,8 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
       JavaType HolderType = {
           Callbacks.GetSignatureAccessingKlass(CHAOptInfo.Method), false};
       if (HolderType.Klass != 0) {
-        Value *CastedReceiver =
-            tryNarrowJavaObjType(Receiver, HolderType, DT, CB, IsNullEdge);
+        Value *CastedReceiver = tryNarrowJavaObjType(
+            Receiver, HolderType, JavaTypes, LVI, CB, IRChanged);
         if (CastedReceiver != Receiver) {
           JavaTypeAssumeCB[0] = CastedReceiver;
           NarrowSuccess &= CastedReceiver != nullptr;
@@ -272,8 +281,8 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
       JavaType ArgsDeclareType = {
           Callbacks.GetSignatureArgTypeKlass(CHAOptInfo.Method, I), false};
       if (ArgsDeclareType.Klass != 0) {
-        Value *CastedReceiver =
-            tryNarrowJavaObjType(Op, ArgsDeclareType, DT, CB, IsNullEdge);
+        Value *CastedReceiver = tryNarrowJavaObjType(
+            Op, ArgsDeclareType, JavaTypes, LVI, CB, IRChanged);
         if (CastedReceiver != Op) {
           JavaTypeAssumeCB[I + !IsStatic] = CastedReceiver;
           NarrowSuccess &= CastedReceiver != nullptr;
@@ -328,17 +337,22 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
                                 CHAOptInfo.Method)) {
     for (auto &[_, Value] : JavaTypeAssumeCB) {
       if (CallInst *Inst = dyn_cast_or_null<CallInst>(Value)) {
+        JavaTypes.invalidate(*Inst);
         Inst->eraseFromParent();
       }
     }
     return nullptr;
   }
 
+  // Notify while the old operands and uses are still intact. Receiver-bearing
+  // calls additionally split the CFG; static replacements preserve its shape.
+  StringRef NewBCName = getByteCodeName(IntrinsicName);
+  JavaTypes.invalidate({&CB}, /*CFGChanged=*/hasReceiver(NewBCName));
   // Commit the narrowed operands only after validation.
   for (auto &[ArgIdx, AssumeCB] : JavaTypeAssumeCB) {
     CB.setArgOperand(ArgIdx, AssumeCB);
+    IRChanged = true;
   }
-  StringRef NewBCName = getByteCodeName(IntrinsicName);
 
   // linkTo* performs the receiver null check implicitly. Preserve that
   // behavior before replacing it with a direct Java invoke.
@@ -349,6 +363,7 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
     int BCI = getCurrentDeoptBCI(CB);
     std::string Prefix = "null_check_bci_" + std::to_string(BCI);
 
+    IRChanged = true;
     BasicBlock *NullCheckFail =
         insertNullCheck(CB, CB.getOperand(0), Prefix, &DTU);
     if (!NullCheckFail)
@@ -360,6 +375,7 @@ InvokeInst *optimizeMhIntrinsic(InvokeInst &CB, Function &F, DominatorTree &DT,
                     *PreCallDeopt);
   }
 
+  IRChanged = true;
   return createNewCB(CB, DestKind != jeandle::VirtualCall, PatchSize, FuncType,
                      CHAOptInfo.Method, CHAOptInfo.MethodName, NewBCName,
                      CHAOptInfo.holder(), Id, DestKind,
@@ -438,10 +454,10 @@ InvokeInst *optimizeInvokeBasic(InvokeInst &CB,
       /*RemoveTrailingMemberNameArg=*/false);
 }
 
-bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
-                      DomTreeUpdater &DTU,
-                      const jeandle::VMCallbacks &Callbacks, uintptr_t Caller,
-                      jeandle::IsNullEdgeOracle IsNullEdge,
+bool optimizeCallSite(InvokeInst &CB, DomTreeUpdater &DTU,
+                      jeandle::JavaTypeAnalysisResult &JavaTypes,
+                      LazyValueInfo &LVI, const jeandle::VMCallbacks &Callbacks,
+                      uintptr_t Caller,
                       SmallVectorImpl<InvokeInst *> &Deferred) {
   using jeandle::JavaType;
 
@@ -463,14 +479,18 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
       InvokeInst *NewCB = optimizeInvokeBasic(CB, Callbacks, Caller);
       if (!NewCB)
         return false;
+      // The helper creates a replacement without changing the old use graph.
+      JavaTypes.invalidate(CB);
       if (!CB.getType()->isVoidTy())
         CB.replaceAllUsesWith(NewCB);
       CB.eraseFromParent();
       return true;
     } else {
+      bool IRChanged = false;
       InvokeInst *NewCB = optimizeMhIntrinsic(
-          CB, F, DT, DTU, Callbacks, IsNullEdge, Caller, IntrinsicName);
+          CB, DTU, JavaTypes, LVI, Callbacks, Caller, IntrinsicName, IRChanged);
       if (NewCB) {
+        JavaTypes.invalidate(CB);
         CB.replaceAllUsesWith(NewCB);
         CB.eraseFromParent();
         // Refinement of the rebuilt invoke is deferred to the caller's loop,
@@ -479,7 +499,9 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
         Deferred.push_back(NewCB);
         return true;
       }
-      return false;
+      // Even a failed refinement may have inserted/removed assumptions or
+      // changed operands. Let the outer loop refresh analyses in that case.
+      return IRChanged;
     }
   }
 
@@ -511,8 +533,7 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
           InvokeKind == jeandle::InvokeInterface) &&
          "should be a java call");
 
-  jeandle::JavaType ReceiverType =
-      jeandle::getJavaType(Receiver, &DT, &CB, IsNullEdge);
+  jeandle::JavaType ReceiverType = JavaTypes.getJavaType(Receiver, &CB);
   uintptr_t ScopeCaller = getCurrentDeoptMethod(CB, Caller);
   auto [ConstraintOrHolder, Method, DeoptReasonOrTargetInfo, MethodName] =
       Callbacks.GetCHAOptInfo(ScopeCaller, Callee, Holder, ReceiverType.Klass,
@@ -546,6 +567,7 @@ bool optimizeCallSite(InvokeInst &CB, Function &F, DominatorTree &DT,
   }
 
   // Virtual/interface calls need a speculative receiver type guard.
+  JavaTypes.invalidateForCFGChange(CB);
   BasicBlock *CheckInstanceofFail =
       insertCheckInstanceOf(CB, Receiver, OptInfo.constraint(), Prefix, &DTU);
   assert(CheckInstanceofFail && "failed to insert check_instanceof");
@@ -587,14 +609,14 @@ PreservedAnalyses CHADevirtualization::run(Function &F,
          Callbacks->GetSignatureArgTypeKlass && "VMCallbacks must be set");
 
   DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+  auto &JavaTypes = FAM.getResult<jeandle::JavaTypeAnalysis>(F);
   DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Lazy);
   // The null-edge oracle needs LazyValueInfo, whose cached per-block lattice
   // goes stale when a rewrite splits blocks. Queries always run before a
-  // site's rewrite, and every successful rewrite — including an MH rebuild
-  // queued for refinement — is followed by a cache clear before the next
-  // query, so each query sees a lattice consistent with the current CFG.
+  // site's rewrite, and every modification — including a failed MH attempt
+  // or a rebuild queued for refinement — is followed by a cache clear before
+  // the next query. JavaTypes uses this same analysis result as its oracle.
   LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
-  LVINullEdgeOracle IsNullEdge{LVI};
 
   // Snapshot invoke instructions because successful rewrites can replace and
   // erase call sites while the pass is running. The loop is index-based:
@@ -611,11 +633,13 @@ PreservedAnalyses CHADevirtualization::run(Function &F,
   uintptr_t Caller = 0;
   getFunctionJavaMethod(F, Caller);
   for (unsigned I = 0; I < Calls.size(); ++I) {
-    bool Rewritten = optimizeCallSite(*Calls[I], F, DT, DTU, *Callbacks, Caller,
-                                      IsNullEdge, Calls);
-    Changed |= Rewritten;
-    if (Rewritten)
+    bool SiteChanged = optimizeCallSite(*Calls[I], DTU, JavaTypes, LVI,
+                                        *Callbacks, Caller, Calls);
+    Changed |= SiteChanged;
+    if (SiteChanged) {
+      DTU.flush();
       LVI.clear();
+    }
   }
 
   if (!Changed)
@@ -623,5 +647,7 @@ PreservedAnalyses CHADevirtualization::run(Function &F,
 
   PreservedAnalyses PA;
   PA.preserve<DominatorTreeAnalysis>();
+  PA.preserve<LazyValueAnalysis>();
+  PA.preserve<jeandle::JavaTypeAnalysis>();
   return PA;
 }
