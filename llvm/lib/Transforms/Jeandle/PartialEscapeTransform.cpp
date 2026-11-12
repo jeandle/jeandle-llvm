@@ -71,8 +71,8 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Jeandle/Attributes.h"
-#include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/MemoryBarrier.h"
+#include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
@@ -114,8 +114,7 @@ static bool splitReplayEdges(jeandle::PEAResult &Result) {
       // target-local analysis state is still required, but splitting the CFG
       // would create an empty block with no runtime control dependence to
       // preserve.
-      if (ME->FieldEntries.empty() && ME->Locks.empty() &&
-          !ME->PendingBarriers)
+      if (ME->FieldEntries.empty() && ME->Locks.empty() && !ME->PendingBarriers)
         continue;
       EdgePlan *Plan = nullptr;
       for (EdgePlan &Candidate : Plans)
@@ -495,8 +494,8 @@ static bool matchExistingReplaySuffix(
       Group.Fields.push_back(Op);
       Expected.push_back(std::move(Op));
     }
-    Group.Barriers = jeandle::getReplayMemoryBarriers(
-        Effect->PendingBarriers, !Group.Fields.empty());
+    Group.Barriers = jeandle::getReplayMemoryBarriers(Effect->PendingBarriers,
+                                                      !Group.Fields.empty());
     Group.PublicationMask =
         (Effect->PendingBarriers & (jeandle::AllocationInitObligation |
                                     jeandle::ConstructorFreezeObligation)) |
@@ -1095,7 +1094,8 @@ static bool applyMaterialize(Function &F, const jeandle::PEAResult &Result,
   // The original allocation/clone barrier precedes these delayed stores.
   // Publish the initialized fields before any escape or surviving lock, just
   // as Graal's CommitAllocation lowering publishes its initialization writes.
-  for (auto Kind : jeandle::getReplayMemoryBarriers(E.PendingBarriers, Emitted)) {
+  for (auto Kind :
+       jeandle::getReplayMemoryBarriers(E.PendingBarriers, Emitted)) {
     jeandle::createMemoryBarrier(SB, Kind, MatVal);
     Emitted = true;
   }

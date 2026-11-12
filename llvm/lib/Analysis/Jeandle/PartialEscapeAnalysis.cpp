@@ -8085,7 +8085,8 @@ bool Analyzer::processJavaOp(CallBase *CB) {
     if (!Identity.isDefined() || !Eligible.lookup(Identity.getObjectID()))
       return false;
     // Retain ordering at this program point until the object is replayed.
-    auto Kind = *jeandle::getMemoryBarrierKind(CB->getCalledFunction()->getName());
+    auto Kind =
+        *jeandle::getMemoryBarrierKind(CB->getCalledFunction()->getName());
     CurrentState.getObjectStateForModification(Identity.getObjectID())
         .addPendingBarriers(jeandle::getMemoryBarrierObligation(Kind));
     emitReplaceCall(CB, nullptr, Identity.getObjectID());
@@ -8325,8 +8326,8 @@ bool Analyzer::processCopyCall(CallBase *CB) {
     // slot it wrote or reset to default.
     clearCopyFoldReachingDefs(DestID, *BaseOff, *PayloadEnd);
     if (jeandle::copyNeedsInitializationBarrier(*CB))
-      CurrentState.getObjectStateForModification(DestID)
-          .addPendingBarriers(jeandle::AllocationInitObligation);
+      CurrentState.getObjectStateForModification(DestID).addPendingBarriers(
+          jeandle::AllocationInitObligation);
     emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
     ++AttemptStats.CopyFolds;
     return true;
@@ -8673,11 +8674,10 @@ bool Analyzer::processCopyCall(CallBase *CB) {
       SrcWinLo = checkedArrayElementOffset(Dest.ArrayBaseOffset, *SrcPos,
                                            Dest.ArrayIndexScale);
       std::optional<int64_t> SrcLastIdx = checkedOffsetAdd(*SrcPos, *Len - 1);
-      SrcWinHi =
-          SrcLastIdx ? checkedArrayElementOffset(Dest.ArrayBaseOffset,
-                                                 *SrcLastIdx,
-                                                 Dest.ArrayIndexScale)
-                     : std::nullopt;
+      SrcWinHi = SrcLastIdx ? checkedArrayElementOffset(Dest.ArrayBaseOffset,
+                                                        *SrcLastIdx,
+                                                        Dest.ArrayIndexScale)
+                            : std::nullopt;
       if (SrcWinHi)
         SrcWinHi = checkedOffsetAdd(*SrcWinHi, Dest.ArrayIndexScale);
       // A revived call reads this window's original values AS OF THE CALL:
@@ -8689,18 +8689,17 @@ bool Analyzer::processCopyCall(CallBase *CB) {
       if (SrcWinLo && SrcWinHi) {
         observeCopyFoldSourceDefs(SrcIdentity.getObjectID(), *SrcWinLo,
                                   *SrcWinHi);
-        CopyFoldVirtualSources.emplace_back(SrcIdentity.getObjectID(),
-                                            DestID);
+        CopyFoldVirtualSources.emplace_back(SrcIdentity.getObjectID(), DestID);
       }
     }
     std::optional<int64_t> DestWinLo = checkedArrayElementOffset(
         Dest.ArrayBaseOffset, *DestPos, Dest.ArrayIndexScale);
     std::optional<int64_t> DestLastIdx = checkedOffsetAdd(*DestPos, *Len - 1);
     std::optional<int64_t> DestWinHi =
-        DestLastIdx ? checkedArrayElementOffset(Dest.ArrayBaseOffset,
-                                                *DestLastIdx,
-                                                Dest.ArrayIndexScale)
-                    : std::nullopt;
+        DestLastIdx
+            ? checkedArrayElementOffset(Dest.ArrayBaseOffset, *DestLastIdx,
+                                        Dest.ArrayIndexScale)
+            : std::nullopt;
     if (DestWinHi)
       DestWinHi = checkedOffsetAdd(*DestWinHi, Dest.ArrayIndexScale);
     if (DestWinLo && DestWinHi) {
@@ -8712,15 +8711,14 @@ bool Analyzer::processCopyCall(CallBase *CB) {
           clearCopyFoldReachingDefs(DestID, *DestWinLo,
                                     std::min(*DestWinHi, *SrcWinLo));
         if (*SrcWinHi < *DestWinHi)
-          clearCopyFoldReachingDefs(DestID,
-                                    std::max(*DestWinLo, *SrcWinHi),
+          clearCopyFoldReachingDefs(DestID, std::max(*DestWinLo, *SrcWinHi),
                                     *DestWinHi);
       }
     }
   }
   if (jeandle::copyNeedsInitializationBarrier(*CB))
-    CurrentState.getObjectStateForModification(DestID)
-        .addPendingBarriers(jeandle::AllocationInitObligation);
+    CurrentState.getObjectStateForModification(DestID).addPendingBarriers(
+        jeandle::AllocationInitObligation);
   emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
   // Counted per analyzer visit: a copy inside a loop fixpoint re-folds on
   // every body pass, so the number counts (site, round) pairs, not distinct
@@ -8848,9 +8846,11 @@ void Analyzer::observeCopyFoldSourceDefs(jeandle::ObjectID SrcID, int64_t Lo,
     observeFieldDefinition(SrcID, Off, FieldDefinitions);
 }
 
-bool Analyzer::foldCloneInstanceConcreteSource(
-    CallBase *CB, jeandle::ObjectID DestID, jeandle::VirtualObject &Dest,
-    int64_t BaseOff, int64_t PayloadEnd) {
+bool Analyzer::foldCloneInstanceConcreteSource(CallBase *CB,
+                                               jeandle::ObjectID DestID,
+                                               jeandle::VirtualObject &Dest,
+                                               int64_t BaseOff,
+                                               int64_t PayloadEnd) {
   // A derived pointer of a still-virtual object must not become a load base:
   // whole-object identity already failed above, so a BaseObject resolution
   // here is exactly that shape, and the memory behind its eliminated stores
@@ -8951,8 +8951,8 @@ bool Analyzer::foldCloneInstanceConcreteSource(
   // slot it wrote or reset to default.
   clearCopyFoldReachingDefs(DestID, BaseOff, PayloadEnd);
   if (jeandle::copyNeedsInitializationBarrier(*CB))
-    CurrentState.getObjectStateForModification(DestID)
-        .addPendingBarriers(jeandle::AllocationInitObligation);
+    CurrentState.getObjectStateForModification(DestID).addPendingBarriers(
+        jeandle::AllocationInitObligation);
   emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
   ++AttemptStats.CopyFolds;
   return true;
@@ -10539,13 +10539,14 @@ void Analyzer::materializeAt(jeandle::ObjectID ID, Instruction *InsertBefore,
   auto GetPendingBarriers = [&](jeandle::ObjectID Oid) {
     return CurrentState.getObjectStateOptional(Oid)->getPendingBarriers();
   };
-  MaterializeContext C{FieldStates,    FieldDefinitions,
-                       LockCounts,     LiveLockEnters,
-                       Materialized,   Reason,
-                       InsertBefore,   InsertBefore->getParent(),
-                       nullptr,        Recurse,
-                       ClearLockState, CaptureLocksIntoEffect,
-                       ComputeSafeIP,  FlipState, GetPendingBarriers};
+  MaterializeContext C{FieldStates,       FieldDefinitions,
+                       LockCounts,        LiveLockEnters,
+                       Materialized,      Reason,
+                       InsertBefore,      InsertBefore->getParent(),
+                       nullptr,           Recurse,
+                       ClearLockState,    CaptureLocksIntoEffect,
+                       ComputeSafeIP,     FlipState,
+                       GetPendingBarriers};
   ensureMaterialized(ID, C);
 }
 
@@ -11946,8 +11947,8 @@ void Analyzer::materializeAtPredFromExitInfo(jeandle::ObjectID ID,
 
 // Equality on BlockExitData (the per-object base data). Two payloads are
 // equivalent iff every per-object dimension (still-virtual set, materialized
-// set, pending ordering, FieldStates per offset, LockCounts, LiveLockEnters) matches by
-// structural comparison.
+// set, pending ordering, FieldStates per offset, LockCounts, LiveLockEnters)
+// matches by structural comparison.
 bool Analyzer::exitDataEquivalent(const BlockExitData &A,
                                   const BlockExitData &B) {
   if (A.Virtuals.size() != B.Virtuals.size())

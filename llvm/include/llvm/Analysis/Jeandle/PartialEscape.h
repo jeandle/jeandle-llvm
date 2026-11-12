@@ -377,10 +377,10 @@ private:
 
 public:
   // ObjectState carries the per-VO virtual/materialized flag, pending ordering,
-  // the live lock stack, and (once materialized) the materialized pointer. Per-FIELD
-  // state does NOT live here: LLVM's Analysis/Transform split plus the SSA
-  // single-pass walk prevent propagating a per-field state array across the
-  // CFG inside the block state (see the STATE MODEL comment in
+  // the live lock stack, and (once materialized) the materialized pointer.
+  // Per-FIELD state does NOT live here: LLVM's Analysis/Transform split plus
+  // the SSA single-pass walk prevent propagating a per-field state array across
+  // the CFG inside the block state (see the STATE MODEL comment in
   // PartialEscapeAnalysis.cpp), so field values are tracked in the
   // analyzer-wide FieldStates DenseMap keyed by (ObjectID, byte-offset), and
   // ObjectState intentionally carries no field-storage member.
