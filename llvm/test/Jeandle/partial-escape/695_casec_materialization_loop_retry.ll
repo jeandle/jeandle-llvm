@@ -70,6 +70,7 @@ exit:
 ; SINGLE-NEXT: store atomic i32 %[[FIELD]], ptr addrspace(1) %[[SLOT8]] unordered, align 4
 ; SINGLE-NEXT: %[[SLOT16:pea.matslot[^ ]*]] = getelementptr inbounds i8, ptr addrspace(1) %p, i64 16
 ; SINGLE-NEXT: store atomic i32 93, ptr addrspace(1) %[[SLOT16]] unordered, align 4
+; SINGLE-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; SINGLE-NEXT: br label %loop
 ; SINGLE: loop:
 ; SINGLE: call void @sink(ptr addrspace(1) %p)
@@ -124,6 +125,7 @@ exit:
 ; SINGLE-NEXT: %[[IFIELD:pea.casec.field.phi[^ ]*]] = phi i32 [ 101, %left ], [ 102, %right ]
 ; SINGLE-NEXT: %[[ISLOT:pea.matslot[^ ]*]] = getelementptr inbounds i8, ptr addrspace(1) %p, i64 8
 ; SINGLE-NEXT: store atomic i32 %[[IFIELD]], ptr addrspace(1) %[[ISLOT]] unordered, align 4
+; SINGLE-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; SINGLE-NEXT: call void @sink(ptr addrspace(1) %p)
 ; SINGLE-NOT: store atomic i32
 ; SINGLE-NOT: call void @sink

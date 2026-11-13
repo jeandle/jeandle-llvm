@@ -24,7 +24,7 @@ entry:
        to label %n0 unwind label %u_a
 n0:
   %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(
-            ptr inttoptr (i64 22222 to ptr), i32 16, i1 false)
+            ptr inttoptr (i64 22222 to ptr), i32 24, i1 false)
        to label %n1 unwind label %u_b
 n1:
   ; Virtual store into VO_B at offset 16 — tracked in FieldStates.
@@ -54,7 +54,7 @@ u_b:
 ; VO_B's allocation (klass 22222) must be eliminated, because the handler
 ; folds its only load and no other use escapes the object.
 ; CHECK-LABEL: define i32 @test_290
-; CHECK-NOT: jeandle.new_instance(ptr inttoptr (i64 22222 to ptr), i32 16)
+; CHECK-NOT: jeandle.new_instance(ptr inttoptr (i64 22222 to ptr)
 ; The folded load reaches the handler's return as the constant 99.
 ; CHECK: ret i32 99
 

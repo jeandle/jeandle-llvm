@@ -1,0 +1,4 @@
+RequiresStrictLockOrder = 1
+ElementBasicTypeOfArrayKlass 1000 = 8
+IsInterface 1000 = false
+GetSecondarySupers 1000 = []

@@ -1,4 +1,5 @@
 add_llvm_component_library(LLVMCore
+  Jeandle/MemoryBarrier.cpp
   Jeandle/GCStrategy.cpp
   Jeandle/VMCallback.cpp
   Jeandle/VMCallbackLog.cpp

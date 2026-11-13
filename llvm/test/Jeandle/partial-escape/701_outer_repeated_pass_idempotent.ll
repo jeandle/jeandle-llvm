@@ -81,6 +81,7 @@ unwind:
 ; STABLE: escaped:
 ; STABLE-NEXT: %[[SLOT:pea.matslot[^ ]*]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) %o, i64 8
 ; STABLE-NEXT: store atomic i32 701, ptr addrspace(1) %[[SLOT]] unordered, align 4
+; STABLE-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; STABLE-NEXT: call hotspotcc void @jeandle.monitorenter_with_lightweight_lock(ptr addrspace(1) %o, ptr{{( nonnull)?}} %lock)
 ; STABLE-NEXT: call void @sink(ptr addrspace(1) %o)
 ; STABLE-NEXT: call hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1) %o, ptr{{( nonnull)?}} %lock)
@@ -90,6 +91,7 @@ unwind:
 ; STABLE-NEXT: call hotspotcc void @jeandle.monitorexit_with_lightweight_lock(ptr addrspace(1) %guard, ptr{{( nonnull)?}} %guard.lock)
 ; STABLE-NEXT: %[[LOCAL_SLOT:pea.matslot[^ ]*]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) %o, i64 8
 ; STABLE-NEXT: store atomic i32 701, ptr addrspace(1) %[[LOCAL_SLOT]] unordered, align 4
+; STABLE-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; STABLE-NEXT: br label %done
 ; STABLE: done:
 ; STABLE-NOT: = phi

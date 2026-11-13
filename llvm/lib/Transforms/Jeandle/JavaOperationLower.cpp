@@ -16,7 +16,9 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/Attributes.h"
+#include "llvm/IR/Jeandle/MemoryBarrier.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
@@ -33,8 +35,40 @@ runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
   bool Changed = false;
   SmallSetVector<CallBase *, 16> Calls;
 
+  // Lower semantic ordering in every body, including JavaOps that are inlined
+  // later. Collect first: target emission may add intrinsic declarations.
+  if (Phase == 1) {
+    for (Function &F : M)
+      for (Instruction &I : instructions(F))
+        if (auto *CB = dyn_cast<CallBase>(&I))
+          if (Function *Callee = CB->getCalledFunction())
+            if (jeandle::getMemoryBarrierKind(Callee->getName()) ||
+                Callee->getName() == jeandle::ReplayPublicationBarrierName)
+              Calls.insert(CB);
+    for (CallBase *CB : Calls) {
+      if (!jeandle::isMemoryBarrierCall(CB) &&
+          !jeandle::isReplayPublicationBarrier(CB))
+        report_fatal_error("invalid Jeandle memory barrier call");
+      Function *Caller = CB->getCaller();
+      IRBuilder<> B(CB);
+      // Init and freeze currently share target strength. Keep every owner in
+      // the semantic node; discharge their ordering once only at this phase.
+      auto Kind =
+          jeandle::getMemoryBarrierKind(CB->getCalledFunction()->getName());
+      jeandle::emitMemoryBarrier(
+          B, Kind.value_or(jeandle::MemoryBarrierKind::AllocationInit));
+      CB->eraseFromParent();
+      if (FAM)
+        FAM->invalidate(*Caller, PreservedAnalyses::none());
+      Changed = true;
+    }
+    Calls.clear();
+  }
+
   auto shouldInline = [Phase](const Function &F) -> bool {
-    if (!F.hasFnAttribute(jeandle::Attribute::LowerPhase))
+    if (jeandle::getMemoryBarrierKind(F.getName()) ||
+        F.getName() == jeandle::ReplayPublicationBarrierName ||
+        !F.hasFnAttribute(jeandle::Attribute::LowerPhase))
       return false;
     int V = 0;
     bool Failed = F.getFnAttribute(jeandle::Attribute::LowerPhase)

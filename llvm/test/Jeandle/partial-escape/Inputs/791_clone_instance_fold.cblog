@@ -1,0 +1,5 @@
+RequiresStrictLockOrder = 1
+HasFinalizer 30001 = false
+CanVirtualize 30001 = true
+HasFinalizer 30002 = false
+CanVirtualize 30002 = true

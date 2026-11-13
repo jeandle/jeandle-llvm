@@ -22,6 +22,13 @@ static ConstantFieldResult fakeGetConstantField(int OopId, int Offset) {
   return {10, 42};
 }
 
+static CloneInstanceInfoResult
+fakeGetCloneInstanceInfo(uintptr_t, bool, CloneInstanceInfoPurpose Purpose) {
+  if (Purpose == CloneInstanceInfoPurpose::FieldState)
+    return {4, 2, {{12, 4}, {16, 8}}};
+  return {3, 2, {}};
+}
+
 TEST(VMCallbackLogRecordReplayTest, RecordsAndReplaysTupleResult) {
   SmallString<128> Path;
   int FD;
@@ -31,6 +38,7 @@ TEST(VMCallbackLogRecordReplayTest, RecordsAndReplaysTupleResult) {
 
   VMCallbacks Callbacks{};
   Callbacks.GetConstantField = &fakeGetConstantField;
+  Callbacks.GetCloneInstanceInfo = &fakeGetCloneInstanceInfo;
   registerVMCallbacks(Callbacks);
   enableVMCallbackRecording();
 
@@ -40,6 +48,12 @@ TEST(VMCallbackLogRecordReplayTest, RecordsAndReplaysTupleResult) {
     ASSERT_NE(RecordingCallbacks, nullptr);
     EXPECT_EQ(RecordingCallbacks->GetConstantField(7, 16),
               (ConstantFieldResult{10, 42}));
+    EXPECT_EQ(RecordingCallbacks->GetCloneInstanceInfo(
+                  42, true, CloneInstanceInfoPurpose::FieldState),
+              (CloneInstanceInfoResult{4, 2, {{12, 4}, {16, 8}}}));
+    EXPECT_EQ(RecordingCallbacks->GetCloneInstanceInfo(
+                  42, true, CloneInstanceInfoPurpose::ScalarCopy),
+              (CloneInstanceInfoResult{3, 2, {}}));
     if (Error E = Recorder.dump(Path))
       FAIL() << toString(std::move(E));
   }
@@ -47,7 +61,9 @@ TEST(VMCallbackLogRecordReplayTest, RecordsAndReplaysTupleResult) {
   auto BufferOrErr = MemoryBuffer::getFile(Path);
   ASSERT_TRUE(static_cast<bool>(BufferOrErr));
   EXPECT_EQ(BufferOrErr.get()->getBuffer(),
-            "GetConstantField 7 16 = (10, 42)\n");
+            "GetConstantField 7 16 = (10, 42)\n"
+            "GetCloneInstanceInfo 42 true 0 = (4, 2, [(12, 4), (16, 8)])\n"
+            "GetCloneInstanceInfo 42 true 1 = (3, 2, [])\n");
 
   if (Error E = loadAndRegisterVMCallbackLog(Path, ""))
     FAIL() << toString(std::move(E));
@@ -55,6 +71,12 @@ TEST(VMCallbackLogRecordReplayTest, RecordsAndReplaysTupleResult) {
   ASSERT_NE(ReplayCallbacks, nullptr);
   EXPECT_EQ(ReplayCallbacks->GetConstantField(7, 16),
             (ConstantFieldResult{10, 42}));
+  EXPECT_EQ(ReplayCallbacks->GetCloneInstanceInfo(
+                42, true, CloneInstanceInfoPurpose::FieldState),
+            (CloneInstanceInfoResult{4, 2, {{12, 4}, {16, 8}}}));
+  EXPECT_EQ(ReplayCallbacks->GetCloneInstanceInfo(
+                42, true, CloneInstanceInfoPurpose::ScalarCopy),
+            (CloneInstanceInfoResult{3, 2, {}}));
 
   EXPECT_FALSE(sys::fs::remove(Path));
 }

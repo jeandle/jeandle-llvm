@@ -1,0 +1,5 @@
+RequiresStrictLockOrder = 1
+ElementBasicTypeOfArrayKlass 22222 = 8
+IsInterface 22222 = false
+GetSecondarySupers 22222 = []
+ArrayElementKlass 22222 = 0

@@ -55,8 +55,10 @@
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/Jeandle/DeoptPoolBundleLowering.h"
 #include "llvm/Analysis/Jeandle/DeoptPoolPlanner.h"
+#include "llvm/Analysis/Jeandle/JeandleAnalysisUtils.h"
 #include "llvm/Analysis/Jeandle/PartialEscape.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
+#include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -70,6 +72,7 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
+#include "llvm/IR/Jeandle/MemoryBarrier.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/StringIntrinsics.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
@@ -123,6 +126,8 @@ STATISTIC(JeandlePEAMaterializedNested,
 STATISTIC(JeandlePEADeadLoopNests,
           "Loop nests published dead without a body traversal (no live "
           "forward edge into the header)");
+STATISTIC(JeandlePEACopyFolds,
+          "jeandle.copy pseudo calls folded into virtual field state");
 
 // When set, dump per-function PEA classification stats
 // on errs() after commit(). The line is prefixed with `;; PEA stats` so it
@@ -140,6 +145,26 @@ static llvm::cl::opt<bool> JeandlePEAEliminateLocks(
     "jeandle-pea-eliminate-locks", llvm::cl::init(true), llvm::cl::Hidden,
     llvm::cl::desc("PEA: eliminate balanced monitor enter/exit pairs on "
                    "virtual (non-escaping) receivers."));
+
+// Fold jeandle.copy pseudo calls whose destination resolves to a virtual
+// array (virtual-to-virtual entry transfer, or per-element typed loads from a
+// concrete source) instead of materializing both operands at the call. There
+// is no JDK-side switch; opt users and tests can disable the fold to isolate
+// regressions or attribute allocations.
+static llvm::cl::opt<bool> JeandlePEAFoldCopy(
+    "jeandle-pea-fold-copy", llvm::cl::init(true), llvm::cl::Hidden,
+    llvm::cl::desc("PEA: fold jeandle.copy pseudo calls with a virtual "
+                   "destination into field state instead of materializing."));
+
+// The copy fold has no element-count cap of its own: a folded destination is
+// a virtual array, so the transfer is already bounded by
+// -jeandle-pea-max-array-length (the analogue of Graal's
+// MaximumEscapeAnalysisArrayLength, which likewise imposes no separate
+// arraycopy-fold limit). The emitted per-element loads and materialization
+// replay stores form contiguous, ascending, same-type, naturally-aligned
+// unordered-atomic runs — the shape the auto-vectorizer widens once it
+// accepts unordered atomics — so per-element cost does not grow with the
+// array length the way a scalar-only emission would.
 
 // Cascade other still-locked virtuals at materialization when the target uses
 // HotSpot's lightweight locking (LM_LIGHTWEIGHT requires strict lock nesting).
@@ -523,6 +548,7 @@ struct BlockExitData {
   DenseSet<jeandle::ObjectID> Virtuals;
   // Objects already materialized on every path reaching this exit.
   DenseSet<jeandle::ObjectID> Materialized;
+  DenseMap<jeandle::ObjectID, uint8_t> PendingBarriers;
   // Per-object field values at block exit; an absent offset means "Java
   // default", never "field does not exist".
   DenseMap<jeandle::ObjectID, DenseMap<int64_t, jeandle::FieldValue>>
@@ -543,6 +569,145 @@ struct BlockExitData {
   // path-relevant elisions; the BytecodeDepth powers the narrow cascade rule.
   DenseMap<jeandle::ObjectID, SmallVector<LockEnter, 4>> LiveLockEnters;
 };
+
+// Primitive array groups are point-sensitive, just like their values. A copy
+// replaces both the value and its byte span. Instance/reference fields instead
+// retain a declared physical layout, including compressed-oop storage types.
+static bool hasPrimitiveArrayGroups(const jeandle::VirtualObject &VO) {
+  return VO.isArray() && VO.ArrayElementType &&
+         !VO.ArrayElementType->isPointerTy();
+}
+
+static std::optional<jeandle::VirtualObject::FieldDesc>
+fieldForValue(const jeandle::VirtualObject &VO, int64_t Offset, Type *ValueTy,
+              const DataLayout &DL) {
+  if (!hasPrimitiveArrayGroups(VO)) {
+    if (const auto *FD = VO.findField(Offset))
+      return *FD;
+    return std::nullopt;
+  }
+  if (!ValueTy || ValueTy->isPointerTy() ||
+      !jeandle::pea::isLegalMaterializationAtomicType(ValueTy, DL))
+    return std::nullopt;
+  uint64_t Bytes = DL.getTypeStoreSize(ValueTy).getFixedValue();
+  if (Bytes > std::numeric_limits<uint8_t>::max() ||
+      !jeandle::pea::isUsableFieldOffset(Offset) ||
+      !jeandle::pea::checkedOffsetAdd(Offset, static_cast<int64_t>(Bytes)))
+    return std::nullopt;
+  return jeandle::VirtualObject::FieldDesc{Offset, ValueTy,
+                                           static_cast<uint8_t>(Bytes), false};
+}
+
+static SmallVector<jeandle::VirtualObject::FieldDesc, 8>
+activeFields(const jeandle::VirtualObject &VO,
+             const DenseMap<int64_t, jeandle::FieldValue> &Values,
+             const DataLayout &DL) {
+  if (!hasPrimitiveArrayGroups(VO))
+    return VO.Fields;
+  SmallVector<jeandle::VirtualObject::FieldDesc, 8> Fields;
+  for (const auto &[Offset, FV] : Values) {
+    auto FD = fieldForValue(VO, Offset, FV.getDeclaredType(), DL);
+    assert(FD && "active primitive value must have a legal byte span");
+    Fields.push_back(*FD);
+  }
+  llvm::sort(Fields,
+             [](const auto &L, const auto &R) { return L.Offset < R.Offset; });
+  return Fields;
+}
+
+static bool
+isCompleteGroupWindow(ArrayRef<jeandle::VirtualObject::FieldDesc> Fields,
+                      int64_t Lo, int64_t Hi) {
+  if (Lo == Hi)
+    return true;
+  for (const auto &FD : Fields) {
+    auto End = jeandle::pea::checkedOffsetAdd(FD.Offset, FD.ByteSize);
+    if (!End)
+      return false;
+    if (*End <= Lo || FD.Offset >= Hi)
+      continue;
+    if (FD.Offset < Lo || *End > Hi || FD.IsReference)
+      return false;
+  }
+  return true;
+}
+
+// Graal merges packed byte-array groups only with the same group or with
+// default cells. Promote those defaults before ordinary per-offset PHI merging;
+// incompatible non-default layouts must replay on their incoming edges.
+static bool normalizePrimitiveMerge(
+    const jeandle::VirtualObject &VO,
+    ArrayRef<std::pair<jeandle::ObjectID, BlockExitData *>> Inputs,
+    const DataLayout &DL) {
+  if (!hasPrimitiveArrayGroups(VO))
+    return true;
+  SmallVector<jeandle::VirtualObject::FieldDesc, 8> Groups;
+  for (auto [ID, State] : Inputs)
+    for (const auto &FD : activeFields(VO, State->FieldStates[ID], DL))
+      if (FD.ByteSize > VO.ArrayIndexScale)
+        Groups.push_back(FD);
+  llvm::sort(Groups,
+             [](const auto &L, const auto &R) { return L.Offset < R.Offset; });
+  SmallVector<jeandle::VirtualObject::FieldDesc, 8> UniqueGroups;
+  for (const auto &FD : Groups) {
+    if (!UniqueGroups.empty()) {
+      const auto &Previous = UniqueGroups.back();
+      if (Previous.Offset == FD.Offset && Previous.ByteSize == FD.ByteSize &&
+          Previous.LLVMType == FD.LLVMType)
+        continue;
+      if (Previous.Offset + Previous.ByteSize > FD.Offset)
+        return false;
+    }
+    UniqueGroups.push_back(FD);
+  }
+  // Validate every incoming state before changing any of them.
+  for (const auto &Group : UniqueGroups)
+    for (auto [ID, State] : Inputs) {
+      auto &Values = State->FieldStates[ID];
+      auto Fields = activeFields(VO, Values, DL);
+      for (const auto &FD : Fields) {
+        if (FD.Offset >= Group.Offset + Group.ByteSize ||
+            FD.Offset + FD.ByteSize <= Group.Offset)
+          continue;
+        if (FD.Offset == Group.Offset && FD.ByteSize == Group.ByteSize &&
+            FD.LLVMType == Group.LLVMType)
+          continue;
+        const auto &FV = Values.find(FD.Offset)->second;
+        auto *C = FV.isScalar() ? dyn_cast<Constant>(FV.getScalar()) : nullptr;
+        if (FD.Offset < Group.Offset ||
+            FD.Offset + FD.ByteSize > Group.Offset + Group.ByteSize || !C ||
+            !C->isNullValue())
+          return false;
+      }
+    }
+  for (const auto &Group : UniqueGroups)
+    for (auto [ID, State] : Inputs) {
+      auto &Values = State->FieldStates[ID];
+      auto Existing = Values.find(Group.Offset);
+      if (Existing != Values.end() &&
+          Existing->second.getDeclaredType() == Group.LLVMType)
+        continue;
+      SmallVector<int64_t, 8> Erase;
+      for (const auto &[Offset, FV] : Values)
+        if (Offset >= Group.Offset && Offset < Group.Offset + Group.ByteSize)
+          Erase.push_back(Offset);
+      FieldDefinitionSet Definitions;
+      auto &FieldDefs = State->FieldDefinitions[ID];
+      for (int64_t Offset : Erase) {
+        auto It = FieldDefs.find(Offset);
+        if (It != FieldDefs.end()) {
+          Definitions.insert(It->second.begin(), It->second.end());
+          FieldDefs.erase(It);
+        }
+        Values.erase(Offset);
+      }
+      Values[Group.Offset] =
+          jeandle::FieldValue::scalar(Constant::getNullValue(Group.LLVMType));
+      if (!Definitions.empty())
+        FieldDefs[Group.Offset] = std::move(Definitions);
+    }
+  return true;
+}
 
 // Whether one predecessor edge contributes state to its target: Unseen (the
 // pred has not published an exit yet), Dead (the edge or the whole pred is
@@ -609,6 +774,7 @@ struct PEAAttemptStatistics {
   uint64_t MaterializedCascade = 0;
   uint64_t MaterializedNested = 0;
   uint64_t DeadLoopNests = 0;
+  uint64_t CopyFolds = 0;
 
   void publish() const {
     JeandlePEAVirtualized += Virtualized;
@@ -624,6 +790,7 @@ struct PEAAttemptStatistics {
     JeandlePEAMaterializedCascade += MaterializedCascade;
     JeandlePEAMaterializedNested += MaterializedNested;
     JeandlePEADeadLoopNests += DeadLoopNests;
+    JeandlePEACopyFolds += CopyFolds;
   }
 };
 
@@ -697,6 +864,7 @@ static void markObjectMaterializedDispositionInExitData(BlockExitData &Data,
   Data.Virtuals.erase(ID);
   Data.Materialized.insert(ID);
   Data.FieldStates.erase(ID);
+  Data.PendingBarriers.erase(ID);
   Data.FieldDefinitions.erase(ID);
   Data.LockCounts.erase(ID);
   Data.LiveLockEnters.erase(ID);
@@ -807,10 +975,12 @@ static DenseSet<BasicBlock *> findUnsafeReachableCyclicBlocks(Function &F,
 // proofs, lock balancing) and classifies every allocation site.
 class Analyzer {
 public:
-  Analyzer(Function &F, DominatorTree &DT, LoopInfo &LI, bool StrictLockOrder,
+  Analyzer(Function &F, DominatorTree &DT, LoopInfo &LI, LazyValueInfo &LVI,
+           bool StrictLockOrder,
            const DenseSet<Instruction *> &SuppressedCFGProofs,
            const DenseSet<CallBase *> &SuppressedVirtualizations)
-      : F(F), DT(DT), LI(LI), DL(F.getParent()->getDataLayout()),
+      : F(F), DT(DT), LI(LI), IsNullEdge{LVI},
+        DL(F.getParent()->getDataLayout()),
         VMConsts(jeandle::VMConstants::fromModule(*F.getParent())),
         MonitorDepth(computeMonitorDepthInfo(F)),
         StrictLockOrder(StrictLockOrder),
@@ -868,6 +1038,9 @@ private:
   Function &F;
   DominatorTree &DT;
   LoopInfo &LI;
+  // Analysis only records effects, so the CFG and LVI snapshot stay unchanged
+  // throughout all fresh attempts and loop retries.
+  LVINullEdgeOracle IsNullEdge;
   const DataLayout &DL;
   // VMConstants read once from the module's runtime-defined globals (patched by
   // HotSpot's RuntimeDefinedJavaOps::define_global_variables); see
@@ -906,7 +1079,7 @@ private:
   PEAAttemptStatistics AttemptStats;
   // Attempt outputs, handed to the caller by run() so it can grow the
   // monotonic suppression sets before a fresh retry. InvalidCFGProofKillers:
-  // proofs invalidated by validateCFGDeadnessProofs at commit.
+  // proofs invalidated by replay preflight or validateCFGDeadnessProofs.
   SmallVector<Instruction *, 8> InvalidCFGProofKillers;
   // A final deopt obligation could not be satisfied; the attempt must be
   // abandoned. Polled like InvalidLoopMonotonicity.
@@ -918,6 +1091,10 @@ private:
   // FreshRetry path); distinct from the invalid-deopt sites in that the
   // current attempt is abandoned immediately once this is non-empty.
   SmallVector<CallBase *, 4> RetryVirtualizationAllocationSites;
+  bool hasPendingRetry() const {
+    return !RetryVirtualizationAllocationSites.empty() ||
+           !InvalidCFGProofKillers.empty();
+  }
   // Safepoints whose deopt-pool rewrite plan commit() discovered to be
   // invalid after the analysis walk (duplicate pool effects at one
   // safepoint, or plan members/tokens that lost eligibility during
@@ -1262,6 +1439,52 @@ private:
   std::unordered_map<SemanticOopCastKey, WeakTrackingVH, SemanticOopCastKeyHash>
       SemanticOopCastCache;
 
+  // Cache the per-element load chains of a concrete-source jeandle.copy fold
+  // by (copy site, source byte offset). Loop-fixpoint revisits must reuse
+  // the same Value*s — FieldState convergence compares Scalar entries by
+  // Value* identity, so per-visit fresh loads would never converge (the same
+  // rationale as LoopFieldPhiCache). The instructions live in
+  // PEAResult::OwnedCopyLoads, which survives every rollback, while the
+  // per-visit PlaceInstructionEffects do NOT (restoreLoopSnapshot truncates
+  // the block's effect list) — so every visit re-emits the Place effects for
+  // the cached chain (the same re-emit pattern as the AllocSiteToVO
+  // cache-hit path in processAllocation). Scoped to this Analyzer:
+  // PartialEscapeIterative builds a fresh Analyzer per outer round.
+  struct CopyElementLoadKey {
+    CallBase *Copy;
+    int64_t ByteOffset;
+    bool operator==(const CopyElementLoadKey &O) const {
+      return Copy == O.Copy && ByteOffset == O.ByteOffset;
+    }
+  };
+  struct CopyElementLoadKeyHash {
+    size_t operator()(const CopyElementLoadKey &K) const {
+      return static_cast<size_t>(
+          hash_combine(hash_value(K.Copy), hash_value(K.ByteOffset)));
+    }
+  };
+  struct CopyElementLoadChain {
+    WeakTrackingVH Addr;
+    WeakTrackingVH Load;
+    // Null for non-narrow element types.
+    WeakTrackingVH NarrowCast;
+  };
+  std::unordered_map<CopyElementLoadKey, CopyElementLoadChain,
+                     CopyElementLoadKeyHash>
+      CopyElementLoadCache;
+
+  // Copy sites folded with a VIRTUAL source, as (source, destination) VO id
+  // pairs. commit() consults this after eligibility settles: a fold whose
+  // destination turned ineligible is dropped and its call REVIVES, and the
+  // revived call reads the source's memory at the call — the source's own
+  // materialization may replay the values only after the call (or the
+  // source may be proposed for deletion), so commit keeps such a source
+  // entirely real. Like CaseBPhiAliases, intentionally not snapshotted:
+  // commit()-time-only state, re-derived on every analysis visit (duplicate
+  // pairs are inert — the consumer re-checks eligibility).
+  SmallVector<std::pair<jeandle::ObjectID, jeandle::ObjectID>, 4>
+      CopyFoldVirtualSources;
+
   // Per-VO record of LLVM pointer-PHIs that processBlockPhis
   // aliased via Case-B (every incoming agrees on the same ObjectID).
   // commit() consults this to schedule explicit PHI erasures for VOs
@@ -1521,6 +1744,11 @@ private:
   // bails to materialization for any sub-slot / partial-field read before
   // calling, so this routine only handles same-slot type reinterprets.
   Value *coerceToType(Value *V, Type *LoadTy, Instruction *InsertContext);
+  bool planVirtualPrimitiveCopy(
+      jeandle::ObjectID SrcID, const jeandle::VirtualObject &Src,
+      jeandle::ObjectID DestID, const jeandle::VirtualObject &Dest,
+      int64_t SrcPos, int64_t DestPos, int64_t Len,
+      SmallVectorImpl<std::pair<int64_t, jeandle::FieldValue>> &Values);
 
   // Return an AS1 semantic view of a naked AS3 oop stored by SI. Reuse first
   // an already-parented, dominating cast from an earlier outer round, then an
@@ -1542,6 +1770,13 @@ private:
   // The zext is registered unparented with Result.OwnedInsts; the transform
   // splices it in immediately before the safepoint.
   Value *widenDeoptScalar(Value *V, Instruction *InsertContext);
+
+  // Project a complete primitive array group into physical element values
+  // for a deopt snapshot. The packed virtual state remains unchanged. Like
+  // widenDeoptScalar, new instructions are owned until the bundle rewrite
+  // places their operand chains immediately before the safepoint.
+  SmallVector<Value *, 8> projectDeoptArrayGroup(Value *V, Type *ElementTy,
+                                                 Instruction *InsertContext);
 
   // Why a materialization was emitted. Used to bump the per-reason Statistic
   // counter at the emission site. ALL six reasons (Unhandled, Merge,
@@ -1784,7 +2019,8 @@ private:
   // out-of-bounds index, or a header (mark/klass) field access. Shared by
   // every virtualized load/store path: instance-field and array-element
   // accesses alike reduce to one constant byte offset into the object.
-  std::optional<int64_t> resolveAccess(Value *Ptr, jeandle::ObjectID BaseID);
+  std::optional<int64_t> resolveAccess(Value *Ptr, jeandle::ObjectID BaseID,
+                                       Type *AccessTy);
   // Frontend-invariant check (JeandlePEAVerifyHeaderAccess): a load/store on
   // a virtual receiver whose constant byte offset is below
   // instanceOopDesc.base_offset_in_bytes is a raw object-header access that
@@ -1813,7 +2049,9 @@ private:
   bool foldStringIntrinsic(CallBase *CB);
   bool foldStringGetChar(CallBase *CB);
   std::optional<jeandle::ObjectID> resolveStringArray(Value *V);
-  Value *readStringCell(jeandle::ObjectID ID, int64_t Offset, unsigned Bits);
+  Value *readStringCell(jeandle::ObjectID ID, int64_t Offset, unsigned Bits,
+                        Instruction *InsertContext = nullptr);
+  Value *placeStringInstruction(Instruction *I, Instruction *InsertContext);
   // Known non-escaping LLVM intrinsics (assume, lifetime/invariant
   // markers, debug, annotations, branch hints, ...) are no-ops for PEA;
   // launder/strip.invariant.group forward the argument's virtual alias.
@@ -1832,6 +2070,75 @@ private:
   bool foldLoadKlass(CallBase *CB);
   bool foldGetClass(CallBase *CB);
   bool foldCheckInstanceOf(CallBase *CB);
+  // Fold a jeandle.copy pseudo call whose destination is an eligible virtual
+  // array (Jeandle counterpart of Graal BasicArrayCopyNode::virtualize):
+  // virtual-to-virtual copies transfer field-state entries (same-VO overlap
+  // with destPos > srcPos transfers in reverse); a concrete source folds to
+  // per-element typed loads placed at the call. All fold preconditions are
+  // checked read-only first; any failure returns false so the caller takes
+  // the generic escape path (both operands materialize at the call).
+  bool processCopyCall(CallBase *CB);
+  // Concrete-source leg of the clone-instance fold — the Jeandle counterpart
+  // of Graal ObjectClone's concrete-instance path: enumerate the clone
+  // klass's non-static fields via the GetCloneInstanceInfo callback (the
+  // same enumeration CopySpecialization's instance-clone scalarization
+  // uses) and fold each field to a semantic load placed at the call. BaseOff
+  // and PayloadEnd delimit the validated full-coverage payload window.
+  // Returns false (caller takes the generic escape path) when the source
+  // still references a virtual object, the callback is unavailable or
+  // declines the klass, or a field's storage cannot be modelled.
+  bool foldCloneInstanceConcreteSource(CallBase *CB, jeandle::ObjectID DestID,
+                                       jeandle::VirtualObject &Dest,
+                                       int64_t BaseOff, int64_t PayloadEnd);
+  // Element-kind compatibility gate for a copy fold: distinct array klasses
+  // are acceptable only with a proof — the frontend's ValidatedCopy marker
+  // (the exact "guards were emitted" signal; copyOf/copyOfRange do NOT
+  // always guard — too_many_traps suppresses the subtype check) for
+  // reference arrays, or a statically proven subtype relation. Distinct
+  // same-representation primitive kinds (byte/boolean, short/char) never
+  // pass: an unvalidated copy between them must keep raising
+  // ArrayStoreException instead of folding.
+  bool copyElementKindsCompatible(uintptr_t SrcKlass, uintptr_t DestKlass,
+                                  bool ElementsAreRefs, const CallBase *CB);
+  // Extract a non-negative-foldable i64 copy operand: chase scalar aliases,
+  // peel one sext/zext wrapper, and require a ConstantInt. Returns nullopt
+  // for non-constant or negative-looking shapes (callers treat them as bail).
+  std::optional<int64_t> getCopyConstantI64(Value *V);
+  // Create (or reuse from CopyElementLoadCache) the unparented element load
+  // for a concrete-source copy fold: a GEP to the source element plus an
+  // unordered atomic load of ElemTy; narrow-oop elements additionally get an
+  // AS3 -> AS1 addrspacecast so the semantic value follows the AS1 field
+  // representation. Returns the semantic (AS1) chain tail. Every instruction
+  // is registered in PEAResult::OwnedCopyLoads and placed immediately before
+  // the copy by its own PlaceInstructionEffect, inheriting the call's full
+  // control context (validated guards, null checks) for bounds/type safety.
+  Value *getOrCreateCopyElementSemanticLoad(CallBase *Copy, Value *ConcreteSrc,
+                                            Type *ElemTy, int64_t SrcOff,
+                                            uintptr_t ValueKlass);
+  // Clear the reaching-def entries of every destination slot inside
+  // [Lo, Hi) when a copy fold takes the slot over (written or erased). The
+  // copy call itself becomes the slot's reaching definition, and
+  // dropEffectsForIneligible revives that call as a whole unit when the
+  // destination turns ineligible — a per-slot restored store would only add
+  // a dead write the revived call immediately overwrites. Clearing the
+  // entry keeps such overwritten stores unobserved, so their
+  // EliminateStore effects survive the drop as dead-store eliminations.
+  // VirtualRefStoreTargets entries are deliberately untouched: a store
+  // OBSERVED before the fold (a folded load consumed its value) must remain
+  // restorable, and its inner reference keeps the keep-real cascade sound.
+  void clearCopyFoldReachingDefs(jeandle::ObjectID DestID, int64_t Lo,
+                                 int64_t Hi);
+  // Observe every reaching definition of SrcID's slots inside [Lo, Hi) AT
+  // THE FOLD, before any later store can kill the entries in the live
+  // point-sensitive map: a revived copy call reads these original values,
+  // and commit-time observation (markIneligible walks the live map) would
+  // miss a pre-copy store whose entry a post-copy store overwrote. The
+  // observed set is insert-only, so the observation survives later kills;
+  // it is inert while the fold survives (an observed store's owner still
+  // eliminates it) and restores the stores when the source is kept real
+  // (see CopyFoldVirtualSources).
+  void observeCopyFoldSourceDefs(jeandle::ObjectID SrcID, int64_t Lo,
+                                 int64_t Hi);
   // Fold a monitorenter on an eligible virtual receiver into lock-state
   // tracking and a ReplaceCall elision. Returns false otherwise; an
   // ineligible (already-abandoned) receiver first cascades still-locked
@@ -1983,6 +2290,7 @@ private:
     // Flip the per-object state to materialized (live CurrentState vs
     // ExitInfo).
     function_ref<void(jeandle::ObjectID)> FlipState;
+    function_ref<uint8_t(jeandle::ObjectID)> GetPendingBarriers;
   };
   // Shared materialization driver: run the
   // cascade/lock-capture/prereq/dominance/emit/flip algorithm for ID under
@@ -2301,7 +2609,7 @@ void Analyzer::processBlock(BasicBlock *BB) {
     mergeStates(BB);
   }
 
-  if (!RetryVirtualizationAllocationSites.empty())
+  if (hasPendingRetry())
     return;
   processBlockBodyAndPublish(BB);
 }
@@ -2422,16 +2730,16 @@ void Analyzer::processBlockBodyAndPublish(BasicBlock *BB) {
   for (Instruction &I : *BB) {
     if (&I == BB->getTerminator())
       drainMaterializeAll();
-    if (!RetryVirtualizationAllocationSites.empty())
+    if (hasPendingRetry())
       return;
     if (MaybeSplit && &I == TermII) {
       PreInvokeSnapshot.emplace();
       snapshotExitStateInto(*PreInvokeSnapshot);
-      if (!RetryVirtualizationAllocationSites.empty())
+      if (hasPendingRetry())
         return;
     }
     processInstruction(&I);
-    if (!RetryVirtualizationAllocationSites.empty())
+    if (hasPendingRetry())
       return;
   }
   // Defensive: empty blocks or blocks whose terminator was never enqueued
@@ -2441,7 +2749,7 @@ void Analyzer::processBlockBodyAndPublish(BasicBlock *BB) {
   drainMaterializeAll();
 
   snapshotExitState(BB);
-  if (!RetryVirtualizationAllocationSites.empty())
+  if (hasPendingRetry())
     return;
 
   if (TermII) {
@@ -2500,7 +2808,7 @@ void Analyzer::processBlockBodyAndPublish(BasicBlock *BB) {
 #ifndef NDEBUG
       assertVirtualReferenceClosure(*PreInvokeSnapshot);
 #endif
-      if (!RetryVirtualizationAllocationSites.empty())
+      if (hasPendingRetry())
         return;
     }
 
@@ -2656,7 +2964,9 @@ void Analyzer::inheritFromExit(const BlockExitData &Exit) {
   for (jeandle::ObjectID ID : Exit.Virtuals) {
     if (!Eligible.lookup(ID))
       continue;
-    CurrentState.addObject(ID, jeandle::ObjectState());
+    jeandle::ObjectState OS;
+    OS.addPendingBarriers(Exit.PendingBarriers.lookup(ID));
+    CurrentState.addObject(ID, std::move(OS));
   }
   for (jeandle::ObjectID ID : Exit.Materialized) {
     if (!Eligible.lookup(ID))
@@ -3017,6 +3327,62 @@ Value *Analyzer::widenDeoptScalar(Value *V, Instruction *InsertContext) {
   return ZExt;
 }
 
+SmallVector<Value *, 8>
+Analyzer::projectDeoptArrayGroup(Value *V, Type *ElementTy,
+                                 Instruction *InsertContext) {
+  if (V->getType() == ElementTy)
+    return {V};
+
+  auto Own = [&](Instruction *I) -> Value * {
+    I->setDebugLoc(InsertContext->getDebugLoc());
+    Result.OwnedInsts.emplace_back(I);
+    return I;
+  };
+  auto Cast = [&](Instruction::CastOps Opcode, Value *Source,
+                  Type *DestTy) -> Value * {
+    if (auto *C = dyn_cast<Constant>(Source))
+      if (Constant *Folded = ConstantFoldCastOperand(Opcode, C, DestTy, DL))
+        return Folded;
+    return Own(CastInst::Create(Opcode, Source, DestTy, "pea.deopt.element"));
+  };
+
+  uint64_t GroupBits = DL.getTypeSizeInBits(V->getType()).getFixedValue();
+  uint64_t ElementBits = DL.getTypeSizeInBits(ElementTy).getFixedValue();
+  assert(GroupBits >= ElementBits && GroupBits % ElementBits == 0 &&
+         "deopt group must contain complete primitive elements");
+  auto *GroupIntTy = IntegerType::get(F.getContext(), GroupBits);
+  auto *ElementIntTy = IntegerType::get(F.getContext(), ElementBits);
+  assert(CastInst::isBitCastable(V->getType(), GroupIntTy) &&
+         "deopt group must have a primitive integer bit representation");
+  Value *Bits = V->getType() == GroupIntTy
+                    ? V
+                    : Cast(Instruction::BitCast, V, GroupIntTy);
+  SmallVector<Value *, 8> Elements;
+  for (uint64_t BitOffset = 0; BitOffset < GroupBits;
+       BitOffset += ElementBits) {
+    uint64_t Shift =
+        DL.isLittleEndian() ? BitOffset : GroupBits - ElementBits - BitOffset;
+    Value *Part = Bits;
+    if (Shift != 0) {
+      Constant *Amount = ConstantInt::get(GroupIntTy, Shift);
+      Constant *Folded = nullptr;
+      if (auto *C = dyn_cast<Constant>(Bits))
+        Folded = ConstantFoldBinaryOpOperands(Instruction::LShr, C, Amount, DL);
+      if (Folded)
+        Part = Folded;
+      else
+        Part = Own(BinaryOperator::CreateLShr(Bits, Amount,
+                                              "pea.deopt.element.shift"));
+    }
+    if (GroupBits != ElementBits)
+      Part = Cast(Instruction::Trunc, Part, ElementIntTy);
+    if (ElementTy != ElementIntTy)
+      Part = Cast(Instruction::BitCast, Part, ElementTy);
+    Elements.push_back(Part);
+  }
+  return Elements;
+}
+
 Analyzer::MergeProcessor::MergeProcessor(Analyzer &A, BasicBlock *BB)
     : A(A), BB(BB), CurrentState(A.CurrentState), FieldStates(A.FieldStates),
       FieldDefinitions(A.FieldDefinitions), Eligible(A.Eligible),
@@ -3167,6 +3533,8 @@ void Analyzer::MergeProcessor::run() {
         A.inheritFromExit(*Preds[0]);
         uint32_t PrePhiSeqNo = Result.NextSeqNo;
         A.processBlockPhis(BB, MergeEffects);
+        if (A.hasPendingRetry())
+          return;
         if (Result.NextSeqNo != PrePhiSeqNo) {
           // Case A changed one or more target-local predecessor views. Retry
           // the whole merge so per-object state, earlier PHI aliases, and the
@@ -3185,6 +3553,8 @@ void Analyzer::MergeProcessor::run() {
       if (!Eligible.lookup(ID))
         continue;
       Changed |= mergeObjectState(ID);
+      if (A.hasPendingRetry())
+        return;
     }
 
     // Run the PHI loop INSIDE the merge do-while, with every BB-phi alias
@@ -3201,6 +3571,8 @@ void Analyzer::MergeProcessor::run() {
     {
       uint32_t PrePhiSeqNo = Result.NextSeqNo;
       A.processBlockPhis(BB, MergeEffects);
+      if (A.hasPendingRetry())
+        return;
       if (Result.NextSeqNo != PrePhiSeqNo)
         Changed = true;
     }
@@ -3410,6 +3782,8 @@ bool Analyzer::MergeProcessor::materializePredsAndMerge(jeandle::ObjectID ID) {
       A.materializeAtPredFromExitInfo(ID, PredBBs[i], *Preds[i],
                                       /*EdgeLocal=*/true, MatReason::Merge,
                                       /*TargetMerge=*/BB);
+      if (A.hasPendingRetry())
+        return Mat;
       if (Result.NextSeqNo != PreSeqNo)
         Mat = true;
     }
@@ -3474,17 +3848,16 @@ void Analyzer::MergeProcessor::appendFullPhiInputs(
 // via materializePredsAndMerge rather than dropping the offending offset.
 // Returns true if a nested inner-VO materialize emitted an Effect (retry).
 //
-// TODO(mergeObjectStates-two-slot-and-bytearray): mirror Graal's
-// virtualByteCount / twoSlotKinds compatibility pre-scan
-// (Graal PartialEscapeClosure) and widened-PHI synthesis.
-// The integer-widening zext below is guarded so a narrow pred with a
-// conflicting non-default scalar in the wide type's byte span bails instead
-// of discarding adjacent-byte contributions. That widening is unreachable by
-// construction — processStore's getOrCreateFieldIndex bails on a width
-// mismatch at the same offset, so two preds never present different integer
-// widths for one offset here — but the guard keeps the merge sound if that
-// ever changes (e.g. byte-array write decomposition under unsafe support).
+// Packed primitive array groups are checked and default-promoted before the
+// per-offset merge. Instance and reference slots retain their physical layout.
+// The integer-widening guard below also prevents discarding any neighboring
+// non-default contribution if a wider PHI is needed.
 bool Analyzer::MergeProcessor::mergeFieldStates(jeandle::ObjectID ID) {
+  SmallVector<std::pair<jeandle::ObjectID, BlockExitData *>, 4> Inputs;
+  for (auto *P : Preds)
+    Inputs.emplace_back(ID, P);
+  if (!normalizePrimitiveMerge(*Result.VirtualObjects[ID], Inputs, A.DL))
+    return materializePredsAndMerge(ID);
   unsigned RefLC = Preds[0]->LockCounts.lookup(ID); // all preds agree here.
   bool Changed = false;
 
@@ -3726,6 +4099,8 @@ bool Analyzer::MergeProcessor::mergeFieldStates(jeandle::ObjectID ID) {
         A.materializeAtPredFromExitInfo(InnerID, PredBBs[i], *Preds[i],
                                         /*EdgeLocal=*/true, MatReason::Phi,
                                         /*TargetMerge=*/BB);
+        if (A.hasPendingRetry())
+          return false;
         if (Result.NextSeqNo != PreSeqNo)
           Changed = true;
         // The real input is OrigAlloc for an ordinary inner or
@@ -3798,8 +4173,11 @@ bool Analyzer::MergeProcessor::mergeFieldStates(jeandle::ObjectID ID) {
   // the fixpoint converges.
   MergeEffects.addAll(PendingPhiEffects);
 
-  // Case B: object stays virtual at BB entry with the merged field state.
-  CurrentState.addObject(ID, jeandle::ObjectState());
+  // Case B: all virtual paths contribute their outstanding ordering.
+  jeandle::ObjectState OS;
+  for (const auto *Pred : Preds)
+    OS.addPendingBarriers(Pred->PendingBarriers.lookup(ID));
+  CurrentState.addObject(ID, std::move(OS));
   if (!Merged.empty())
     FieldStates[ID] = std::move(Merged);
   if (!MergedDefinitions.empty())
@@ -3866,6 +4244,7 @@ void Analyzer::normalizeIneligibleVirtualRefs(BlockExitData &Data) {
       Data.Virtuals.erase(Holder);
       Data.Materialized.erase(Holder);
       Data.FieldStates.erase(Holder);
+      Data.PendingBarriers.erase(Holder);
       Data.LockCounts.erase(Holder);
       Data.LiveLockEnters.erase(Holder);
     }
@@ -3887,6 +4266,8 @@ void Analyzer::snapshotExitStateInto(BlockExitData &Data) {
       continue;
     if (OS->isVirtual()) {
       Data.Virtuals.insert(ID);
+      if (OS->getPendingBarriers())
+        Data.PendingBarriers[ID] = OS->getPendingBarriers();
       auto FIt = FieldStates.find(ID);
       if (FIt != FieldStates.end() && !FIt->second.empty())
         Data.FieldStates[ID] = FIt->second;
@@ -4142,6 +4523,8 @@ void Analyzer::processBlockPhis(BasicBlock *BB, jeandle::EffectList &Out) {
       }
       if (EveryInputVirtual && synthesizeCaseC(BB, &Phi, InIDs, Dead, Out))
         continue;
+      if (hasPendingRetry())
+        return;
     }
 
     // Case A: mixed virtual + non-virtual incomings, OR a Case C attempt
@@ -4180,6 +4563,8 @@ void Analyzer::processBlockPhis(BasicBlock *BB, jeandle::EffectList &Out) {
       materializeAtPredFromExitInfo(*InIDs[I], Pred, *PredED,
                                     /*EdgeLocal=*/true, MatReason::Phi,
                                     /*TargetMerge=*/BB);
+      if (hasPendingRetry())
+        return;
 
       // Derived carry at the back-edge: the latch PHI's incoming is a GEP /
       // bitcast of the object (not an object-carry). Under reuse-OrigAlloc the
@@ -4428,6 +4813,12 @@ bool Analyzer::hasObservableIdentityUse(
       // remains observable: reconstruction could otherwise expose the source
       // and the synthetic object simultaneously.
       if (auto *CB = dyn_cast<CallBase>(UI)) {
+        // Initialization publication does not inspect the receiver's identity.
+        // Its virtual-receiver fold also applies in exits not yet visited by
+        // the loop traversal, so it cannot block a virtual identity merge.
+        if (jeandle::isObjectMemoryBarrier(CB) ||
+            jeandle::isReplayPublicationBarrier(CB))
+          continue;
         unsigned Operand = Use.getOperandNo();
         if (CB->isBundleOperand(Operand) &&
             CB->getOperandBundleForOperand(Operand).isDeoptOperandBundle()) {
@@ -4811,6 +5202,11 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
   // every offset in the union of per-pred FieldStates. We do this BEFORE
   // creating the new VO so a type-mismatch bail leaves Result.VirtualObjects
   // unchanged.
+  SmallVector<std::pair<jeandle::ObjectID, BlockExitData *>, 4> Inputs;
+  for (unsigned I = 0; I < LiveN; ++I)
+    Inputs.emplace_back(PerPredIDs[I], ExitInfos[I]);
+  if (!normalizePrimitiveMerge(Ref, Inputs, DL))
+    return false;
   DenseSet<int64_t> OffsetsSet;
   for (unsigned i = 0; i < LiveN; ++i) {
     auto FIt = ExitInfos[i]->FieldStates.find(PerPredIDs[i]);
@@ -4967,23 +5363,15 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
   // is the replay receiver; SyntheticPhi remains the logical alias carrier.
   // AllocationCall stays non-null because structural accessors expect it.
 
-  // Rebuild the synthetic VO's Fields as the UNION of every per-pred VO's
-  // Fields. duplicate() only copied Ref's (pred-0's) Fields, but the merged
-  // FieldStates we build below spans the union of all preds' stored offsets.
-  // A later sub-slot / wider load against the merged object scans VObj.Fields
-  // to find the containing slot (processLoad); if a FieldDesc that came only
-  // from a non-pred-0 path were missing, the scan would find nothing and the
-  // load would silently fold to the default zero instead of the merged value.
-  // getOrCreateFieldIndex is idempotent on exact matches (safe on the cached
-  // loop-header VO and for Ref's already-present fields) and returns -1 on an
-  // overlap/size conflict, which we treat as an incompatibility bail — exactly
-  // like the type-mismatch bails in the Plans loop below. We poison NewID
-  // before returning so the half-built VO is never observable; no PHI effects
-  // have been committed at this point.
+  // Preserve the union of physical instance/reference field layouts. Primitive
+  // array group spans are carried by the merged field values; their incoming
+  // compatibility was checked before creating the synthetic identity.
   {
     jeandle::VirtualObject &MergedVO = *Result.VirtualObjects[NewID];
     for (unsigned i = 0; i < LiveN; ++i) {
       const jeandle::VirtualObject &PVO = *Result.VirtualObjects[PerPredIDs[i]];
+      if (hasPrimitiveArrayGroups(PVO))
+        continue;
       for (const auto &FD : PVO.Fields) {
         if (MergedVO.getOrCreateFieldIndex(FD.Offset, FD.LLVMType, DL) < 0) {
           Eligible[NewID] = false;
@@ -5049,6 +5437,8 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
         materializeAtPredFromExitInfo(InnerID, Preds[i], *ExitInfos[i],
                                       /*EdgeLocal=*/true, MatReason::Phi,
                                       /*TargetMerge=*/BB);
+        if (hasPendingRetry())
+          return false;
         if (!Eligible.lookup(InnerID)) {
           Eligible[NewID] = false;
           return false;
@@ -5112,7 +5502,10 @@ bool Analyzer::synthesizeCaseC(BasicBlock *BB, PHINode *Phi,
   // MergeProcessor's MergeEffects for a merge, PendingMergePhis[BB] for an
   // entry/single-pred path). They are assigned SeqNos at drain time.
   Out.addAll(PendingPhiEffects);
-  CurrentState.addObject(NewID, jeandle::ObjectState());
+  jeandle::ObjectState OS;
+  for (unsigned I = 0; I < PerPredIDs.size(); ++I)
+    OS.addPendingBarriers(ExitInfos[I]->PendingBarriers.lookup(PerPredIDs[I]));
+  CurrentState.addObject(NewID, std::move(OS));
   Eligible[NewID] = true;
   // Refresh the merged field state unconditionally: with the phi-keyed
   // cache the same synthetic ID is reused across loop-fixpoint passes with
@@ -5246,6 +5639,11 @@ void Analyzer::processInstruction(Instruction *I) {
     }
   }
 
+  // TODO: Canonicalize pure scalar consumers with their current scalar aliases
+  // in this PEA round. An intervening canonicalization pass in iterative PEA
+  // cannot propagate through an arbitrarily long load/cast/copy chain within
+  // one analysis. Preserve integer width/poison semantics and invalidate
+  // derived folds when a supporting virtual object becomes ineligible.
   // Other virtual-input consumers (access folding + scalar-replaced inputs).
   if (Aliases.hasVirtualInputs(I)) {
     // Pointer-derivation forwards the virtual alias to the derived pointer so
@@ -5282,10 +5680,12 @@ void Analyzer::processInstruction(Instruction *I) {
     }
     // TODO(deferred-virtualizers): deferred virtualization handlers — NOT WIRED
     // yet:
-    //   - TODO: processArrayCopy / processMemSet — llvm.memcpy/memmove
-    //     (System.arraycopy) and llvm.memset (Arrays.fill). The only
-    //     llvm.memset producer today is jeandle.new_instance's lower-phase=1
-    //     template, inlined AFTER PEA, so neither shape reaches PEA yet.
+    //   - processCopyCall folds the jeandle.copy pseudo call (the pre-PEA
+    //     shape of System.arraycopy / Arrays.copyOf[Range] / reference-array
+    //     clone). llvm.memcpy/memmove/memset shapes would need their own
+    //     handler; the only llvm.memset producer today is
+    //     jeandle.new_instance's lower-phase=1 template, inlined AFTER PEA,
+    //     so neither shape reaches PEA yet.
     //   - TODO: llvm.reachability_fence — upstream LLVM this fork tracks
     //     does not define Intrinsic::reachability_fence, and the frontend
     //     emits no analogue.
@@ -5354,6 +5754,16 @@ void Analyzer::processInstruction(Instruction *I) {
         recordDeoptBundleMappings(CB);
         return;
       }
+      // A jeandle.copy pseudo call with a virtual destination folds into
+      // field state (processCopyCall) instead of escaping. Unlike the JavaOp
+      // folds above, a copy call ALWAYS carries a deopt bundle (the frontend
+      // attaches one to every GC-visible pseudo call), so recording the
+      // bundle mappings here is the live path: describable operands stay
+      // virtual when the fold is later dropped and the call survives.
+      if (processCopyCall(CB)) {
+        recordDeoptBundleMappings(CB);
+        return;
+      }
       // Order: materialize the call's REAL virtual inputs BEFORE recording
       // the virtual mappings for its deopt bundle. A VO that is both a real
       // argument AND a deopt-bundle operand of this call must be MATERIALIZED
@@ -5384,6 +5794,23 @@ void Analyzer::processInstruction(Instruction *I) {
   // sees no virtual LLVM operand.
   if (auto *CB = dyn_cast<CallBase>(I))
     recordDeoptBundleMappings(CB);
+}
+
+// The physical LLVM storage type of a Java field or array element, adjusted
+// to the narrow pointer when compressed oops shrink reference elements.
+// Shared by allocation virtualization and concrete-source copy typing.
+static Type *javaFieldStorageType(jeandle::JBasicType Kind,
+                                  bool UseCompressedOops, const DataLayout &DL,
+                                  LLVMContext &Ctx) {
+  // JVM boolean array cells occupy a full byte, as do baload/bastore.
+  if (Kind == jeandle::JBasicType::Boolean)
+    Kind = jeandle::JBasicType::Byte;
+  Type *ElemTy = jeandle::pea::llvmElementTypeFor(Kind, Ctx);
+  if (Kind == jeandle::JBasicType::Object && UseCompressedOops &&
+      DL.getPointerSize(jeandle::AddrSpace::NarrowOopAddrSpace) !=
+          DL.getPointerSize(jeandle::AddrSpace::JavaHeapAddrSpace))
+    ElemTy = PointerType::get(Ctx, jeandle::AddrSpace::NarrowOopAddrSpace);
+  return ElemTy;
 }
 
 // Allocation virtualization. Virtualize a jeandle.new_instance /
@@ -5605,13 +6032,8 @@ void Analyzer::processAllocation(CallBase *CB) {
     if (Kind != jeandle::JBasicType::Count) {
       VO->ArrayBaseOffset =
           static_cast<uint32_t>(VMConsts.arrayBaseOffsetFor(Kind));
-      if (Type *ElemTy =
-              jeandle::pea::llvmElementTypeFor(Kind, F.getContext())) {
-        if (Kind == jeandle::JBasicType::Object && VMConsts.UseCompressedOops &&
-            DL.getPointerSize(jeandle::AddrSpace::NarrowOopAddrSpace) !=
-                DL.getPointerSize(jeandle::AddrSpace::JavaHeapAddrSpace))
-          ElemTy = PointerType::get(F.getContext(),
-                                    jeandle::AddrSpace::NarrowOopAddrSpace);
+      if (Type *ElemTy = javaFieldStorageType(Kind, VMConsts.UseCompressedOops,
+                                              DL, F.getContext())) {
         VO->ArrayElementType = ElemTy;
         VO->ArrayIndexScale =
             static_cast<uint32_t>(VMConsts.elementSizeFor(Kind));
@@ -5686,8 +6108,8 @@ void Analyzer::processAllocation(CallBase *CB) {
 // tracked — a symbolic or out-of-bounds array index, a non-constant GEP
 // offset, or a header (mark/klass word) offset, which must never be
 // virtualized into a field slot; callers materialize on nullopt.
-std::optional<int64_t> Analyzer::resolveAccess(Value *Ptr,
-                                               jeandle::ObjectID BaseID) {
+std::optional<int64_t>
+Analyzer::resolveAccess(Value *Ptr, jeandle::ObjectID BaseID, Type *AccessTy) {
   jeandle::VirtualObject &VObj = *Result.VirtualObjects[BaseID];
 
   // Array-element GEP fast path: for array VOs with populated element
@@ -5740,7 +6162,21 @@ std::optional<int64_t> Analyzer::resolveAccess(Value *Ptr,
   // which is a legitimate out-of-bounds case, not a header access —
   // checkRawHeaderAccess skips arrays for that reason.
   if (VObj.isInstance()) {
-    if (*Offset < VMConsts.instanceBaseOffset())
+    if (*Offset < VMConsts.instanceBaseOffset() || !AccessTy ||
+        !AccessTy->isSized())
+      return std::nullopt;
+    TypeSize Bytes = DL.getTypeStoreSize(AccessTy);
+    if (Bytes.isScalable() || Bytes.getFixedValue() == 0 ||
+        Bytes.getFixedValue() >
+            static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+      return std::nullopt;
+    auto End = jeandle::pea::checkedOffsetAdd(
+        *Offset, static_cast<int64_t>(Bytes.getFixedValue()));
+    // Profile-inlined alternatives can access a different receiver layout on
+    // an infeasible path. Such a field cannot enter this object's state:
+    // merging a default for it would replay outside the actual allocation on
+    // another path. Default loads need the same complete-span check as stores.
+    if (!End || *End > VObj.SizeInBytes)
       return std::nullopt;
   } else if (VObj.isArray()) {
     // Reject offsets outside the array's element byte-range [ArrayBaseOffset,
@@ -5939,21 +6375,35 @@ bool Analyzer::processStore(StoreInst *SI) {
   // Shared offset resolution (array-element GEP fast path + constant-offset
   // resolver + header guard). See resolveAccess. Unresolved offset (symbolic
   // array index, non-constant GEP, header offset) -> bail.
-  std::optional<int64_t> Offset = resolveAccess(Ptr, *BaseID);
+  std::optional<int64_t> Offset =
+      resolveAccess(Ptr, *BaseID, PhysicalVal->getType());
   if (!Offset) {
     checkRawHeaderAccess(SI, Ptr, *BaseID);
     materializeOperandsAtStore();
     return true;
   }
 
-  // TODO(unsafe-inliner): see the access dispatch (processStore/processLoad).
-  // Unsafe.put{Int,Long,Short}-into-byte-array decomposition.
-
-  // Type-overlap validation via VirtualObject::getOrCreateFieldIndex. We don't
-  // actually use the returned index (FieldStates is keyed by raw offset), but
-  // -1 means an overlap/size conflict, or an unknown-size value type such as a
-  // vector/struct — bail either way.
-  if (VObj.getOrCreateFieldIndex(*Offset, PhysicalVal->getType(), DL) < 0) {
+  if (hasPrimitiveArrayGroups(VObj)) {
+    auto FD = fieldForValue(VObj, *Offset, PhysicalVal->getType(), DL);
+    int64_t BaseOffset = static_cast<int64_t>(VObj.ArrayBaseOffset);
+    auto ArrayEnd = jeandle::pea::checkedArrayElementOffset(
+        BaseOffset, VObj.ArrayLength, VObj.ArrayIndexScale);
+    auto StoreEnd = FD ? jeandle::pea::checkedOffsetAdd(*Offset, FD->ByteSize)
+                       : std::nullopt;
+    auto Fields = activeFields(VObj, FieldStates[*BaseID], DL);
+    // Each virtual span covers complete physical elements. This keeps scalar
+    // entries disjoint across predecessors and lets wider groups share the
+    // same element-based merge and deopt representation.
+    if (!FD || !VObj.ArrayIndexScale || *Offset < BaseOffset ||
+        (*Offset - BaseOffset) % VObj.ArrayIndexScale != 0 ||
+        FD->ByteSize % VObj.ArrayIndexScale != 0 || !ArrayEnd || !StoreEnd ||
+        *StoreEnd > *ArrayEnd ||
+        !isCompleteGroupWindow(Fields, *Offset, *StoreEnd)) {
+      materializeOperandsAtStore();
+      return true;
+    }
+  } else if (VObj.getOrCreateFieldIndex(*Offset, PhysicalVal->getType(), DL) <
+             0) {
     materializeOperandsAtStore();
     return true;
   }
@@ -6013,6 +6463,17 @@ bool Analyzer::processStore(StoreInst *SI) {
     assert(SemanticVal && SemanticVal->getType() == SemanticTy &&
            "semantic oop normalization produced the wrong type");
   }
+  if (hasPrimitiveArrayGroups(VObj)) {
+    auto FD = fieldForValue(VObj, *Offset, PhysicalVal->getType(), DL);
+    auto &Fields = FieldStates[*BaseID];
+    SmallVector<int64_t, 8> Erase;
+    for (const auto &[Off, FV] : Fields)
+      if (Off >= *Offset && Off < *Offset + FD->ByteSize)
+        Erase.push_back(Off);
+    for (int64_t Off : Erase)
+      Fields.erase(Off);
+    clearCopyFoldReachingDefs(*BaseID, *Offset, *Offset + FD->ByteSize);
+  }
   FieldStates[*BaseID][*Offset] = jeandle::FieldValue::scalar(SemanticVal);
   FieldDefinitionSet &Defs = FieldDefinitions[*BaseID][*Offset];
   Defs.clear();
@@ -6066,10 +6527,16 @@ void Analyzer::processLoad(LoadInst *LI) {
   jeandle::VirtualObject &VObj = *Result.VirtualObjects[*BaseID];
 
   if (!Eligible.lookup(*BaseID)) {
+    if (hasPrimitiveArrayGroups(VObj)) {
+      // Ineligible exits can retain reaching definitions without field values.
+      // Preserve them all when the current byte grouping is unavailable.
+      observeFieldDefinitions(*BaseID, FieldDefinitions);
+      return;
+    }
     // The load itself stays real. Preserve every reaching eliminated
     // definition whose tracked byte range overlaps this access; an unresolved
     // access may read any tracked cell, so it observes all definitions.
-    std::optional<int64_t> Offset = resolveAccess(Ptr, *BaseID);
+    std::optional<int64_t> Offset = resolveAccess(Ptr, *BaseID, LI->getType());
     TypeSize LoadSize = DL.getTypeStoreSize(LI->getType());
     if (!Offset || LoadSize.isScalable() || LoadSize.getFixedValue() == 0 ||
         LoadSize.getFixedValue() > std::numeric_limits<uint8_t>::max()) {
@@ -6077,7 +6544,7 @@ void Analyzer::processLoad(LoadInst *LI) {
       return;
     }
     uint8_t LoadBytes = static_cast<uint8_t>(LoadSize.getFixedValue());
-    for (const jeandle::VirtualObject::FieldDesc &Field : VObj.Fields) {
+    for (const auto &Field : activeFields(VObj, FieldStates[*BaseID], DL)) {
       std::optional<bool> Overlap = Field.overlaps(*Offset, LoadBytes);
       if (!Overlap || *Overlap)
         observeFieldDefinition(*BaseID, Field.Offset, FieldDefinitions);
@@ -6118,7 +6585,7 @@ void Analyzer::processLoad(LoadInst *LI) {
   }
 
   // Shared offset resolution; see resolveAccess.
-  std::optional<int64_t> Offset = resolveAccess(Ptr, *BaseID);
+  std::optional<int64_t> Offset = resolveAccess(Ptr, *BaseID, LI->getType());
   if (!Offset) {
     checkRawHeaderAccess(LI, Ptr, *BaseID);
     // Unresolvable offset (symbolic array index, non-constant GEP, header):
@@ -6166,7 +6633,7 @@ void Analyzer::processLoad(LoadInst *LI) {
   bool OverlapsNoncontained = false;
   // Fields are sorted by Offset; linear scan is fine for the small per-object
   // field counts we see in practice.
-  for (const auto &F : VObj.Fields) {
+  for (const auto &F : activeFields(VObj, FieldStates[*BaseID], DL)) {
     std::optional<int64_t> CheckedFieldEnd =
         jeandle::pea::checkedOffsetAdd(F.Offset, F.ByteSize);
     if (!CheckedFieldEnd) {
@@ -7146,28 +7613,85 @@ std::optional<jeandle::ObjectID> Analyzer::resolveStringArray(Value *V) {
   return ID;
 }
 
+Value *Analyzer::placeStringInstruction(Instruction *I,
+                                        Instruction *InsertContext) {
+  I->setDebugLoc(InsertContext->getDebugLoc());
+  Result.OwnedInsts.emplace_back(I);
+  auto E = std::make_unique<jeandle::PlaceInstructionEffect>();
+  E->Block = InsertContext->getParent();
+  E->Target = InsertContext;
+  E->InstructionToPlace = I;
+  E->SeqNo = Result.nextSeqNo();
+  Result.addBlockEffect(std::move(E));
+  return I;
+}
+
 Value *Analyzer::readStringCell(jeandle::ObjectID ID, int64_t Offset,
-                                unsigned Bits) {
+                                unsigned Bits, Instruction *InsertContext) {
   using namespace jeandle;
   const VirtualObject &VO = *Result.VirtualObjects[ID];
   Type *Ty = Type::getIntNTy(F.getContext(), Bits);
-  for (const auto &Field : VO.Fields) {
+  for (const auto &Field : activeFields(VO, FieldStates[ID], DL)) {
     auto Overlap = Field.overlaps(Offset, Bits / 8);
-    if (!Overlap ||
-        (*Overlap && (Field.Offset != Offset || Field.LLVMType != Ty)))
+    if (!Overlap)
       return nullptr;
+    if (!*Overlap)
+      continue;
+    // A missing starting offset is a default only when no active group
+    // intersects the read. Packed values can contain the entire cell.
+    if (Field.Offset > Offset ||
+        Field.Offset + Field.ByteSize < Offset + Bits / 8)
+      return nullptr;
+    const FieldValue &FV = FieldStates[ID].find(Field.Offset)->second;
+    if (!FV.isScalar())
+      return nullptr;
+    Value *V = FV.getScalar();
+    while (Value *Alias = Aliases.getScalarAlias(V))
+      V = Alias;
+    if (isa<UndefValue>(V))
+      return nullptr;
+    unsigned GroupBits = Field.ByteSize * 8;
+    Type *GroupTy = Type::getIntNTy(F.getContext(), GroupBits);
+    if (!CastInst::isBitCastable(V->getType(), GroupTy))
+      return nullptr;
+    unsigned Shift = DL.isLittleEndian()
+                         ? (Offset - Field.Offset) * 8
+                         : (Field.Offset + Field.ByteSize - Offset) * 8 - Bits;
+    // Constant-only consumers must not leave speculative instructions when
+    // a later cell prevents folding the String operation.
+    if (auto *C = dyn_cast<Constant>(V)) {
+      Constant *Part =
+          ConstantFoldCastOperand(Instruction::BitCast, C, GroupTy, DL);
+      if (!Part)
+        return nullptr;
+      if (Shift)
+        Part = ConstantFoldBinaryOpOperands(
+            Instruction::LShr, Part, ConstantInt::get(GroupTy, Shift), DL);
+      if (GroupBits != Bits && Part)
+        Part = ConstantFoldCastOperand(Instruction::Trunc, Part, Ty, DL);
+      if (Part && !isa<UndefValue>(Part)) {
+        observeFieldDefinition(ID, Field.Offset, FieldDefinitions);
+        return Part;
+      }
+      return nullptr;
+    }
+    if (!InsertContext && (V->getType() != Ty || Shift))
+      return nullptr;
+    observeFieldDefinition(ID, Field.Offset, FieldDefinitions);
+    if (V->getType() != GroupTy)
+      V = placeStringInstruction(new BitCastInst(V, GroupTy, "string.bits"),
+                                 InsertContext);
+    if (Shift)
+      V = placeStringInstruction(
+          BinaryOperator::CreateLShr(V, ConstantInt::get(GroupTy, Shift),
+                                     "string.cell.shift"),
+          InsertContext);
+    if (GroupBits != Bits)
+      V = placeStringInstruction(new TruncInst(V, Ty, "string.cell"),
+                                 InsertContext);
+    return V;
   }
-  auto It = FieldStates[ID].find(Offset);
-  if (It == FieldStates[ID].end())
-    return ConstantInt::get(Ty, 0);
-  if (!It->second.isScalar())
-    return nullptr;
-  Value *V = It->second.getScalar();
-  while (Value *Alias = Aliases.getScalarAlias(V))
-    V = Alias;
-  if (V->getType() != Ty || isa<UndefValue>(V))
-    return nullptr;
-  return V;
+  return ConstantInt::get(Ty, 0);
 }
 
 bool Analyzer::foldStringGetChar(CallBase *CB) {
@@ -7192,10 +7716,10 @@ bool Analyzer::foldStringGetChar(CallBase *CB) {
   auto Offset = pea::checkedArrayElementOffset(VO.ArrayBaseOffset, *N, 2);
   if (!Offset || !pea::isUsableFieldOffset(*Offset))
     return false;
-  Value *Word = readStringCell(*ID, *Offset, 16);
+  Value *Word = readStringCell(*ID, *Offset, 16, CB);
   if (!Word) {
-    Value *First = readStringCell(*ID, *Offset, 8);
-    Value *Second = readStringCell(*ID, *Offset + 1, 8);
+    Value *First = readStringCell(*ID, *Offset, 8, CB);
+    Value *Second = readStringCell(*ID, *Offset + 1, 8, CB);
     if (!First || !Second)
       return false;
     // Only virtual byte cells participate. Keep both reaching definitions
@@ -7402,26 +7926,108 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
       AddWrite(Offset + 1, 8, DL.isLittleEndian() ? V >> 8 : V & 255);
     }
   }
-  // Validate the entire transaction before changing any abstract cell or
-  // layout entry. A failure must leave the original op and state untouched.
-  for (const Write &W : Writes)
-    for (const auto &Field : Dst.Fields) {
-      auto Overlap = Field.overlaps(W.Offset, W.Value->getBitWidth() / 8);
-      if (!Overlap || (*Overlap && (Field.Offset != W.Offset ||
-                                    Field.LLVMType != W.Value->getType())))
-        return false;
+  // Build a transaction against the active spans. Each write updates complete
+  // physical elements, while a containing packed group retains its untouched
+  // bits. No abstract state or instruction effects change until validation is
+  // complete, including the prefix written by an unsuccessful compression.
+  struct GroupWrite {
+    int64_t Offset;
+    Value *OldValue;
+    APInt Mask;
+    APInt Bits;
+  };
+  SmallVector<GroupWrite, 32> Groups;
+  DenseMap<int64_t, unsigned> GroupIndices;
+  auto Fields = activeFields(Dst, FieldStates[*Right], DL);
+  unsigned CellBits = Dst.ArrayIndexScale * 8;
+  if (!CellBits || !hasPrimitiveArrayGroups(Dst))
+    return false;
+  for (const Write &W : Writes) {
+    unsigned WriteBits = W.Value->getBitWidth();
+    if (WriteBits % CellBits)
+      return false;
+    for (unsigned Byte = 0; Byte < WriteBits / 8; Byte += Dst.ArrayIndexScale) {
+      int64_t Offset = W.Offset + Byte;
+      int64_t GroupOffset = Offset;
+      unsigned GroupBits = CellBits;
+      Value *OldValue = nullptr;
+      for (const auto &Field : Fields) {
+        auto Overlap = Field.overlaps(Offset, Dst.ArrayIndexScale);
+        if (!Overlap)
+          return false;
+        if (!*Overlap)
+          continue;
+        if (Field.Offset > Offset ||
+            Field.Offset + Field.ByteSize < Offset + Dst.ArrayIndexScale)
+          return false;
+        const FieldValue &FV = FieldStates[*Right].find(Field.Offset)->second;
+        if (!FV.isScalar())
+          return false;
+        OldValue = FV.getScalar();
+        while (Value *Alias = Aliases.getScalarAlias(OldValue))
+          OldValue = Alias;
+        GroupOffset = Field.Offset;
+        GroupBits = Field.ByteSize * 8;
+        if (!CastInst::isBitCastable(
+                OldValue->getType(),
+                Type::getIntNTy(F.getContext(), GroupBits)))
+          return false;
+        break;
+      }
+      auto [It, Inserted] =
+          GroupIndices.try_emplace(GroupOffset, Groups.size());
+      if (Inserted)
+        Groups.push_back(
+            {GroupOffset, OldValue, APInt(GroupBits, 0), APInt(GroupBits, 0)});
+      GroupWrite &G = Groups[It->second];
+      unsigned Shift = DL.isLittleEndian()
+                           ? (Offset - GroupOffset) * 8
+                           : GroupBits - (Offset - GroupOffset) * 8 - CellBits;
+      unsigned WriteShift =
+          DL.isLittleEndian() ? Byte * 8 : WriteBits - Byte * 8 - CellBits;
+      APInt Mask = APInt::getBitsSet(GroupBits, Shift, Shift + CellBits);
+      APInt Bits = W.Value->getValue()
+                       .extractBits(CellBits, WriteShift)
+                       .zext(GroupBits)
+                       .shl(Shift);
+      G.Mask |= Mask;
+      G.Bits = (G.Bits & ~Mask) | Bits;
     }
+  }
+  for (const GroupWrite &G : Groups)
+    if (!G.Mask.isAllOnes() && isa_and_nonnull<UndefValue>(G.OldValue))
+      return false;
+
   observeFieldDefinitions(*Left, FieldDefinitions);
   observeFieldDefinitions(*Right, FieldDefinitions);
-  for (const Write &W : Writes) {
-    int Index = Result.VirtualObjects[*Right]->getOrCreateFieldIndex(
-        W.Offset, W.Value->getType(), DL);
-    assert(Index >= 0 && "validated string destination cell");
-    (void)Index;
-    FieldStates[*Right][W.Offset] = FieldValue::scalar(W.Value);
-    // The retained JavaOp supplies these writes if the owner is ineligible;
-    // no individual eliminated StoreInst defines the new cell.
-    FieldDefinitions[*Right][W.Offset].clear();
+  for (const GroupWrite &G : Groups) {
+    Type *Ty = Type::getIntNTy(F.getContext(), G.Mask.getBitWidth());
+    Value *V = ConstantInt::get(Ty, G.Bits);
+    if (!G.Mask.isAllOnes() && G.OldValue) {
+      if (auto *C = dyn_cast<Constant>(G.OldValue)) {
+        Constant *Old =
+            ConstantFoldCastOperand(Instruction::BitCast, C, Ty, DL);
+        Old = ConstantFoldBinaryOpOperands(Instruction::And, Old,
+                                           ConstantInt::get(Ty, ~G.Mask), DL);
+        V = ConstantFoldBinaryOpOperands(Instruction::Or, Old,
+                                         cast<Constant>(V), DL);
+      } else {
+        Value *Old = G.OldValue;
+        if (Old->getType() != Ty)
+          Old = placeStringInstruction(new BitCastInst(Old, Ty, "string.bits"),
+                                       CB);
+        Old = placeStringInstruction(
+            BinaryOperator::CreateAnd(Old, ConstantInt::get(Ty, ~G.Mask),
+                                      "string.keep"),
+            CB);
+        V = placeStringInstruction(
+            BinaryOperator::CreateOr(Old, V, "string.write"), CB);
+      }
+    }
+    FieldStates[*Right][G.Offset] = FieldValue::scalar(V);
+    // Retaining the JavaOp also retains its reaching destination stores;
+    // together they supply the updated group if virtualization is cancelled.
+    FieldDefinitions[*Right][G.Offset].clear();
   }
   return Finish(Return, *Right);
 }
@@ -7436,6 +8042,56 @@ bool Analyzer::processJavaOp(CallBase *CB) {
   if (jeandle::decodeStringIntrinsic(*CB))
     return foldStringIntrinsic(CB);
   using namespace jeandle::pea;
+  if (jeandle::isReplayPublicationBarrier(CB)) {
+    auto Owners = jeandle::getReplayPublicationOwners(*CB);
+    // Materialize unsupported virtual inputs first. This may recursively
+    // materialize another listed owner, whose entry must then remain real.
+    for (const auto &Owner : Owners) {
+      auto Identity =
+          resolveVirtualIdentity(Owner.Receiver, CurrentState, Aliases, DL,
+                                 VirtualIdentityMode::WholeObject);
+      if (Identity.isDefined() && Eligible.lookup(Identity.getObjectID()))
+        continue;
+      if (auto ID =
+              resolveVirtualRef(Owner.Receiver, CurrentState, Aliases, DL))
+        materializeAt(*ID, CB, MatReason::Unhandled);
+    }
+    auto E = std::make_unique<jeandle::RewriteMemoryBarrierEffect>();
+    E->Block = CB->getParent();
+    E->Target = CB;
+    E->SeqNo = Result.nextSeqNo();
+    bool Transferred = false;
+    for (const auto &Owner : Owners) {
+      jeandle::ObjectID ID = jeandle::InvalidObjectID;
+      auto Identity =
+          resolveVirtualIdentity(Owner.Receiver, CurrentState, Aliases, DL,
+                                 VirtualIdentityMode::WholeObject);
+      if (Identity.isDefined() && Eligible.lookup(Identity.getObjectID())) {
+        ID = Identity.getObjectID();
+        CurrentState.getObjectStateForModification(ID).addPendingBarriers(
+            Owner.Obligations);
+        Transferred = true;
+      }
+      E->Owners.push_back({Owner.Receiver, Owner.Obligations, ID});
+    }
+    if (Transferred)
+      Result.addBlockEffect(std::move(E));
+    return true;
+  }
+  if (jeandle::isObjectMemoryBarrier(CB)) {
+    auto Identity =
+        resolveVirtualIdentity(CB->getArgOperand(0), CurrentState, Aliases, DL,
+                               VirtualIdentityMode::WholeObject);
+    if (!Identity.isDefined() || !Eligible.lookup(Identity.getObjectID()))
+      return false;
+    // Retain ordering at this program point until the object is replayed.
+    auto Kind =
+        *jeandle::getMemoryBarrierKind(CB->getCalledFunction()->getName());
+    CurrentState.getObjectStateForModification(Identity.getObjectID())
+        .addPendingBarriers(jeandle::getMemoryBarrierObligation(Kind));
+    emitReplaceCall(CB, nullptr, Identity.getObjectID());
+    return true;
+  }
   if (isJeandleArrayLength(CB))
     return foldArrayLength(CB);
   if (isJeandleLoadKlass(CB))
@@ -7455,6 +8111,851 @@ bool Analyzer::processJavaOp(CallBase *CB) {
   if (isJeandleRegisterFinalizerIfNeeded(CB))
     return foldRegisterFinalizerIfNeeded(CB);
   return false;
+}
+
+bool Analyzer::copyElementKindsCompatible(uintptr_t SrcKlass,
+                                          uintptr_t DestKlass,
+                                          bool ElementsAreRefs,
+                                          const CallBase *CB) {
+  // A VO's klass is never zero (extractAllocationKlass refuses zero), so
+  // equality is equality of two concrete klasses.
+  if (SrcKlass == DestKlass)
+    return true;
+  if (ElementsAreRefs) {
+    // Validated: the frontend's guards deoptimize before the call when the
+    // runtime klasses are incompatible, so assignability holds on every
+    // executed path. Without validation, a statically proven subtype
+    // relation is the remaining sound proof.
+    if (jeandle::pea::isCopyPseudoValidated(CB))
+      return true;
+    std::optional<bool> Sub = evalSubtypeRelation(SrcKlass, DestKlass);
+    return Sub && *Sub;
+  }
+  return false;
+}
+
+std::optional<int64_t> Analyzer::getCopyConstantI64(Value *V) {
+  // A folded jeandle.arraylength leaves its result only as a scalar alias;
+  // chase the alias chain before inspecting the value itself.
+  while (Value *Alias = Aliases.getScalarAlias(V))
+    V = Alias;
+  // The frontend sign-extends the Java int operands to i64 at the lowering
+  // boundary; peel one extension wrapper to recover the underlying constant
+  // (a zext'd negative int still folds back to its negative i32 constant,
+  // which the caller's sign checks then reject).
+  if (auto *Cast = dyn_cast<CastInst>(V))
+    if (Cast->getOpcode() == Instruction::SExt ||
+        Cast->getOpcode() == Instruction::ZExt)
+      V = Cast->getOperand(0);
+  // TODO: Chase scalar aliases after peeling sext/zext so copy operands can
+  // fold to constants within the same PEA round.
+  auto *CI = dyn_cast<ConstantInt>(V);
+  if (!CI)
+    return std::nullopt;
+  return CI->getValue().trySExtValue();
+}
+
+bool Analyzer::planVirtualPrimitiveCopy(
+    jeandle::ObjectID SrcID, const jeandle::VirtualObject &Src,
+    jeandle::ObjectID DestID, const jeandle::VirtualObject &Dest,
+    int64_t SrcPos, int64_t DestPos, int64_t Len,
+    SmallVectorImpl<std::pair<int64_t, jeandle::FieldValue>> &Values) {
+  using namespace jeandle::pea;
+  auto SrcLo = checkedArrayElementOffset(Src.ArrayBaseOffset, SrcPos,
+                                         Src.ArrayIndexScale);
+  auto DestLo = checkedArrayElementOffset(Dest.ArrayBaseOffset, DestPos,
+                                          Dest.ArrayIndexScale);
+  auto Bytes =
+      llvm::checkedMul(Len, static_cast<int64_t>(Dest.ArrayIndexScale));
+  auto SrcHi = SrcLo && Bytes ? checkedOffsetAdd(*SrcLo, *Bytes) : std::nullopt;
+  auto DestHi =
+      DestLo && Bytes ? checkedOffsetAdd(*DestLo, *Bytes) : std::nullopt;
+  if (!SrcHi || !DestHi)
+    return false;
+  auto SourceFields = activeFields(Src, FieldStates[SrcID], DL);
+  auto DestFields = activeFields(Dest, FieldStates[DestID], DL);
+  if (!isCompleteGroupWindow(SourceFields, *SrcLo, *SrcHi) ||
+      !isCompleteGroupWindow(DestFields, *DestLo, *DestHi))
+    return false;
+  // Snapshot before writing so overlapping self-copies see pre-copy values.
+  // Missing source cells are Java defaults and remain absent after the entire
+  // destination window has been cleared. A copied group replaces the previous
+  // grouping exactly, as Graal's entry plus Illegal-tail representation does.
+  for (const auto &FD : SourceFields)
+    if (FD.Offset >= *SrcLo && FD.Offset < *SrcHi)
+      Values.emplace_back(*DestLo + (FD.Offset - *SrcLo),
+                          FieldStates[SrcID].find(FD.Offset)->second);
+  return true;
+}
+
+// Fold a jeandle.copy pseudo call into virtual field state — the Jeandle
+// counterpart of Graal BasicArrayCopyNode::virtualize(). The destination must
+// be an eligible virtual array (or, for a byte-payload clone-instance, an
+// eligible virtual instance); positions and length must be constants with
+// provable bounds and element-type compatibility. A virtual source transfers
+// field-state entries element-by-element (a same-VO overlap with
+// destPos > srcPos transfers in reverse so no element is read after being
+// overwritten, matching Java's overlapping-copy semantics); a concrete source
+// is deferred to the element-load machinery (per element for arrays, per
+// declared field for a clone-instance). Everything is validated read-only
+// first; only then are field states mutated, the reaching-def entries of the
+// overwritten window slots cleared, the call's ReplaceCall elision
+// recorded (mutation owner = destination VO, so dropEffectsForIneligible
+// revives the call — and its memory write — if the destination later turns
+// ineligible), and the caller proceeds to recordDeoptBundleMappings. Any
+// failure returns false and the generic escape path materializes both
+// operands at the call, exactly as before this fold existed.
+bool Analyzer::processCopyCall(CallBase *CB) {
+  using namespace jeandle::pea;
+  if (!JeandlePEAFoldCopy || !isJeandleCopyPseudoCall(CB))
+    return false;
+
+  JeandleCopyPseudoKind Kind = classifyJeandleCopyPseudo(CB);
+  const bool ElementIndexed = isElementIndexedCopyKind(Kind);
+  const bool BytePayload = Kind == JeandleCopyPseudoKind::CloneInstance ||
+                           Kind == JeandleCopyPseudoKind::CloneArray;
+  if (!ElementIndexed && !BytePayload)
+    // Unclassified sites stay conservative.
+    return false;
+
+  // --- Phase 1: read-only validation. ---
+  VirtualIdentityResult DestIdentity =
+      resolveVirtualIdentity(CB->getArgOperand(2), CurrentState, Aliases, DL,
+                             VirtualIdentityMode::WholeObject);
+  if (!DestIdentity.isDefined())
+    return false;
+  jeandle::ObjectID DestID = DestIdentity.getObjectID();
+  if (!Eligible.lookup(DestID))
+    return false;
+  jeandle::VirtualObject &Dest = *Result.VirtualObjects[DestID];
+
+  // A clone-instance copies the instance payload as raw bytes: fold it by
+  // transferring every source field entry inside the payload window to the
+  // fresh clone VO (virtual source), or — for a concrete source — by loading
+  // each of the clone klass's declared fields from the source object (the
+  // Graal ObjectClone concrete-instance path).
+  if (Kind == JeandleCopyPseudoKind::CloneInstance) {
+    if (!Dest.isInstance())
+      return false;
+    std::optional<int64_t> BaseOff = getCopyConstantI64(CB->getArgOperand(1));
+    std::optional<int64_t> DestOff = getCopyConstantI64(CB->getArgOperand(3));
+    std::optional<int64_t> Words = getCopyConstantI64(CB->getArgOperand(4));
+    if (!BaseOff || !DestOff || !Words || *BaseOff != *DestOff || *Words < 0 ||
+        *BaseOff < 0)
+      return false;
+    std::optional<int64_t> PayloadEnd =
+        checkedArrayElementOffset(*BaseOff, *Words, 8);
+    if (!PayloadEnd)
+      return false;
+    // Coverage: the payload must start at or before the first field (extra
+    // leading header bytes — the frontend's clone starts at the klass slot —
+    // are a semantic no-op) and reach the end of the instance, or uncovered
+    // fields would keep their defaults instead of the source's values.
+    if (*BaseOff > VMConsts.instanceBaseOffset() ||
+        *PayloadEnd < static_cast<int64_t>(Dest.SizeInBytes))
+      return false;
+    VirtualIdentityResult SrcIdentity =
+        resolveVirtualIdentity(CB->getArgOperand(0), CurrentState, Aliases, DL,
+                               VirtualIdentityMode::WholeObject);
+    if (!SrcIdentity.isDefined())
+      return foldCloneInstanceConcreteSource(CB, DestID, Dest, *BaseOff,
+                                             *PayloadEnd);
+    jeandle::ObjectID SrcID = SrcIdentity.getObjectID();
+    if (!Eligible.lookup(SrcID))
+      return false;
+    const jeandle::VirtualObject &Src = *Result.VirtualObjects[SrcID];
+    if (!Src.isInstance() || Src.Klass != Dest.Klass)
+      return false;
+    // The destination is the fresh clone allocation, so src and dest are
+    // distinct VOs; a same-VO shape is malformed IR and would alias the two
+    // field maps below.
+    if (SrcID == DestID)
+      return false;
+
+    // Pre-scan: entries in the window must be transferable, and each offset
+    // needs an established source FieldDesc for the destination's slot
+    // typing (entries without one cannot be typed soundly for replay).
+    // getOrCreateFieldIndex may insert an inert FieldDesc on the validation
+    // path — the accepted processStore pattern; a bail here materializes
+    // the destination immediately.
+    auto SrcFieldsIt = FieldStates.find(SrcID);
+    if (SrcFieldsIt != FieldStates.end()) {
+      for (const auto &[Off, FV] : SrcFieldsIt->second) {
+        if (Off < *BaseOff || Off >= *PayloadEnd)
+          continue;
+        const jeandle::VirtualObject::FieldDesc *FD = Src.findField(Off);
+        if (!FD || FV.isUnknown())
+          return false;
+        if (FV.isVirtualRef() && !Eligible.lookup(FV.getVirtualRef()))
+          return false;
+        if (Dest.getOrCreateFieldIndex(Off, FD->LLVMType, DL) < 0)
+          return false;
+      }
+    }
+    // Commit: materialize both outer-map entries BEFORE taking any reference
+    // (an operator[] insert can rehash the outer DenseMap and would dangle a
+    // reference taken earlier), transfer the window's entries, then erase
+    // stale destination entries the full-coverage clone overwrites with
+    // source defaults.
+    if (!FieldStates.count(SrcID))
+      (void)FieldStates[SrcID];
+    if (!FieldStates.count(DestID))
+      (void)FieldStates[DestID];
+    auto &SrcFields = FieldStates[SrcID];
+    auto &DestFields = FieldStates[DestID];
+    for (const auto &[Off, FV] : SrcFields) {
+      if (Off < *BaseOff || Off >= *PayloadEnd)
+        continue;
+      DestFields[Off] = FV;
+    }
+    SmallVector<int64_t, 8> Stale;
+    for (const auto &[Off, FV] : DestFields)
+      if (Off >= *BaseOff && Off < *PayloadEnd && !SrcFields.count(Off))
+        Stale.push_back(Off);
+    for (int64_t Off : Stale)
+      DestFields.erase(Off);
+    // A revived call reads the source window's original values AS OF THE
+    // CALL: observe the reaching definitions right here — before any later
+    // store can kill their entries in the live point-sensitive map — and
+    // record the source for commit's keep-real rule
+    // (CopyFoldVirtualSources), which restores the (observed) stores at
+    // their original positions when the fold is dropped.
+    observeCopyFoldSourceDefs(SrcID, *BaseOff, *PayloadEnd);
+    CopyFoldVirtualSources.emplace_back(SrcID, DestID);
+    // The full-coverage copy is now the reaching definition of every window
+    // slot it wrote or reset to default.
+    clearCopyFoldReachingDefs(DestID, *BaseOff, *PayloadEnd);
+    if (jeandle::copyNeedsInitializationBarrier(*CB))
+      CurrentState.getObjectStateForModification(DestID).addPendingBarriers(
+          jeandle::AllocationInitObligation);
+    emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
+    ++AttemptStats.CopyFolds;
+    return true;
+  }
+
+  if (!Dest.isArray() || Dest.ArrayElementType == nullptr ||
+      Dest.ArrayIndexScale == 0)
+    return false;
+
+  std::optional<int64_t> SrcPos;
+  std::optional<int64_t> DestPos;
+  std::optional<int64_t> Len;
+  if (ElementIndexed) {
+    SrcPos = getCopyConstantI64(CB->getArgOperand(1));
+    DestPos = getCopyConstantI64(CB->getArgOperand(3));
+    Len = getCopyConstantI64(CB->getArgOperand(4));
+    if (!SrcPos || !DestPos || !Len)
+      return false;
+    // Negative positions/lengths carry the Java exception shapes; they must
+    // reach the surviving call, not a fold.
+    if (*SrcPos < 0 || *DestPos < 0 || *Len < 0)
+      return false;
+  } else {
+    // A clone-array's operands are a byte offset and an 8-byte word count,
+    // not element indices. Recover the element window from the destination
+    // VO and validate that the payload covers every element (leading header
+    // bytes and trailing alignment padding inside the window are semantic
+    // no-ops); the reads stay within the bytes the original bulk copy
+    // touched, so coverage is also the bounds proof.
+    std::optional<int64_t> BaseOff = getCopyConstantI64(CB->getArgOperand(1));
+    std::optional<int64_t> DestOff = getCopyConstantI64(CB->getArgOperand(3));
+    std::optional<int64_t> Words = getCopyConstantI64(CB->getArgOperand(4));
+    if (!BaseOff || !DestOff || !Words || *BaseOff != *DestOff || *Words < 0 ||
+        *BaseOff < 0)
+      return false;
+    std::optional<int64_t> PayloadEnd =
+        checkedArrayElementOffset(*BaseOff, *Words, 8);
+    if (!PayloadEnd)
+      return false;
+    std::optional<int64_t> DataEnd =
+        checkedArrayElementOffset(static_cast<int64_t>(Dest.ArrayBaseOffset),
+                                  Dest.ArrayLength, Dest.ArrayIndexScale);
+    if (!DataEnd || *BaseOff > static_cast<int64_t>(Dest.ArrayBaseOffset) ||
+        *PayloadEnd < *DataEnd)
+      return false;
+    SrcPos = 0;
+    DestPos = 0;
+    Len = static_cast<int64_t>(Dest.ArrayLength);
+  }
+  // Destination bounds: a virtual array's length is a compile-time constant.
+  std::optional<int64_t> DestEnd = checkedOffsetAdd(*DestPos, *Len);
+  if (!DestEnd || *DestEnd > static_cast<int64_t>(Dest.ArrayLength))
+    return false;
+
+  VirtualIdentityResult SrcIdentity =
+      resolveVirtualIdentity(CB->getArgOperand(0), CurrentState, Aliases, DL,
+                             VirtualIdentityMode::WholeObject);
+  const bool SrcVirtual = SrcIdentity.isDefined();
+  const jeandle::VirtualObject *Src = nullptr;
+  uintptr_t CheckedElementKlass = 0;
+  uintptr_t ConcreteElementKlass = 0;
+  if (SrcVirtual) {
+    jeandle::ObjectID SrcID = SrcIdentity.getObjectID();
+    if (!Eligible.lookup(SrcID))
+      return false;
+    Src = Result.VirtualObjects[SrcID].get();
+    if (!Src->isArray())
+      return false;
+    // Element representation (the type carries the address space, so
+    // compressed and wide oop arrays already differ here), scale, and header
+    // size must all agree.
+    if (Src->ArrayElementType != Dest.ArrayElementType ||
+        Src->ArrayIndexScale != Dest.ArrayIndexScale ||
+        Src->ArrayBaseOffset != Dest.ArrayBaseOffset)
+      return false;
+    if (!copyElementKindsCompatible(Src->Klass, Dest.Klass,
+                                    Dest.ArrayElementType->isPointerTy(), CB)) {
+      // A virtual array's entries can prove a narrowing reference copy even
+      // when its declared component type cannot. Prove the complete window
+      // before changing state, so a possible ArrayStoreException keeps its
+      // original partial-copy behavior.
+      const auto *Callbacks = jeandle::getVMCallbacks();
+      if (!Dest.ArrayElementType->isPointerTy() || !Callbacks ||
+          !Callbacks->ArrayElementKlass)
+        return false;
+      CheckedElementKlass = Callbacks->ArrayElementKlass(Dest.Klass);
+      if (!CheckedElementKlass)
+        return false;
+      if (Callbacks->IsObjectKlass &&
+          Callbacks->IsObjectKlass(CheckedElementKlass))
+        CheckedElementKlass = 0;
+    }
+    // Source bounds are another compile-time constant comparison.
+    std::optional<int64_t> SrcEnd = checkedOffsetAdd(*SrcPos, *Len);
+    if (!SrcEnd || *SrcEnd > static_cast<int64_t>(Src->ArrayLength))
+      return false;
+  } else {
+    // A derived pointer of a still-virtual object must not become a load
+    // base: whole-object identity failed above, so a resolveVirtualRef hit
+    // here is exactly that shape, and the memory behind its eliminated
+    // stores is not written until materialization. Well-formed copy IR
+    // always names the whole source array; anything else keeps the real
+    // copy (the same contract as the clone-instance concrete leg).
+    if (jeandle::pea::resolveVirtualRef(CB->getArgOperand(0), CurrentState,
+                                        Aliases, DL))
+      return false;
+    // Concrete source: fold to per-element typed loads placed at the call.
+    // The static element type must be provable — a load of the wrong element
+    // kind would both misread memory and silently drop the
+    // ArrayStoreException the real copy raises on mismatched primitive /
+    // incompatible reference arrays.
+    Value *ConcreteSrc = CB->getArgOperand(0);
+    jeandle::JavaType SrcJT =
+        jeandle::getJavaType(ConcreteSrc, &DT, CB, IsNullEdge);
+    if (!SrcJT.isKnown())
+      return false;
+    jeandle::JBasicType SrcElem =
+        jeandle::elementTypeForArrayKlass(SrcJT.Klass);
+    if (SrcElem == jeandle::JBasicType::Count)
+      return false;
+    if (VMConsts.elementSizeFor(SrcElem) != Dest.ArrayIndexScale ||
+        VMConsts.arrayBaseOffsetFor(SrcElem) != Dest.ArrayBaseOffset)
+      return false;
+    // Same representation check as the allocation path: the load reads
+    // Dest.ArrayElementType, so the source kind must map onto exactly that
+    // type (compressed oop object arrays map to the narrow pointer).
+    Type *SrcElemTy = javaFieldStorageType(SrcElem, VMConsts.UseCompressedOops,
+                                           DL, F.getContext());
+    if (SrcElemTy != Dest.ArrayElementType)
+      return false;
+    if (!copyElementKindsCompatible(SrcJT.Klass, Dest.Klass,
+                                    SrcElem == jeandle::JBasicType::Object, CB))
+      return false;
+    if (SrcElem == jeandle::JBasicType::Object)
+      if (const auto *Callbacks = jeandle::getVMCallbacks();
+          Callbacks && Callbacks->ArrayElementKlass)
+        ConcreteElementKlass = Callbacks->ArrayElementKlass(SrcJT.Klass);
+    // Source bounds: the analyzer cannot see the concrete array's length, so
+    // the proof must come from the call shape — a constant srcLength operand,
+    // the clone identity (arg4 IS the source length, srcPos == 0), or the
+    // validated arraycopy limit guard that dominates the call. The element
+    // loads are placed at the call, inherring exactly that control context.
+    // A byte-payload clone needs none of these: its coverage check already
+    // proved the reads stay inside the bytes the bulk copy touched.
+    if (!BytePayload) {
+      // Empty copies still require srcPos <= src.length.
+      bool BoundsProven = false;
+      if (std::optional<int64_t> SrcLen =
+              getCopyConstantI64(CB->getArgOperand(7)))
+        if (std::optional<int64_t> SrcEnd = checkedOffsetAdd(*SrcPos, *Len))
+          BoundsProven = *SrcEnd <= *SrcLen;
+      if (!BoundsProven && *SrcPos == 0 &&
+          CB->getArgOperand(4) == CB->getArgOperand(7))
+        BoundsProven = true;
+      if (!BoundsProven && Kind == JeandleCopyPseudoKind::ArrayCopy &&
+          isCopyPseudoValidated(CB))
+        BoundsProven = true;
+      if (!BoundsProven)
+        return false;
+    }
+  }
+
+  // Pre-scan the transfer window: offsets must stay representable, source
+  // entries must be transferable values, and the destination slots must
+  // accept the element type. getOrCreateFieldIndex may insert an inert
+  // FieldDesc on the validation path — same accepted pattern as processStore
+  // (replay is FieldStates-keyed, and a bail here materializes the
+  // destination immediately).
+  const bool PrimitiveDest = hasPrimitiveArrayGroups(Dest);
+  if (PrimitiveDest) {
+    auto Lo = checkedArrayElementOffset(Dest.ArrayBaseOffset, *DestPos,
+                                        Dest.ArrayIndexScale);
+    auto Bytes =
+        llvm::checkedMul(*Len, static_cast<int64_t>(Dest.ArrayIndexScale));
+    auto Hi = Lo && Bytes ? checkedOffsetAdd(*Lo, *Bytes) : std::nullopt;
+    if (!Hi || !isCompleteGroupWindow(
+                   activeFields(Dest, FieldStates[DestID], DL), *Lo, *Hi))
+      return false;
+  }
+  const bool SameVO = SrcVirtual && SrcIdentity.getObjectID() == DestID;
+  const bool Reverse = SameVO && *DestPos > *SrcPos;
+  SmallVector<std::pair<int64_t, int64_t>, 16> Offsets;
+  SmallVector<std::pair<int64_t, jeandle::FieldValue>, 16> PackedValues;
+  const bool PrimitiveVirtual =
+      SrcVirtual && !Dest.ArrayElementType->isPointerTy();
+  if (PrimitiveVirtual) {
+    if (!planVirtualPrimitiveCopy(SrcIdentity.getObjectID(), *Src, DestID, Dest,
+                                  *SrcPos, *DestPos, *Len, PackedValues))
+      return false;
+  } else {
+    // Descriptors are sorted and non-overlapping. Validate the entire
+    // reference window once, independently of the memmove traversal order.
+    // This also avoids retaining iterators while a same-VO copy adds fields.
+    if (SrcVirtual && *Len > 0) {
+      auto Lo = checkedArrayElementOffset(Src->ArrayBaseOffset, *SrcPos,
+                                          Src->ArrayIndexScale);
+      auto EndIndex = checkedOffsetAdd(*SrcPos, *Len);
+      auto Hi = EndIndex
+                    ? checkedArrayElementOffset(Src->ArrayBaseOffset, *EndIndex,
+                                                Src->ArrayIndexScale)
+                    : std::nullopt;
+      if (!Lo || !Hi)
+        return false;
+      for (const auto &FD : Src->Fields) {
+        auto FieldEnd = checkedOffsetAdd(FD.Offset, FD.ByteSize);
+        if (!FieldEnd)
+          return false;
+        if (*FieldEnd <= *Lo)
+          continue;
+        if (FD.Offset >= *Hi)
+          break;
+        if (FD.Offset < *Lo || *FieldEnd > *Hi ||
+            (FD.Offset - *Lo) % Src->ArrayIndexScale != 0 ||
+            FD.ByteSize != Src->ArrayIndexScale ||
+            FD.LLVMType != Src->ArrayElementType)
+          return false;
+      }
+    }
+    Offsets.reserve(*Len);
+    for (int64_t K = 0; K < *Len; ++K) {
+      int64_t I = Reverse ? (*Len - 1 - K) : K;
+      std::optional<int64_t> Idx = checkedOffsetAdd(*SrcPos, I);
+      std::optional<int64_t> SrcOff =
+          Idx ? checkedArrayElementOffset(Dest.ArrayBaseOffset, *Idx,
+                                          Dest.ArrayIndexScale)
+              : std::nullopt;
+      std::optional<int64_t> DestIdx = checkedOffsetAdd(*DestPos, I);
+      std::optional<int64_t> DestOff =
+          DestIdx ? checkedArrayElementOffset(Dest.ArrayBaseOffset, *DestIdx,
+                                              Dest.ArrayIndexScale)
+                  : std::nullopt;
+      if (!SrcOff || !DestOff || !isUsableFieldOffset(*SrcOff) ||
+          !isUsableFieldOffset(*DestOff))
+        return false;
+      if (SrcVirtual) {
+        const auto SrcFieldsIt = FieldStates.find(SrcIdentity.getObjectID());
+        if (SrcFieldsIt != FieldStates.end()) {
+          auto It = SrcFieldsIt->second.find(*SrcOff);
+          if (It != SrcFieldsIt->second.end()) {
+            const jeandle::FieldValue &FV = It->second;
+            if (FV.isUnknown())
+              return false;
+            if (FV.isVirtualRef() && !Eligible.lookup(FV.getVirtualRef()))
+              return false;
+            if (CheckedElementKlass) {
+              uintptr_t EntryKlass = 0;
+              bool IsNull = false;
+              if (FV.isVirtualRef()) {
+                EntryKlass = Result.VirtualObjects[FV.getVirtualRef()]->Klass;
+              } else {
+                Value *Entry =
+                    FV.isScalar() ? FV.getScalar() : FV.getMaterialized();
+                while (Value *Alias = Aliases.getScalarAlias(Entry))
+                  Entry = Alias;
+                IsNull = isa<ConstantPointerNull>(Entry);
+                if (!IsNull) {
+                  // Analysis-owned values have no CFG position until effects
+                  // are applied. Their type comes from the producer metadata
+                  // and identity chain; LVI can only query parented values.
+                  auto *EntryI = dyn_cast<Instruction>(Entry);
+                  bool Deferred = EntryI && !EntryI->getParent();
+                  EntryKlass =
+                      (Deferred
+                           ? jeandle::getJavaType(Entry, nullptr, nullptr,
+                                                  nullptr)
+                           : jeandle::getJavaType(Entry, &DT, CB, IsNullEdge))
+                          .Klass;
+                }
+              }
+              if (!IsNull) {
+                if (!EntryKlass)
+                  return false;
+                auto Assignable =
+                    evalSubtypeRelation(EntryKlass, CheckedElementKlass);
+                if (!Assignable || !*Assignable)
+                  return false;
+              }
+            }
+          }
+        }
+      }
+      if (!PrimitiveDest &&
+          Dest.getOrCreateFieldIndex(*DestOff, Dest.ArrayElementType, DL) < 0)
+        return false;
+      Offsets.emplace_back(*SrcOff, *DestOff);
+    }
+  }
+
+  // --- Phase 2: commit. No failure paths beyond this point. ---
+  // Materialize the source's field-map entry BEFORE taking DestFields: the
+  // FieldStates[SrcID] lookup inside the loop inserts lazily, and an insert
+  // can rehash the OUTER DenseMap, which would dangle a DestFields reference
+  // taken earlier.
+  if (SrcVirtual)
+    (void)FieldStates[SrcIdentity.getObjectID()];
+  auto &DestFields = FieldStates[DestID];
+  if (PrimitiveDest) {
+    int64_t Lo = *checkedArrayElementOffset(Dest.ArrayBaseOffset, *DestPos,
+                                            Dest.ArrayIndexScale);
+    int64_t Hi = Lo + *Len * Dest.ArrayIndexScale;
+    SmallVector<int64_t, 8> Erase;
+    for (const auto &[Off, FV] : DestFields)
+      if (Off >= Lo && Off < Hi)
+        Erase.push_back(Off);
+    for (int64_t Off : Erase)
+      DestFields.erase(Off);
+  }
+  for (const auto &[Off, FV] : PackedValues)
+    DestFields[Off] = FV;
+  for (auto [SrcOff, DestOff] : Offsets) {
+    if (SrcVirtual) {
+      auto &SrcFields = FieldStates[SrcIdentity.getObjectID()];
+      auto It = SrcFields.find(SrcOff);
+      if (It != SrcFields.end()) {
+        // Copy the FieldValue by value first: for a same-VO copy the two
+        // maps are the same object and a rehash on insert would invalidate
+        // It.
+        jeandle::FieldValue FV = It->second;
+        DestFields[DestOff] = FV;
+      } else {
+        // No source entry means Java's default value; a stale destination
+        // entry from an earlier store must not survive the copy.
+        DestFields.erase(DestOff);
+      }
+    } else {
+      Value *Load = getOrCreateCopyElementSemanticLoad(
+          CB, CB->getArgOperand(0), Dest.ArrayElementType, SrcOff,
+          ConcreteElementKlass);
+      DestFields[DestOff] = jeandle::FieldValue::scalar(Load);
+    }
+  }
+  // The transferred elements form one contiguous destination range; the copy
+  // call is now the reaching definition of every slot it wrote or reset to
+  // default. (Validation already proved these offsets representable; the
+  // optionals are belt-and-suspenders.) For a same-VO copy the source window
+  // overlaps the destination window — the shared slots are both read and
+  // rewritten by the call — so their definitions must stay out of the
+  // destination clear, or the overlap would delete exactly the stores a
+  // revived call reads (Java's overlapping-copy semantics read the pre-copy
+  // values of every element).
+  if (*Len > 0) {
+    std::optional<int64_t> SrcWinLo, SrcWinHi;
+    if (SrcVirtual) {
+      SrcWinLo = checkedArrayElementOffset(Dest.ArrayBaseOffset, *SrcPos,
+                                           Dest.ArrayIndexScale);
+      std::optional<int64_t> SrcLastIdx = checkedOffsetAdd(*SrcPos, *Len - 1);
+      SrcWinHi = SrcLastIdx ? checkedArrayElementOffset(Dest.ArrayBaseOffset,
+                                                        *SrcLastIdx,
+                                                        Dest.ArrayIndexScale)
+                            : std::nullopt;
+      if (SrcWinHi)
+        SrcWinHi = checkedOffsetAdd(*SrcWinHi, Dest.ArrayIndexScale);
+      // A revived call reads this window's original values AS OF THE CALL:
+      // observe the reaching definitions right here — before any later
+      // store can kill their entries in the live point-sensitive map — and
+      // record the source for commit's keep-real rule
+      // (CopyFoldVirtualSources), which restores the (observed) stores at
+      // their original positions when the fold is dropped.
+      if (SrcWinLo && SrcWinHi) {
+        observeCopyFoldSourceDefs(SrcIdentity.getObjectID(), *SrcWinLo,
+                                  *SrcWinHi);
+        CopyFoldVirtualSources.emplace_back(SrcIdentity.getObjectID(), DestID);
+      }
+    }
+    std::optional<int64_t> DestWinLo = checkedArrayElementOffset(
+        Dest.ArrayBaseOffset, *DestPos, Dest.ArrayIndexScale);
+    std::optional<int64_t> DestLastIdx = checkedOffsetAdd(*DestPos, *Len - 1);
+    std::optional<int64_t> DestWinHi =
+        DestLastIdx
+            ? checkedArrayElementOffset(Dest.ArrayBaseOffset, *DestLastIdx,
+                                        Dest.ArrayIndexScale)
+            : std::nullopt;
+    if (DestWinHi)
+      DestWinHi = checkedOffsetAdd(*DestWinHi, Dest.ArrayIndexScale);
+    if (DestWinLo && DestWinHi) {
+      if (!SameVO) {
+        clearCopyFoldReachingDefs(DestID, *DestWinLo, *DestWinHi);
+      } else if (SrcWinLo && SrcWinHi) {
+        // Clear only the destination-only parts of the window.
+        if (*SrcWinLo > *DestWinLo)
+          clearCopyFoldReachingDefs(DestID, *DestWinLo,
+                                    std::min(*DestWinHi, *SrcWinLo));
+        if (*SrcWinHi < *DestWinHi)
+          clearCopyFoldReachingDefs(DestID, std::max(*DestWinLo, *SrcWinHi),
+                                    *DestWinHi);
+      }
+    }
+  }
+  if (jeandle::copyNeedsInitializationBarrier(*CB))
+    CurrentState.getObjectStateForModification(DestID).addPendingBarriers(
+        jeandle::AllocationInitObligation);
+  emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
+  // Counted per analyzer visit: a copy inside a loop fixpoint re-folds on
+  // every body pass, so the number counts (site, round) pairs, not distinct
+  // call sites.
+  ++AttemptStats.CopyFolds;
+  return true;
+}
+
+Value *Analyzer::getOrCreateCopyElementSemanticLoad(CallBase *Copy,
+                                                    Value *ConcreteSrc,
+                                                    Type *ElemTy,
+                                                    int64_t SrcOff,
+                                                    uintptr_t ValueKlass) {
+  // Registration order fixes the physical order: each instruction's
+  // PlaceInstructionEffect inserts it immediately before the copy, so
+  // ascending SeqNos land as Addr, Load, Cast.
+  auto Place = [&](Instruction *I) {
+    auto E = std::make_unique<jeandle::PlaceInstructionEffect>();
+    E->Block = Copy->getParent();
+    E->Target = Copy;
+    E->InstructionToPlace = I;
+    E->SeqNo = Result.nextSeqNo();
+    Result.addBlockEffect(std::move(E));
+  };
+
+  const bool NeedsNarrowCast =
+      ElemTy->isPointerTy() && cast<PointerType>(ElemTy)->getAddressSpace() ==
+                                   jeandle::AddrSpace::NarrowOopAddrSpace;
+
+  CopyElementLoadKey Key{Copy, SrcOff};
+  auto It = CopyElementLoadCache.find(Key);
+  if (It != CopyElementLoadCache.end() && (Value *)It->second.Addr &&
+      (Value *)It->second.Load &&
+      (!NeedsNarrowCast || (Value *)It->second.NarrowCast)) {
+    // Cache hit: the chain's instructions survive rollback in
+    // OwnedCopyLoads, but the block's Place effects do not — re-emit them.
+    Place(cast<Instruction>((Value *)It->second.Addr));
+    Place(cast<Instruction>((Value *)It->second.Load));
+    if (NeedsNarrowCast)
+      Place(cast<Instruction>((Value *)It->second.NarrowCast));
+    return NeedsNarrowCast ? (Value *)It->second.NarrowCast
+                           : (Value *)It->second.Load;
+  }
+
+  // Build the chain unparented: GEP to the element, unordered atomic load of
+  // the element type, and — for narrow-oop elements — the AS3 -> AS1
+  // addrspacecast that restores the semantic field representation (a bare
+  // narrow value must not cross a safepoint; RS4GC tracks AS1 only).
+  LLVMContext &Ctx = F.getContext();
+  Type *I8 = Type::getInt8Ty(Ctx);
+  Type *I64 = Type::getInt64Ty(Ctx);
+  auto *Addr = GetElementPtrInst::Create(
+      I8, ConcreteSrc, {ConstantInt::get(I64, SrcOff)}, "pea.copy.elem.addr",
+      /*InsertBefore=*/static_cast<Instruction *>(nullptr));
+  Addr->setIsInBounds(true);
+  Addr->setDebugLoc(Copy->getDebugLoc());
+  // Construct with an explicit alignment: the alignment-defaulting LoadInst
+  // constructors derive the ABI alignment from the insertion position's
+  // module, which an unparented instruction has none of.
+  auto *Load = new LoadInst(ElemTy, Addr, "pea.copy.elem",
+                            /*IsVolatile=*/false,
+                            llvm::Align(DL.getTypeAllocSize(ElemTy)),
+                            static_cast<Instruction *>(nullptr));
+  Load->setAtomic(AtomicOrdering::Unordered);
+  Load->setDebugLoc(Copy->getDebugLoc());
+  // The source component/declared field bounds every non-null loaded oop.
+  // Keep this fact on the load at the copy's control position; a folded
+  // destination load may have stronger, path-local metadata of its own.
+  const auto *Callbacks = jeandle::getVMCallbacks();
+  if (ValueKlass && (!Callbacks || !Callbacks->IsUnverifiedInterface ||
+                     Callbacks->IsUnverifiedInterface(ValueKlass)))
+    ValueKlass = 0;
+  if (ElemTy->isPointerTy() && ValueKlass)
+    Load->setMetadata(
+        jeandle::Metadata::JavaKlass,
+        MDNode::get(
+            Ctx, {ConstantAsMetadata::get(ConstantInt::get(I64, ValueKlass))}));
+  Result.OwnedCopyLoads.emplace_back(Addr);
+  Result.OwnedCopyLoads.emplace_back(Load);
+  Place(Addr);
+  Place(Load);
+
+  Value *Semantic = Load;
+  WeakTrackingVH CastVH;
+  if (NeedsNarrowCast) {
+    auto *Cast = CastInst::Create(
+        Instruction::AddrSpaceCast, Load,
+        PointerType::get(Ctx, jeandle::AddrSpace::JavaHeapAddrSpace),
+        "pea.copy.elem.oop");
+    Cast->setDebugLoc(Copy->getDebugLoc());
+    Result.OwnedCopyLoads.emplace_back(Cast);
+    Place(Cast);
+    Semantic = Cast;
+    CastVH = Cast;
+  }
+  CopyElementLoadCache.insert_or_assign(
+      Key, CopyElementLoadChain{Addr, Load, CastVH});
+  return Semantic;
+}
+
+void Analyzer::clearCopyFoldReachingDefs(jeandle::ObjectID DestID, int64_t Lo,
+                                         int64_t Hi) {
+  auto DIt = FieldDefinitions.find(DestID);
+  if (DIt == FieldDefinitions.end())
+    return;
+  auto &Offsets = DIt->second;
+  SmallVector<int64_t, 8> ToErase;
+  for (const auto &[Off, Defs] : Offsets)
+    if (Off >= Lo && Off < Hi)
+      ToErase.push_back(Off);
+  for (int64_t Off : ToErase)
+    Offsets.erase(Off);
+}
+
+void Analyzer::observeCopyFoldSourceDefs(jeandle::ObjectID SrcID, int64_t Lo,
+                                         int64_t Hi) {
+  auto DIt = FieldDefinitions.find(SrcID);
+  if (DIt == FieldDefinitions.end())
+    return;
+  SmallVector<int64_t, 8> ToObserve;
+  for (const auto &[Off, Defs] : DIt->second)
+    if (Off >= Lo && Off < Hi)
+      ToObserve.push_back(Off);
+  for (int64_t Off : ToObserve)
+    observeFieldDefinition(SrcID, Off, FieldDefinitions);
+}
+
+bool Analyzer::foldCloneInstanceConcreteSource(CallBase *CB,
+                                               jeandle::ObjectID DestID,
+                                               jeandle::VirtualObject &Dest,
+                                               int64_t BaseOff,
+                                               int64_t PayloadEnd) {
+  // A derived pointer of a still-virtual object must not become a load base:
+  // whole-object identity already failed above, so a BaseObject resolution
+  // here is exactly that shape, and the memory behind its eliminated stores
+  // is not written until materialization. Well-formed clone IR always names
+  // the whole source object; anything else keeps the bulk copy.
+  if (jeandle::pea::resolveVirtualRef(CB->getArgOperand(0), CurrentState,
+                                      Aliases, DL))
+    return false;
+  // The clone's exact klass must satisfy the source's call-site type bounds;
+  // a non-exact superclass bound is compatible with a subclass clone.
+  jeandle::JavaType SrcJT =
+      jeandle::getJavaType(CB->getArgOperand(0), &DT, CB, IsNullEdge);
+  if (SrcJT.isKnown() && SrcJT.Klass != Dest.Klass &&
+      (SrcJT.Exact || jeandle::areKlassesIncompatible(
+                          Dest.Klass, /*KlassExact=*/true, SrcJT.Klass)))
+    return false;
+
+  const jeandle::VMCallbacks *VMCB = jeandle::getVMCallbacks();
+  if (!VMCB || !VMCB->GetCloneInstanceInfo)
+    return false;
+  // The destination allocation's klass operand IS the clone's runtime klass
+  // — and by clone semantics also the source's — so enumerating it describes
+  // the source's actual field layout; the klass is exact. FieldState requests
+  // semantic loads and virtual entries, with ordinary barriered replay when
+  // needed, rather than the bulk-copy admission and expansion budget.
+  jeandle::CloneInstanceInfoResult Info =
+      VMCB->GetCloneInstanceInfo(Dest.Klass, /*klass_exact=*/true,
+                                 jeandle::CloneInstanceInfoPurpose::FieldState);
+  if (std::get<0>(Info) !=
+      static_cast<int>(jeandle::CloneInstanceInfoStatus::Ready))
+    return false;
+  // Ready promises the count matches the description list; a mismatched or
+  // negative count is a bogus callback result — decline rather than trust a
+  // partial layout.
+  if (std::get<1>(Info) < 0 ||
+      static_cast<size_t>(std::get<1>(Info)) != std::get<2>(Info).size())
+    return false;
+
+  // Validation: every declared field must land WHOLLY inside the payload
+  // window (the bytes the real clone copied), stay within the offset model,
+  // and be representable as a storage type the destination slot accepts.
+  // getOrCreateFieldIndex may insert an inert FieldDesc on the validation
+  // path — the accepted processStore pattern; a bail here materializes the
+  // destination immediately.
+  struct CloneField {
+    int64_t Offset;
+    Type *StorageTy;
+    uintptr_t ValueKlass;
+  };
+  SmallVector<CloneField, 8> Fields;
+  for (const jeandle::CloneInstanceFieldInfo &Field : std::get<2>(Info)) {
+    int64_t Off = std::get<0>(Field);
+    auto BasicType = static_cast<jeandle::JBasicType>(std::get<1>(Field));
+    if (Off < BaseOff || Off >= PayloadEnd ||
+        !jeandle::pea::isUsableFieldOffset(Off) ||
+        BasicType >= jeandle::JBasicType::Count)
+      return false;
+    Type *StorageTy = javaFieldStorageType(
+        BasicType, VMConsts.UseCompressedOops, DL, F.getContext());
+    if (!StorageTy)
+      return false;
+    std::optional<int64_t> FieldEnd =
+        jeandle::pea::checkedOffsetAdd(Off, DL.getTypeStoreSize(StorageTy));
+    if (!FieldEnd || *FieldEnd > PayloadEnd)
+      return false;
+    if (Dest.getOrCreateFieldIndex(Off, StorageTy, DL) < 0)
+      return false;
+    uintptr_t ValueKlass = 0;
+    if (StorageTy->isPointerTy() && VMCB->GetFieldType &&
+        Off <= std::numeric_limits<int>::max())
+      ValueKlass = VMCB->GetFieldType(Dest.Klass, static_cast<int>(Off));
+    Fields.push_back({Off, StorageTy, ValueKlass});
+  }
+
+  // Commit: no failure paths beyond this point. Materialize the outer map
+  // entry BEFORE taking DestFields (an operator[] insert can rehash the
+  // outer DenseMap and would dangle a reference taken earlier).
+  if (!FieldStates.count(DestID))
+    (void)FieldStates[DestID];
+  auto &DestFields = FieldStates[DestID];
+  for (const auto &[Off, StorageTy, ValueKlass] : Fields) {
+    Value *Load = getOrCreateCopyElementSemanticLoad(
+        CB, CB->getArgOperand(0), StorageTy, Off, ValueKlass);
+    DestFields[Off] = jeandle::FieldValue::scalar(Load);
+  }
+  // Window slots that are not declared fields revert to their defaults: the
+  // full-coverage clone overwrote whatever a stale store had put there.
+  DenseSet<int64_t> FieldOffsets;
+  for (const auto &Field : Fields)
+    FieldOffsets.insert(Field.Offset);
+  SmallVector<int64_t, 8> Stale;
+  for (const auto &[Off, FV] : DestFields)
+    if (Off >= BaseOff && Off < PayloadEnd && !FieldOffsets.count(Off))
+      Stale.push_back(Off);
+  for (int64_t Off : Stale)
+    DestFields.erase(Off);
+  // The full-coverage copy is now the reaching definition of every window
+  // slot it wrote or reset to default.
+  clearCopyFoldReachingDefs(DestID, BaseOff, PayloadEnd);
+  if (jeandle::copyNeedsInitializationBarrier(*CB))
+    CurrentState.getObjectStateForModification(DestID).addPendingBarriers(
+        jeandle::AllocationInitObligation);
+  emitReplaceCall(CB, /*Replacement=*/nullptr, DestID);
+  ++AttemptStats.CopyFolds;
+  return true;
 }
 
 void Analyzer::propagatePointerAlias(Instruction *I) {
@@ -7717,39 +9218,52 @@ void Analyzer::recordDeoptBundleMappings(CallBase *CB) {
           return;
         }
 
-        // Array canonicity gauntlet: every touched element must map to a
-        // whole, in-bounds, correctly-typed cell that HotSpot can reallocate
-        // on deopt. A store that straddles elements, lands at a non-canonical
-        // offset, uses the wrong element type, or writes a partial byte range
-        // makes the array undescribable, which flips Node.Describable to false
-        // and forces the planner to treat it as a fallback seed.
+        // HotSpot needs one descriptor value per physical array element.
+        // Primitive state can contain packed groups, so validate complete
+        // element spans first, then project their bits only for this snapshot.
+        // Reference cells retain their exact physical storage representation.
+        bool Primitive = hasPrimitiveArrayGroups(VObj);
+        Type *ElementTy = VObj.ArrayElementType;
+        if (ElementTy->isIntegerTy(1) && VObj.ArrayIndexScale == 1)
+          ElementTy = Type::getInt8Ty(F.getContext());
+        if (Primitive &&
+            (DL.getTypeStoreSize(ElementTy) != VObj.ArrayIndexScale ||
+             DL.getTypeSizeInBits(ElementTy) !=
+                 uint64_t(VObj.ArrayIndexScale) * 8)) {
+          Node.Describable = false;
+          Input.CurrentNodes[NodeIndex] = std::move(Node);
+          return;
+        }
         const DenseMap<int64_t, jeandle::FieldValue> *Touched =
             FSIt == FieldStates.end() ? nullptr : &FSIt->second;
         if (Touched) {
           int64_t Base = static_cast<int64_t>(VObj.ArrayBaseOffset);
           int64_t Scale = static_cast<int64_t>(VObj.ArrayIndexScale);
+          SmallVector<std::pair<uint64_t, uint64_t>, 8> Ranges;
           for (const auto &Entry : *Touched) {
             std::optional<int64_t> Delta = checkedOffsetSub(Entry.first, Base);
             Type *TouchedType = Entry.second.getDeclaredType();
-            const jeandle::VirtualObject::FieldDesc *FD =
-                VObj.findField(Entry.first);
+            auto FD = fieldForValue(VObj, Entry.first, TouchedType, DL);
             Type *StorageType = FD ? FD->LLVMType : TouchedType;
             bool Canonical =
                 Delta && *Delta >= 0 && Scale > 0 && *Delta % Scale == 0 &&
                 static_cast<uint64_t>(*Delta / Scale) < VObj.ArrayLength &&
                 IsEncodableOffset(Entry.first);
-            bool ExactElementType =
-                StorageType &&
-                (StorageType == VObj.ArrayElementType ||
-                 (VObj.ArrayElementType->isIntegerTy(1) &&
-                  StorageType->isIntegerTy(8) && VObj.ArrayIndexScale == 1));
-            bool ExactStoreSize = false;
+            bool ValidType = StorageType &&
+                             (Primitive ? FD && Entry.second.isScalar() &&
+                                              !StorageType->isPtrOrPtrVectorTy()
+                                        : StorageType == ElementTy);
+            bool WholeElements = false;
             bool FullByteRange = false;
             if (StorageType) {
               TypeSize StoreSize = DL.getTypeStoreSize(StorageType);
               if (!StoreSize.isScalable()) {
                 uint64_t FixedStoreSize = StoreSize.getFixedValue();
-                ExactStoreSize = FixedStoreSize == static_cast<uint64_t>(Scale);
+                WholeElements =
+                    FixedStoreSize != 0 &&
+                    (Primitive
+                         ? FixedStoreSize % static_cast<uint64_t>(Scale) == 0
+                         : FixedStoreSize == static_cast<uint64_t>(Scale));
                 if (Delta && *Delta >= 0 && Scale > 0) {
                   std::optional<uint64_t> ArrayBytes = llvm::checkedMulUnsigned(
                       static_cast<uint64_t>(VObj.ArrayLength),
@@ -7758,11 +9272,20 @@ void Analyzer::recordDeoptBundleMappings(CallBase *CB) {
                   std::optional<uint64_t> End =
                       llvm::checkedAddUnsigned(Start, FixedStoreSize);
                   FullByteRange = ArrayBytes && End && *End <= *ArrayBytes;
+                  if (FullByteRange)
+                    Ranges.emplace_back(Start, *End);
                 }
               }
             }
-            if (!Canonical || !ExactElementType || !ExactStoreSize ||
-                !FullByteRange) {
+            if (!Canonical || !ValidType || !WholeElements || !FullByteRange) {
+              Node.Describable = false;
+              Input.CurrentNodes[NodeIndex] = std::move(Node);
+              return;
+            }
+          }
+          llvm::sort(Ranges);
+          for (unsigned I = 1; I < Ranges.size(); ++I) {
+            if (Ranges[I].first < Ranges[I - 1].second) {
               Node.Describable = false;
               Input.CurrentNodes[NodeIndex] = std::move(Node);
               return;
@@ -7770,13 +9293,22 @@ void Analyzer::recordDeoptBundleMappings(CallBase *CB) {
           }
         }
 
-        Constant *Default = Constant::getNullValue(VObj.ArrayElementType);
+        Constant *Default = Constant::getNullValue(ElementTy);
         if (VObj.ArrayElementType->isPointerTy() &&
             VObj.ArrayElementType->getPointerAddressSpace() ==
                 jeandle::AddrSpace::NarrowOopAddrSpace)
           Default = ConstantPointerNull::get(PointerType::get(
               F.getContext(), jeandle::AddrSpace::JavaHeapAddrSpace));
-        for (uint32_t Index = 0; Index < VObj.ArrayLength; ++Index) {
+        jeandle::HotspotBasicType BasicType =
+            jeandle::LLVM2JavaComputational(ElementTy);
+        if (BasicType == jeandle::T_NARROWOOP)
+          BasicType = jeandle::T_OBJECT;
+        if (BasicType == jeandle::T_ILLEGAL) {
+          Node.Describable = false;
+          Input.CurrentNodes[NodeIndex] = std::move(Node);
+          return;
+        }
+        for (uint32_t Index = 0; Index < VObj.ArrayLength;) {
           std::optional<int64_t> Offset = checkedArrayElementOffset(
               VObj.ArrayBaseOffset, Index, VObj.ArrayIndexScale);
           if (!Offset || !IsEncodableOffset(*Offset)) {
@@ -7786,19 +9318,31 @@ void Analyzer::recordDeoptBundleMappings(CallBase *CB) {
           if (Touched) {
             auto It = Touched->find(*Offset);
             if (It != Touched->end()) {
-              AddFieldValue(*Offset, It->second);
+              if (Primitive) {
+                for (Value *Element : projectDeoptArrayGroup(
+                         It->second.getScalar(), ElementTy, CB)) {
+                  Offset = checkedArrayElementOffset(
+                      VObj.ArrayBaseOffset, Index++, VObj.ArrayIndexScale);
+                  if (!Offset) {
+                    Node.Describable = false;
+                    break;
+                  }
+                  AddScalarField(*Offset, BasicType, Element);
+                }
+                // An offset overflow or a failed AddScalarField already made
+                // this node undescribable; stop the whole element walk
+                // instead of filling further slots of a discarded descriptor.
+                if (!Node.Describable)
+                  break;
+              } else {
+                AddFieldValue(*Offset, It->second);
+                ++Index;
+              }
               continue;
             }
           }
-          jeandle::HotspotBasicType BasicType =
-              jeandle::LLVM2JavaComputational(VObj.ArrayElementType);
-          if (BasicType == jeandle::T_NARROWOOP)
-            BasicType = jeandle::T_OBJECT;
-          if (BasicType == jeandle::T_ILLEGAL) {
-            Node.Describable = false;
-            break;
-          }
           AddScalarField(*Offset, BasicType, Default);
+          ++Index;
         }
       } else if (FSIt != FieldStates.end()) {
         SmallVector<int64_t, 8> Offsets;
@@ -8590,6 +10134,8 @@ bool Analyzer::prepareSyntheticDAG(jeandle::ObjectID ID) {
 // siblings first so re-emitted monitorenters preserve HotSpot lightweight-lock
 // nesting order at the escape point.
 void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
+  if (hasPendingRetry())
+    return;
   assert(ActiveMaterializationPlanID !=
              jeandle::MaterializeEffect::InvalidPlanID &&
          "materialization requires an active final-commit plan");
@@ -8608,7 +10154,7 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
       const jeandle::FieldValue &FV = KV.second;
       if (FV.isUnknown())
         continue;
-      const jeandle::VirtualObject::FieldDesc *FD = VObj.findField(KV.first);
+      auto FD = fieldForValue(VObj, KV.first, FV.getDeclaredType(), DL);
       if (!FD ||
           !jeandle::pea::isLegalMaterializationAtomicType(FD->LLVMType, DL)) {
         // Preserve every reaching store that analysis tentatively eliminated,
@@ -8693,6 +10239,8 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
           continue;
         jeandle::ObjectID InnerID = OffIt->second.getVirtualRef();
         C.Recurse(InnerID, MatReason::Nested);
+        if (hasPendingRetry())
+          return;
         // A Case-C synthetic has no usable materialized identity until its
         // replay DAG has been prepared. In particular, an AS3 logical carrier
         // cannot serve as an AS1 replay receiver. If nested preparation failed,
@@ -8742,6 +10290,19 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
   Value *ReplayReceiver = realIdentityOf(ID);
   if (!isValueAvailableAt(ReplayReceiver, SafeIP, C.ReplaySource,
                           C.ReplayTarget)) {
+    // A retained allocation must also retain its exceptional path. Restore
+    // that path before deciding where to replay: a provisional Case-B PHI
+    // may then become Case A and replay only on its normal incoming edge.
+    // Fully virtual users need no receiver and can keep the dead-edge proof.
+    if (!VObj.IsSynthetic &&
+        llvm::any_of(CFGDeadnessProofs, [&](const CFGDeadnessProof &Proof) {
+          return Proof.Kind ==
+                     CFGDeadnessProofKind::EliminatedAllocationInvoke &&
+                 Proof.Killer == ReplayReceiver;
+        })) {
+      InvalidCFGProofKillers.push_back(cast<Instruction>(ReplayReceiver));
+      return;
+    }
     LLVM_DEBUG(dbgs() << "PEA: keep-real receiver unavailable VO=" << ID
                       << " at " << *SafeIP << "\n");
     markIneligible(ID, /*FreshRetry=*/true);
@@ -8820,8 +10381,11 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
         Cascade.push_back(Kv.first);
     }
     llvm::sort(Cascade); // deterministic order
-    for (jeandle::ObjectID OtherID : Cascade)
+    for (jeandle::ObjectID OtherID : Cascade) {
       C.Recurse(OtherID, MatReason::Cascade);
+      if (hasPendingRetry())
+        return;
+    }
   }
 
   // The surviving unbalanced monitorenters on the live stack are captured
@@ -8854,6 +10418,7 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
   E->ReplaySource = C.ReplaySource;
   E->ReplayTarget = C.ReplayTarget;
   E->PlanID = ActiveMaterializationPlanID;
+  E->PendingBarriers = C.GetPendingBarriers(ID);
   if (FSIt != C.FieldStates.end()) {
     SmallVector<int64_t, 8> Offsets;
     Offsets.reserve(FSIt->second.size());
@@ -8864,7 +10429,7 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
       const jeandle::FieldValue &FV = FSIt->second.lookup(Off);
       if (FV.isUnknown())
         continue;
-      const jeandle::VirtualObject::FieldDesc *FD = VObj.findField(Off);
+      auto FD = fieldForValue(VObj, Off, FV.getDeclaredType(), DL);
       assert(FD && "tracked field state must have a field descriptor");
       E->FieldEntries.emplace_back(*FD, FV);
     }
@@ -8892,6 +10457,8 @@ void Analyzer::ensureMaterialized(jeandle::ObjectID ID, MaterializeContext &C) {
 // commit.
 void Analyzer::materializeAt(jeandle::ObjectID ID, Instruction *InsertBefore,
                              MatReason Reason) {
+  if (hasPendingRetry())
+    return;
   const bool IsPlanRoot =
       ActiveMaterializationPlanID == jeandle::MaterializeEffect::InvalidPlanID;
   if (IsPlanRoot)
@@ -8969,13 +10536,17 @@ void Analyzer::materializeAt(jeandle::ObjectID ID, Instruction *InsertBefore,
   // init) so each outlives C — function_ref does NOT own its callable, and a
   // temporary would be destroyed at the end of the `C{...};` statement, leaving
   // a dangling ref for the ensureMaterialized call on the next line.
-  MaterializeContext C{FieldStates,    FieldDefinitions,
-                       LockCounts,     LiveLockEnters,
-                       Materialized,   Reason,
-                       InsertBefore,   InsertBefore->getParent(),
-                       nullptr,        Recurse,
-                       ClearLockState, CaptureLocksIntoEffect,
-                       ComputeSafeIP,  FlipState};
+  auto GetPendingBarriers = [&](jeandle::ObjectID Oid) {
+    return CurrentState.getObjectStateOptional(Oid)->getPendingBarriers();
+  };
+  MaterializeContext C{FieldStates,       FieldDefinitions,
+                       LockCounts,        LiveLockEnters,
+                       Materialized,      Reason,
+                       InsertBefore,      InsertBefore->getParent(),
+                       nullptr,           Recurse,
+                       ClearLockState,    CaptureLocksIntoEffect,
+                       ComputeSafeIP,     FlipState,
+                       GetPendingBarriers};
   ensureMaterialized(ID, C);
 }
 
@@ -9257,6 +10828,23 @@ void Analyzer::commit() {
             AnyChange = true;
           }
       }
+      // A dropped copy fold revives a call that READS its virtual source's
+      // memory at the call. The source's own materialization may replay the
+      // tracked values only AFTER the call (or the source may have been
+      // proposed for deletion), so an eligible source cannot be trusted to
+      // have its values in memory there. Keep such a source entirely real:
+      // markIneligible restores its eliminated stores at their original
+      // positions (which dominate the call) and drops its replays. This
+      // runs BEFORE the surviving-use audit below so the audit's FreshRetry
+      // (a full re-analysis) is not triggered for a source the plan can
+      // already keep real soundly.
+      for (const auto &[SrcID, FoldDestID] : CopyFoldVirtualSources) {
+        if (Eligible.lookup(FoldDestID) || !Eligible.lookup(SrcID))
+          continue;
+        markIneligible(SrcID);
+        AnyChange = true;
+      }
+
       // An ordinary allocation that is neither directly materialized nor
       // retained by a live prepared synthetic DAG is proposed for deletion.
       // Audit its final SSA uses through transparent pointer carriers: every
@@ -9265,9 +10853,14 @@ void Analyzer::commit() {
       // catches future PHI incomings in cyclic RPO regions that were unresolved
       // when their block was processed.
       DenseSet<Instruction *> RemovedTargets;
+      DenseMap<Instruction *, const jeandle::RewriteMemoryBarrierEffect *>
+          BarrierRewrites;
       DenseSet<jeandle::ObjectID> HasMaterialize;
       for (const auto &Kv : Result.BlockEffects)
         for (const jeandle::Effect &E : Kv.second) {
+          if (const auto *Rewrite =
+                  dyn_cast<jeandle::RewriteMemoryBarrierEffect>(&E))
+            BarrierRewrites[Rewrite->getTarget()] = Rewrite;
           if (!E.hasMutationOwner())
             continue;
           bool OwnerEligible = Eligible.lookup(E.getMutationOwner());
@@ -9302,6 +10895,9 @@ void Analyzer::commit() {
               }
               if (UserI && RemovedTargets.count(UserI))
                 return true;
+              if (const auto *Rewrite = BarrierRewrites.lookup(UserI))
+                if (Rewrite->removesOwnerUse(U, ID))
+                  return true;
               auto *CB = dyn_cast_or_null<CallBase>(UserI);
               if (!CB)
                 return false;
@@ -10041,7 +11637,8 @@ void Analyzer::publishAttemptOutputs() {
     llvm::errs() << ";; PEA stats @" << F.getName()
                  << ": NeverEscapes=" << NeverEsc
                  << " PartiallyEscapes=" << PartialEsc
-                 << " AlwaysEscapes=" << AlwaysEsc << "\n";
+                 << " AlwaysEscapes=" << AlwaysEsc
+                 << " CopyFolds=" << AttemptStats.CopyFolds << "\n";
   }
 }
 
@@ -10183,6 +11780,8 @@ void Analyzer::materializeAtPredFromExitInfo(jeandle::ObjectID ID,
                                              BlockExitData &ExitInfo,
                                              bool EdgeLocal, MatReason Reason,
                                              BasicBlock *TargetMerge) {
+  if (hasPendingRetry())
+    return;
   const bool IsPlanRoot =
       ActiveMaterializationPlanID == jeandle::MaterializeEffect::InvalidPlanID;
   if (IsPlanRoot)
@@ -10244,6 +11843,7 @@ void Analyzer::materializeAtPredFromExitInfo(jeandle::ObjectID ID,
     ExitInfo.Virtuals.erase(Oid);
     ExitInfo.Materialized.insert(Oid);
     ExitInfo.FieldStates.erase(Oid);
+    ExitInfo.PendingBarriers.erase(Oid);
     ExitInfo.FieldDefinitions.erase(Oid);
     ExitInfo.LockCounts.erase(Oid);
   };
@@ -10262,6 +11862,9 @@ void Analyzer::materializeAtPredFromExitInfo(jeandle::ObjectID ID,
   Value *LogicalEscape = TargetMerge
                              ? static_cast<Value *>(TargetMerge)
                              : static_cast<Value *>(PH->getTerminator());
+  auto GetPendingBarriers = [&](jeandle::ObjectID Oid) {
+    return ExitInfo.PendingBarriers.lookup(Oid);
+  };
   MaterializeContext C{ExitInfo.FieldStates,
                        ExitInfo.FieldDefinitions,
                        ExitInfo.LockCounts,
@@ -10275,8 +11878,11 @@ void Analyzer::materializeAtPredFromExitInfo(jeandle::ObjectID ID,
                        ClearLockState,
                        CaptureLocksIntoEffect,
                        ComputeSafeIP,
-                       FlipState};
+                       FlipState,
+                       GetPendingBarriers};
   ensureMaterialized(ID, C);
+  if (hasPendingRetry())
+    return;
   // A block-end drain (!EdgeLocal) whose insertion point is a block-ending
   // invoke runs every replay side effect — field stores, lock re-emit, and
   // real-object exposure — on BOTH the normal and unwind edges, so the unwind
@@ -10341,8 +11947,8 @@ void Analyzer::materializeAtPredFromExitInfo(jeandle::ObjectID ID,
 
 // Equality on BlockExitData (the per-object base data). Two payloads are
 // equivalent iff every per-object dimension (still-virtual set, materialized
-// set, FieldStates per offset, LockCounts, LiveLockEnters) matches by
-// structural comparison.
+// set, pending ordering, FieldStates per offset, LockCounts, LiveLockEnters)
+// matches by structural comparison.
 bool Analyzer::exitDataEquivalent(const BlockExitData &A,
                                   const BlockExitData &B) {
   if (A.Virtuals.size() != B.Virtuals.size())
@@ -10355,6 +11961,8 @@ bool Analyzer::exitDataEquivalent(const BlockExitData &A,
   for (auto ID : A.Materialized)
     if (!B.Materialized.count(ID))
       return false;
+  if (A.PendingBarriers != B.PendingBarriers)
+    return false;
   if (A.FieldStates.size() != B.FieldStates.size())
     return false;
   for (auto &Kv : A.FieldStates) {
@@ -10610,8 +12218,7 @@ void Analyzer::processLoopBodyOnePass(Loop *L, ArrayRef<BasicBlock *> LoopRPO,
       // A nested loop failure stops this traversal immediately. Overflow is
       // recovered by the outermost loop; loop-end invariant failures discard
       // the complete analysis attempt.
-      if (OverflowFlag || InvalidLoopMonotonicity ||
-          !RetryVirtualizationAllocationSites.empty())
+      if (OverflowFlag || InvalidLoopMonotonicity || hasPendingRetry())
         return;
       for (BasicBlock *SB : Inner->blocks())
         Processed.insert(SB);
@@ -10623,8 +12230,7 @@ void Analyzer::processLoopBodyOnePass(Loop *L, ArrayRef<BasicBlock *> LoopRPO,
       processBlock(BB);
     // Defensive polling keeps future block handlers from extending a
     // half-built traversal after either attempt-local failure mode.
-    if (OverflowFlag || InvalidLoopMonotonicity ||
-        !RetryVirtualizationAllocationSites.empty())
+    if (OverflowFlag || InvalidLoopMonotonicity || hasPendingRetry())
       return;
     Processed.insert(BB);
   }
@@ -10661,7 +12267,7 @@ void Analyzer::processLoop(Loop *L, ArrayRef<BasicBlock *> FunctionRPO) {
     // Defensive: a loop with no header would be malformed LoopInfo state.
     return;
   }
-  if (InvalidLoopMonotonicity || !RetryVirtualizationAllocationSites.empty())
+  if (InvalidLoopMonotonicity || hasPendingRetry())
     return;
   if (!Preheader) {
     // Loop without a unique preheader. Jeandle schedules LoopSimplifyPass
@@ -10731,14 +12337,14 @@ void Analyzer::processLoop(Loop *L, ArrayRef<BasicBlock *> FunctionRPO) {
         markIneligible(ID, /*FreshRetry=*/true);
       }
     }
-    if (!RetryVirtualizationAllocationSites.empty())
+    if (hasPendingRetry())
       return;
 
     // Body walk in REGULAR mode (single pass — no fixpoint, since there is
     // no way to verify convergence at a non-existent preheader). Loop-local
     // allocs that don't outlive a single iteration are still virtualised.
     processLoopBodyOnePass(L, loopBlocksInRPO(L, FunctionRPO), FunctionRPO);
-    if (InvalidLoopMonotonicity || !RetryVirtualizationAllocationSites.empty())
+    if (InvalidLoopMonotonicity || hasPendingRetry())
       return;
 
     // Post-body merge. The in-pass header merge (header first in RPO) runs
@@ -10753,7 +12359,7 @@ void Analyzer::processLoop(Loop *L, ArrayRef<BasicBlock *> FunctionRPO) {
     // its effects simply persist to commit().
     resetPerBlockState();
     mergeStates(Header);
-    if (!RetryVirtualizationAllocationSites.empty())
+    if (hasPendingRetry())
       return;
     // Drain the merge's deferred CreatePHI effects the same way the fixpoint
     // path's post-body merge does: a one-shot post-body Case C (or a field
@@ -10891,7 +12497,7 @@ void Analyzer::processLoop(Loop *L, ArrayRef<BasicBlock *> FunctionRPO) {
 
       processLoopBodyOnePass(L, LoopRPO, FunctionRPO, &LastMergedState);
 
-      if (!RetryVirtualizationAllocationSites.empty()) {
+      if (hasPendingRetry()) {
         if (L->getLoopDepth() == 1)
           CurrentMode = SavedModeForNest;
         return;
@@ -10966,7 +12572,7 @@ void Analyzer::processLoop(Loop *L, ArrayRef<BasicBlock *> FunctionRPO) {
         snapshotExitStateInto(NewMergedState); // B'
         drainPendingMergePhis(Header);
       }
-      if (!RetryVirtualizationAllocationSites.empty()) {
+      if (hasPendingRetry()) {
         if (L->getLoopDepth() == 1)
           CurrentMode = SavedModeForNest;
         return;
@@ -11054,7 +12660,7 @@ void Analyzer::processLoop(Loop *L, ArrayRef<BasicBlock *> FunctionRPO) {
       // Drain every still-virtual VO at the loop's forward end so the redo
       // starts with no live virtuals on entry.
       processStateBeforeLoopOnOverflow(L);
-      if (!RetryVirtualizationAllocationSites.empty()) {
+      if (hasPendingRetry()) {
         if (L->getLoopDepth() == 1)
           CurrentMode = SavedModeForNest;
         return;
@@ -11164,7 +12770,7 @@ jeandle::PEAResult Analyzer::run() {
     if (!L) {
       bailUnvisitedBackEdgeVOs(BB);
       processBlock(BB);
-      if (!RetryVirtualizationAllocationSites.empty())
+      if (hasPendingRetry())
         return jeandle::PEAResult();
       Done.insert(BB);
       continue;
@@ -11178,7 +12784,7 @@ jeandle::PEAResult Analyzer::run() {
     // block inside the loop appears before its header), still dispatch on
     // the top-level loop and mark all its blocks Done.
     processLoop(Top, FunctionRPO);
-    if (InvalidLoopMonotonicity || !RetryVirtualizationAllocationSites.empty())
+    if (InvalidLoopMonotonicity || hasPendingRetry())
       return jeandle::PEAResult();
     for (BasicBlock *SB : Top->blocks())
       Done.insert(SB);
@@ -11209,10 +12815,10 @@ jeandle::PEAResult Analyzer::run() {
   // handled by processLoop directly. Loops with no preheader are a no-op
   // either way (the function cannot pick a drain IP without a PH).
   materializePreheaderVirtualsForUnvisitedLoops();
-  if (!RetryVirtualizationAllocationSites.empty())
+  if (hasPendingRetry())
     return jeandle::PEAResult();
   commit();
-  if (!RetryVirtualizationAllocationSites.empty())
+  if (hasPendingRetry())
     return jeandle::PEAResult();
   if (!validateSurvivingPhiArity())
     return jeandle::PEAResult();
@@ -11249,12 +12855,13 @@ PartialEscapeAnalysis::run(Function &F, FunctionAnalysisManager &FAM) {
   // PEA passes that need them.
   auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
   auto &LI = FAM.getResult<LoopAnalysis>(F);
+  auto &LVI = FAM.getResult<LazyValueAnalysis>(F);
 
   const bool StrictLockOrder = resolveStrictLockOrder();
   DenseSet<Instruction *> SuppressedCFGProofs;
   DenseSet<CallBase *> SuppressedVirtualizations;
   while (true) {
-    Analyzer A(F, DT, LI, StrictLockOrder, SuppressedCFGProofs,
+    Analyzer A(F, DT, LI, LVI, StrictLockOrder, SuppressedCFGProofs,
                SuppressedVirtualizations);
     jeandle::PEAResult Attempt = A.run();
     if (!A.getRetryVirtualizationAllocationSites().empty()) {
@@ -11290,8 +12897,10 @@ PartialEscapeAnalysis::run(Function &F, FunctionAnalysisManager &FAM) {
     }
 
     ArrayRef<Instruction *> InvalidProofs = A.getInvalidCFGProofKillers();
-    if (InvalidProofs.empty())
+    if (InvalidProofs.empty()) {
+      Attempt.suspendOwnedUses();
       return Attempt;
+    }
 
     // Each killer is a stable instruction in untouched input IR. Record every
     // invalid proof discovered this attempt at once, so the fixpoint converges

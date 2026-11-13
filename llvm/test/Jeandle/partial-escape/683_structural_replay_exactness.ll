@@ -46,6 +46,7 @@ unwind:
 ; META-NEXT: %[[META_SLOT:[A-Za-z0-9._]+]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) %{{[A-Za-z0-9._]+}}, i64 8
 ; META-NEXT: store atomic i32 %value, ptr addrspace(1) %[[META_SLOT]] unordered, align 4
 ; META-NOT: !nontemporal
+; META-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; META-NEXT: call void @sink
 
 define void @split_gep_is_not_replay(i1 %escape, i32 %value)
@@ -74,6 +75,7 @@ unwind:
 ; SPLIT-NOT: getelementptr{{.*}}i64 4
 ; SPLIT-NEXT: %[[SPLIT_SLOT:[A-Za-z0-9._]+]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) %{{[A-Za-z0-9._]+}}, i64 8
 ; SPLIT-NEXT: store atomic i32 %value, ptr addrspace(1) %[[SPLIT_SLOT]] unordered, align 4
+; SPLIT-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; SPLIT-NEXT: call void @sink
 
 define void @typed_gep_is_not_replay(i1 %escape, i64 %value)
@@ -101,6 +103,7 @@ unwind:
 ; TYPED-NOT: getelementptr{{.*}} i64,
 ; TYPED-NEXT: %[[TYPED_SLOT:[A-Za-z0-9._]+]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) %{{[A-Za-z0-9._]+}}, i64 8
 ; TYPED-NEXT: store atomic i64 %value, ptr addrspace(1) %[[TYPED_SLOT]] unordered, align 8
+; TYPED-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; TYPED-NEXT: call void @sink
 
 define void @tail_monitorenter_is_not_replay(i1 %escape)
@@ -192,6 +195,7 @@ unwind:
 ; MULTIUSER-NEXT: %slot = getelementptr inbounds{{( nuw)?}} i8,
 ; MULTIUSER-NEXT: %pea.matslot = getelementptr inbounds{{( nuw)?}} i8,
 ; MULTIUSER-NEXT: store atomic i32 %value, ptr addrspace(1) %pea.matslot unordered, align 4
+; MULTIUSER-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; MULTIUSER-NEXT: call void @sink
 ; MULTIUSER-NEXT: call void @llvm.assume(i1 true) [ "nonnull"(ptr addrspace(1) %slot) ]
 
@@ -223,6 +227,7 @@ unwind:
 ; SEPARATED-NEXT: call void @semantic_marker()
 ; SEPARATED-NEXT: %pea.matslot = getelementptr inbounds{{( nuw)?}} i8,
 ; SEPARATED-NEXT: store atomic i32 %value, ptr addrspace(1) %pea.matslot unordered, align 4
+; SEPARATED-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; SEPARATED-NEXT: call void @sink
 
 define void @gep_metadata_is_not_replay(i1 %escape, i32 %value)
@@ -251,6 +256,7 @@ unwind:
 ; GEPMETA-NEXT: %pea.matslot = getelementptr inbounds{{( nuw)?}} i8,
 ; GEPMETA-NOT: !annotation
 ; GEPMETA-NEXT: store atomic i32 %value, ptr addrspace(1) %pea.matslot unordered, align 4
+; GEPMETA-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; GEPMETA-NEXT: call void @sink
 
 define void @wrong_cc_monitorenter_is_not_replay(i1 %escape)
@@ -381,6 +387,7 @@ unwind:
 ; OVERLONG-NOT: tail.slot
 ; OVERLONG-NEXT: %pea.matslot = getelementptr inbounds{{( nuw)?}} i8,
 ; OVERLONG-NEXT: store atomic i32 %value, ptr addrspace(1) %pea.matslot unordered, align 4
+; OVERLONG-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; OVERLONG-NEXT: call void @sink
 
 ; Complete field groups for distinct real allocations may commute before
@@ -440,6 +447,7 @@ unwind:
 ; INTRA-GROUP-NEXT: store atomic i32 %a1, ptr addrspace(1) %[[A_SLOT1]] unordered, align 4
 ; INTRA-GROUP-NEXT: %[[A_REF:[A-Za-z0-9._]+]] = getelementptr inbounds{{( nuw)?}} i8, ptr addrspace(1) %[[A]], i64 16
 ; INTRA-GROUP-NEXT: store atomic ptr addrspace(1) %[[B]], ptr addrspace(1) %[[A_REF]] unordered, align 8
+; INTRA-GROUP-NEXT: call hotspotcc void (i32, ...) @jeandle.membar_replay_publish(i32 2, ptr addrspace(1){{[^,%]*}} %[[B]], i32 1, ptr addrspace(1){{[^,%]*}} %[[A]], i32 1)
 ; INTRA-GROUP-NEXT: call void @sink(ptr addrspace(1) %[[A]])
 
 attributes #0 = { nounwind }
