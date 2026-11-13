@@ -97,13 +97,14 @@ void analyzeLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
 CallInst *findKeepOne(Loop &L, LoopInfo &LI, DominatorTree &DT,
                       const RequiredPolls &Required);
 
-// A safepoint poll that SafepointStripMining relocated onto the outer
-// back-edge of a strip-mined nest: a jeandle.safepoint_poll call carrying the
+// A safepoint poll that SafepointStripMining relocated to an outer iteration
+// boundary of a strip-mined nest: a jeandle.safepoint_poll call carrying the
 // jeandle.strip-mined-poll call-site attribute.
 bool isStripMinedPoll(const Instruction &I);
 
 // A loop is the poll-free, batch-bounded inner of a strip-mined nest iff its
-// parent loop's latch holds a strip-mined poll (isStripMinedPoll). The marker
+// parent loop's latch or its per-batch inner preheader holds a strip-mined
+// poll (isStripMinedPoll). The marker
 // travels with the relocated poll, so it cannot outlive the coverage it
 // certifies. Callers are the passes adjacent to SafepointStripMining in the
 // pipeline (after-strip-mining deletion and the coverage verifier), which
