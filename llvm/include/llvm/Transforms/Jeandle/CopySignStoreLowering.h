@@ -15,7 +15,7 @@
 
 namespace llvm {
 
-/// Lower scalar copySign store values on x86, allowing deopt-state uses.
+/// Lower scalar copySign stores and integer-register consumers on x86.
 class CopySignStoreLoweringPass
     : public PassInfoMixin<CopySignStoreLoweringPass> {
 public:

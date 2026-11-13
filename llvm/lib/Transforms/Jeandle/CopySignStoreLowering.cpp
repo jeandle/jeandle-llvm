@@ -25,7 +25,7 @@ using namespace llvm;
 
 namespace {
 
-bool isStoredCopySign(const IntrinsicInst &II) {
+bool shouldLowerCopySign(const IntrinsicInst &II) {
   if (II.getIntrinsicID() != Intrinsic::copysign || II.isMustTailCall() ||
       II.hasOperandBundles() || II.use_empty())
     return false;
@@ -34,10 +34,27 @@ bool isStoredCopySign(const IntrinsicInst &II) {
   if (!Ty->isFloatTy() && !Ty->isDoubleTy())
     return false;
 
+  auto *Magnitude = dyn_cast<BitCastInst>(II.getArgOperand(0));
+  auto *Sign = dyn_cast<BitCastInst>(II.getArgOperand(1));
+  // Integer arguments and arithmetic already occupy GPRs. Loads can feed
+  // either register bank; forcing a pair of loads through integer masks is
+  // more expensive than native copySign on machines with vector bit-select.
+  // InstCombine can fold the sign bitcast into its load before this pass.
+  bool IntegerSign = (Sign && Sign->getSrcTy()->isIntegerTy()) ||
+                     isa<LoadInst>(II.getArgOperand(1));
+  bool IntegerInputs = Magnitude && Magnitude->getSrcTy()->isIntegerTy() &&
+                       !isa<LoadInst>(Magnitude->getOperand(0)) && IntegerSign;
   bool HasStore = false;
+  bool HasIntegerUse = false;
   for (const Use &U : II.uses()) {
     if (isa<StoreInst>(U.getUser()) && U.getOperandNo() == 0) {
       HasStore = true;
+      continue;
+    }
+    if (auto *Cast = dyn_cast<BitCastInst>(U.getUser())) {
+      if (!IntegerInputs || !Cast->getType()->isIntegerTy())
+        return false;
+      HasIntegerUse = true;
       continue;
     }
     auto *CB = dyn_cast<CallBase>(U.getUser());
@@ -45,7 +62,7 @@ bool isStoredCopySign(const IntrinsicInst &II) {
         !CB->isOperandBundleOfType(LLVMContext::OB_deopt, U.getOperandNo()))
       return false;
   }
-  return HasStore;
+  return HasStore || HasIntegerUse;
 }
 
 } // namespace
@@ -60,7 +77,7 @@ PreservedAnalyses CopySignStoreLoweringPass::run(Function &F,
   bool Changed = false;
   for (Instruction &I : make_early_inc_range(instructions(F))) {
     auto *II = dyn_cast<IntrinsicInst>(&I);
-    if (!II || !isStoredCopySign(*II))
+    if (!II || !shouldLowerCopySign(*II))
       continue;
 
     Type *Ty = II->getType();

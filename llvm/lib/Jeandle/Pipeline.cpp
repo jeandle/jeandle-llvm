@@ -25,6 +25,7 @@
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
 #include "llvm/Transforms/Jeandle/JeandleNarrowOopMarker.h"
 #include "llvm/Transforms/Jeandle/LibmIdentityFolding.h"
+#include "llvm/Transforms/Jeandle/NumericIntrinsicFolding.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeIterative.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeTransform.h"
 #include "llvm/Transforms/Jeandle/ProfileDevirtualization.h"
@@ -195,6 +196,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // exponents the O3 SCCP/instcombine rounds reveal. The pass itself does
   // not look through selects/PHIs -- that division of labor is what keeps
   // the frontend free of constant-exponent checks. See LibmIdentityFolding.h.
+  PM.addPass(createModuleToFunctionPassAdaptor(NumericIntrinsicFoldingPass()));
   PM.addPass(createModuleToFunctionPassAdaptor(LibmIdentityFolding()));
   // Inline exposes bitshuffle compositions before loop optimization. Revisit
   // after O3 for masks and compositions revealed by scalar simplification.
@@ -382,10 +384,14 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // name. Once those passes finish, prune unused private kernels before
   // expanding their bodies; late GC operations remain rooted by llvm.used.
   PM.addPass(GlobalDCEPass());
+  // Keep round semantic until inlining and high-tier propagation have exposed
+  // exact integer inputs; unfold the remaining calls before general O3.
+  PM.addPass(createModuleToFunctionPassAdaptor(NumericIntrinsicFoldingPass()));
   PM.addPass(JavaOperationLower(1));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(Level)));
   // Second LibmIdentityFolding run: catch dpow exponents the O3 pipeline
   // revealed as constants (see the first run above).
+  PM.addPass(createModuleToFunctionPassAdaptor(NumericIntrinsicFoldingPass()));
   PM.addPass(createModuleToFunctionPassAdaptor(LibmIdentityFolding()));
   PM.addPass(createModuleToFunctionPassAdaptor(BitShuffleFoldingPass()));
   PM.addPass(ExpandNarrowOopCast());

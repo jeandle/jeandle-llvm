@@ -56,6 +56,14 @@ Value *foldBitShuffle(IntrinsicInst &II, AssumptionCache &AC,
   Value *Mask = II.getArgOperand(1);
   IRBuilder<> Builder(&II);
 
+  // These masks always select a contiguous low-bit prefix. Reuse the mask
+  // itself, including any Java-masked count and any independently observed use.
+  if (match(Mask, m_LShr(m_AllOnes(), m_Value())) ||
+      match(Mask, m_Sub(m_Shl(m_One(), m_Value()), m_One())) ||
+      match(Mask, m_Add(m_Shl(m_One(), m_Value()), m_AllOnes())) ||
+      match(Mask, m_Not(m_Shl(m_AllOnes(), m_Value()))))
+    return Builder.CreateAnd(Input, Mask);
+
   if (!IsPext && match(Input, m_AllOnes()))
     return Mask;
 
@@ -78,10 +86,15 @@ Value *foldBitShuffle(IntrinsicInst &II, AssumptionCache &AC,
   }
 
   if (auto *Inner = dyn_cast<IntrinsicInst>(Input)) {
-    // An independently observed inner result can constrain undef choices.
-    // Single use also avoids retaining the inner call alongside a new AND.
+    // A retained inner result constrains undef choices in both operands.
+    // PDEP(PEXT(X,M),M) still saves a call with multiple users when those
+    // operands are stable. The reverse identity creates another PEXT, so it
+    // needs the single-use restriction for profitability as well.
     if (isBitShuffle(*Inner) && Inner->getIntrinsicID() == InverseIID &&
-        Inner->hasOneUse() && Inner->getArgOperand(1) == Mask) {
+        Inner->getArgOperand(1) == Mask &&
+        (Inner->hasOneUse() ||
+         (!IsPext && isGuaranteedNotToBeUndef(Mask, &AC, &II, &DT) &&
+          isGuaranteedNotToBeUndef(Inner->getArgOperand(0), &AC, &II, &DT)))) {
       Value *Source = Inner->getArgOperand(0);
       if (!IsPext)
         return Builder.CreateAnd(Source, Mask);

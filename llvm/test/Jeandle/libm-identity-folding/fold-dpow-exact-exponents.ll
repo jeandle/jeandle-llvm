@@ -32,7 +32,7 @@ declare double @StubRoutines_dpow(double, double)
 ; alias naming it, while the call's callee operand is the aliasee constant.
 @SharedRuntime_dpow = alias double (double, double), ptr inttoptr (i64 4321 to ptr)
 
-define double @stub_square(double %x) {
+define double @stub_square(double noundef %x) {
 ; COMMON-LABEL: define double @stub_square(
 ; COMMON-NEXT: %[[MUL:.*]] = fmul double %x, %x
 ; COMMON-NEXT: ret double %[[MUL]]
@@ -40,21 +40,21 @@ define double @stub_square(double %x) {
   ret double %r
 }
 
-define double @stub_zero_exponent(double %x) {
+define double @stub_zero_exponent(double noundef %x) {
 ; COMMON-LABEL: define double @stub_zero_exponent(
 ; COMMON-NEXT: ret double 1.000000e+00
   %r = call double @StubRoutines_dpow(double %x, double 0.000000e+00)
   ret double %r
 }
 
-define double @stub_negative_zero_exponent(double %x) {
+define double @stub_negative_zero_exponent(double noundef %x) {
 ; COMMON-LABEL: define double @stub_negative_zero_exponent(
 ; COMMON-NEXT: ret double 1.000000e+00
   %r = call double @StubRoutines_dpow(double %x, double -0.000000e+00)
   ret double %r
 }
 
-define double @shared_square(double %x) {
+define double @shared_square(double noundef %x) {
 ; COMMON-LABEL: define double @shared_square(
 ; COMMON-NEXT: %[[MUL2:.*]] = fmul double %x, %x
 ; COMMON-NEXT: ret double %[[MUL2]]
@@ -80,7 +80,7 @@ define double @guarded_exponent_half(double noundef %x) {
   ret double %r
 }
 
-define double @no_fold_exponent_minus_one(double %x) {
+define double @no_fold_exponent_minus_one(double noundef %x) {
 ; No fold: the fdlibm port shortcuts to one/x, but the x86 stub has no
 ; y==-1 entry shortcut, so 1/x is not bit-exact against both runtime entries.
 ; COMMON-LABEL: define double @no_fold_exponent_minus_one(
@@ -90,7 +90,7 @@ define double @no_fold_exponent_minus_one(double %x) {
   ret double %r
 }
 
-define double @no_fold_exponent_minus_two(double %x) {
+define double @no_fold_exponent_minus_two(double noundef %x) {
 ; COMMON-LABEL: define double @no_fold_exponent_minus_two(
 ; COMMON: call double @StubRoutines_dpow(double %x, double -2.000000e+00)
 ; COMMON: ret double
@@ -98,7 +98,7 @@ define double @no_fold_exponent_minus_two(double %x) {
   ret double %r
 }
 
-define double @no_fold_symbolic_exponent(double %x, double %y) {
+define double @no_fold_symbolic_exponent(double noundef %x, double %y) {
 ; COMMON-LABEL: define double @no_fold_symbolic_exponent(
 ; COMMON: call double @StubRoutines_dpow(double %x, double %y)
 ; COMMON: ret double
@@ -106,7 +106,7 @@ define double @no_fold_symbolic_exponent(double %x, double %y) {
   ret double %r
 }
 
-define double @select_hidden_exponent(double %x, i1 %cond) {
+define double @select_hidden_exponent(double noundef %x, i1 %cond) {
 ; Without a prior simplification the exponent is a select, not a constant:
 ; the pass keeps the call.
 ; FOLD-LABEL: define double @select_hidden_exponent(

@@ -8,41 +8,19 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Specializes constant-exponent dpow calls for the two callee
-// forms the Jeandle frontend emits for Math.pow:
-//   - the external declaration @StubRoutines_dpow (platform stub path), or
-//   - the absolute-address constant aliased as @SharedRuntime_dpow, whose
-//     call operand is the aliasee constant itself.
-//
-// Exactness of the folded identities, input by input:
-//   y == 2.0:  x*x is the correctly rounded square. The fdlibm port
-//              returns x*x for y==2 before any range reduction, and the
-//              x86 stub multiplies at entry, so every input -- signed
-//              zeros (x*x gives +0.0 for both), infinities, and NaN
-//              payloads -- agrees bit for bit; a multiply quiets a
-//              signaling NaN exactly the way both entries do.
-//   y == +-0.0: the fdlibm port tests (iy|ly)==0 before its NaN check and
-//              returns 1.0, and IEEE 754 requires pow(x, +-0) == 1 for
-//              every x including NaN, so a constant 1.0 matches on every
-//              input.
-//
-// Guarded specializations:
-//   y == 1.0: non-NaN bases return unchanged. NaNs keep the original call,
-//              preserving runtime quieting and payload selection.
-//   y == 0.5: positive bases use sqrt. Non-positive and NaN bases keep the
-//              original call, preserving negative-zero and NaN behavior.
-//
-// Deliberately NOT folded:
-//   y == -1.0: the fdlibm port shortcuts to a single one/x division
-//              (sharedRuntimeTrans.cpp), but the x86 stub has no y==-1
-//              entry shortcut, so 1/x is not bit-exact against both runtime
-//              entries.
+// Specializes selected Jeandle libm calls without changing the runtime's
+// numerical contract. Unary identities use only exact zeros/ones. For pow,
+// exponent zero returns one and exponent two uses the runtime's entry multiply.
+// Exponent one retains NaN handling, and exponent one half uses sqrt only for
+// positive bases. Constant signed-zero bases return positive zero. A reciprocal
+// is exact for SharedRuntime_dpow, whose fdlibm entry shortcuts to division for
+// non-NaN bases, but not for the x86 stub.
 //
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/LibmIdentityFolding.h"
 
-#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
@@ -61,33 +39,69 @@ using namespace llvm;
 
 namespace {
 
-// The callee values a dpow call can reference: the stub declaration, the
-// SharedRuntime alias, and the alias's aliasee constant (calls emitted by
-// the frontend use the aliasee directly). Constants are uniqued, so
-// identical inttoptr expressions compare by pointer.
-void collectDpowCallees(Module &M, SmallPtrSetImpl<const Value *> &Callees) {
-  if (Function *Stub = M.getFunction("StubRoutines_dpow"))
-    Callees.insert(Stub);
-  if (GlobalAlias *Shared = M.getNamedAlias("SharedRuntime_dpow")) {
-    Callees.insert(Shared);
-    Callees.insert(Shared->getAliasee());
+enum class LibmKind { Pow, Sin, Cos, Tan, Log, Log10, Exp };
+struct LibmCallee {
+  LibmKind Kind;
+  bool IsShared;
+};
+
+using CalleeMap = DenseMap<const Value *, LibmCallee>;
+
+bool hasLibmType(FunctionType *FTy, LibmKind Kind) {
+  unsigned Arity = Kind == LibmKind::Pow ? 2 : 1;
+  return !FTy->isVarArg() && FTy->getReturnType()->isDoubleTy() &&
+         FTy->getNumParams() == Arity &&
+         llvm::all_of(FTy->params(), [](Type *Ty) { return Ty->isDoubleTy(); });
+}
+
+void collectLibmCallees(Module &M, CalleeMap &Callees) {
+  static constexpr struct {
+    StringLiteral Name;
+    LibmKind Kind;
+  } Entries[] = {{"dpow", LibmKind::Pow}, {"dsin", LibmKind::Sin},
+                 {"dcos", LibmKind::Cos}, {"dtan", LibmKind::Tan},
+                 {"dlog", LibmKind::Log}, {"dlog10", LibmKind::Log10},
+                 {"dexp", LibmKind::Exp}};
+  for (auto [Name, Kind] : Entries) {
+    if (Function *Stub = M.getFunction(("StubRoutines_" + Name).str()))
+      if (Stub->isDeclaration() && hasLibmType(Stub->getFunctionType(), Kind))
+        Callees.try_emplace(Stub, LibmCallee{Kind, false});
+    if (GlobalAlias *Shared =
+            M.getNamedAlias(("SharedRuntime_" + Name).str())) {
+      auto *Address = dyn_cast<ConstantExpr>(Shared->getAliasee());
+      auto *FTy = dyn_cast<FunctionType>(Shared->getValueType());
+      // RuntimeRoutine emits an opaque pointer alias; function-typed aliases
+      // are also usable in standalone IR. Validate the call's type separately.
+      if ((!Shared->getValueType()->isPointerTy() &&
+           (!FTy || !hasLibmType(FTy, Kind))) ||
+          !Address || Address->getOpcode() != Instruction::IntToPtr)
+        continue;
+      Callees.try_emplace(Shared, LibmCallee{Kind, true});
+      // Frontend calls use the absolute address rather than the alias.
+      Callees.try_emplace(Address, LibmCallee{Kind, true});
+    }
   }
 }
 
-bool isDpowCall(const CallBase &CB,
-                const SmallPtrSetImpl<const Value *> &Callees) {
-  // The frontend emits plain calls; an invoke carries exception edges whose
-  // removal would change the CFG, and a musttail call must stay a call.
-  if (!isa<CallInst>(CB) || CB.isMustTailCall())
-    return false;
-  if (!Callees.contains(CB.getCalledOperand()->stripPointerCasts()))
-    return false;
-  // Only the exact (double, double) -> double dpow shape, in case a symbol
-  // of the same name is reused with a different signature.
-  FunctionType *FTy = CB.getFunctionType();
-  return FTy->getReturnType()->isDoubleTy() && FTy->getNumParams() == 2 &&
-         FTy->getParamType(0)->isDoubleTy() &&
-         FTy->getParamType(1)->isDoubleTy();
+Constant *foldUnaryCall(const CallInst &Call, LibmKind Kind) {
+  auto *Arg = dyn_cast<ConstantFP>(Call.getArgOperand(0));
+  if (!Arg)
+    return nullptr;
+  switch (Kind) {
+  case LibmKind::Sin:
+  case LibmKind::Tan:
+    return Arg->isZero() ? Arg : nullptr;
+  case LibmKind::Cos:
+  case LibmKind::Exp:
+    return Arg->isZero() ? ConstantFP::get(Call.getType(), 1.0) : nullptr;
+  case LibmKind::Log:
+  case LibmKind::Log10:
+    return Arg->isExactlyValue(1.0) ? ConstantFP::get(Call.getType(), 0.0)
+                                    : nullptr;
+  case LibmKind::Pow:
+    llvm_unreachable("Expected unary libm entry");
+  }
+  llvm_unreachable("Unknown libm entry");
 }
 
 // Keep residual calls recognizable across CSE, inlining and loop cloning.
@@ -95,7 +109,9 @@ bool isDpowCall(const CallBase &CB,
 // instruction metadata can be discarded when the intervening O3 merges calls.
 constexpr StringLiteral PowSlowPath = "jeandle.pow.slow";
 
-void specializeGuardedCall(CallInst &Call, bool IsOne) {
+enum class PowSpecialization { One, Half, Reciprocal };
+
+void specializeGuardedCall(CallInst &Call, PowSpecialization Kind) {
   IRBuilder<> Builder(&Call);
   Value *Base = Call.getArgOperand(0);
   // A call argument may be undef or poison without causing immediate UB.
@@ -104,9 +120,10 @@ void specializeGuardedCall(CallInst &Call, bool IsOne) {
   if (!isGuaranteedNotToBeUndefOrPoison(Base))
     Base = Builder.CreateFreeze(Base, "pow.base");
   Value *Safe =
-      IsOne ? Builder.CreateFCmpORD(Base, Base, "pow.non_nan")
-            : Builder.CreateFCmpOGT(Base, ConstantFP::get(Base->getType(), 0.0),
-                                    "pow.positive");
+      Kind != PowSpecialization::Half
+          ? Builder.CreateFCmpORD(Base, Base, "pow.non_nan")
+          : Builder.CreateFCmpOGT(Base, ConstantFP::get(Base->getType(), 0.0),
+                                  "pow.positive");
   Instruction *FastTerm, *SlowTerm;
   SplitBlockAndInsertIfThenElse(Safe, &Call, &FastTerm, &SlowTerm);
   FastTerm->getParent()->setName("pow.fast");
@@ -120,7 +137,10 @@ void specializeGuardedCall(CallInst &Call, bool IsOne) {
   SlowCall->insertBefore(SlowTerm->getIterator());
 
   Value *FastResult = Base;
-  if (!IsOne)
+  if (Kind == PowSpecialization::Reciprocal)
+    FastResult = IRBuilder<>(FastTerm).CreateFDiv(
+        ConstantFP::get(Base->getType(), 1.0), Base, "pow.reciprocal");
+  else if (Kind == PowSpecialization::Half)
     FastResult = IRBuilder<>(FastTerm).CreateUnaryIntrinsic(
         Intrinsic::sqrt, Base, nullptr, "pow.sqrt");
 
@@ -136,58 +156,75 @@ void specializeGuardedCall(CallInst &Call, bool IsOne) {
 
 PreservedAnalyses LibmIdentityFolding::run(Function &F,
                                            FunctionAnalysisManager &FAM) {
-  // The dpow symbols carry Jeandle semantics; a same-named symbol in a
+  // The libm symbols carry Jeandle semantics; a same-named symbol in a
   // plain LLVM module must not be folded. Gate on the Jeandle module mark,
   // mirroring JavaOpLengthFolding.
   Module *M = F.getParent();
   if (!M || !M->getNamedMetadata(jeandle::Metadata::JavaMethodCompilation))
     return PreservedAnalyses::all();
 
-  SmallPtrSet<const Value *, 4> Callees;
-  collectDpowCallees(*M, Callees);
+  CalleeMap Callees;
+  collectLibmCallees(*M, Callees);
   if (Callees.empty())
     return PreservedAnalyses::all();
 
-  // Collect first, rewrite after the walk: folding erases the call, which
-  // would invalidate the instruction iterator.
-  SmallVector<CallBase *, 4> Folds;
-  for (Instruction &I : instructions(F)) {
-    auto *CB = dyn_cast<CallBase>(&I);
-    if (!CB || !isDpowCall(*CB, Callees))
-      continue;
-    auto *Exp = dyn_cast<ConstantFP>(CB->getArgOperand(1));
-    if (!Exp)
-      continue;
-    if (Exp->isExactlyValue(2.0) || Exp->isZero())
-      Folds.push_back(CB);
-    else if (!CB->hasFnAttr(PowSlowPath) && !CB->hasOperandBundles() &&
-             (Exp->isExactlyValue(1.0) || Exp->isExactlyValue(0.5)))
-      Folds.push_back(CB);
-  }
+  SmallVector<CallInst *, 4> Calls;
+  for (Instruction &I : instructions(F))
+    if (auto *Call = dyn_cast<CallInst>(&I))
+      if (!Call->isMustTailCall() && !Call->hasOperandBundles())
+        Calls.push_back(Call);
 
-  if (Folds.empty())
-    return PreservedAnalyses::all();
-
+  bool Changed = false;
   bool ChangedCFG = false;
-  for (CallBase *CB : Folds) {
-    const auto *Exp = cast<ConstantFP>(CB->getArgOperand(1));
-    if (Exp->isExactlyValue(1.0) || Exp->isExactlyValue(0.5)) {
-      specializeGuardedCall(*cast<CallInst>(CB), Exp->isExactlyValue(1.0));
-      ChangedCFG = true;
+  for (CallInst *Call : Calls) {
+    auto It = Callees.find(Call->getCalledOperand()->stripPointerCasts());
+    if (It == Callees.end() ||
+        !hasLibmType(Call->getFunctionType(), It->second.Kind))
       continue;
+    LibmCallee Callee = It->second;
+    Value *Replacement = nullptr;
+    if (Callee.Kind != LibmKind::Pow) {
+      Replacement = foldUnaryCall(*Call, Callee.Kind);
+    } else {
+      const auto *Exp = dyn_cast<ConstantFP>(Call->getArgOperand(1));
+      if (!Exp)
+        continue;
+      Value *Base = Call->getArgOperand(0);
+      if (Exp->isZero())
+        Replacement = ConstantFP::get(Base->getType(), 1.0);
+      else if (Exp->isExactlyValue(0.5) && isa<ConstantFP>(Base) &&
+               cast<ConstantFP>(Base)->isZero())
+        Replacement = ConstantFP::get(Base->getType(), 0.0);
+      else if (Exp->isExactlyValue(2.0)) {
+        IRBuilder<> Builder(Call);
+        // Multiplication observes the base twice, while the runtime call
+        // observes it once. Correlate a possibly undef argument first.
+        if (!isGuaranteedNotToBeUndef(Base))
+          Base = Builder.CreateFreeze(Base, "pow.base");
+        Replacement = Builder.CreateFMul(Base, Base, "pow.identity");
+      } else if (!Call->hasFnAttr(PowSlowPath)) {
+        std::optional<PowSpecialization> Kind;
+        if (Exp->isExactlyValue(1.0))
+          Kind = PowSpecialization::One;
+        else if (Exp->isExactlyValue(0.5))
+          Kind = PowSpecialization::Half;
+        else if (Callee.IsShared && Exp->isExactlyValue(-1.0))
+          Kind = PowSpecialization::Reciprocal;
+        if (Kind) {
+          specializeGuardedCall(*Call, *Kind);
+          Changed = ChangedCFG = true;
+        }
+      }
     }
-    Value *Base = CB->getArgOperand(0);
-    Value *Replacement =
-        Exp->isZero()
-            ? static_cast<Value *>(ConstantFP::get(Base->getType(), 1.0))
-            : IRBuilder<>(CB).CreateFMul(Base, Base, "pow.identity");
-    LLVM_DEBUG(dbgs() << "folded dpow identity in " << F.getName()
-                      << ": exponent " << Exp->getValueAPF() << " -> "
-                      << *Replacement << "\n");
-    CB->replaceAllUsesWith(Replacement);
-    CB->eraseFromParent();
+    if (Replacement) {
+      Call->replaceAllUsesWith(Replacement);
+      Call->eraseFromParent();
+      Changed = true;
+    }
   }
 
+  if (!Changed)
+    return PreservedAnalyses::all();
   // Only the unguarded identities leave the CFG unchanged.
   return ChangedCFG ? PreservedAnalyses::none()
                     : PreservedAnalyses::allInSet<CFGAnalyses>();

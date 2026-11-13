@@ -1,4 +1,4 @@
-//===- LibmIdentityFolding.h - Fold exact Math.pow runtime identities ----*- C++
+//===- LibmIdentityFolding.h - Fold exact libm runtime identities ----*- C++
 //-*-===//
 //
 // Copyright (c) 2026, The Jeandle-LLVM Authors. All Rights Reserved.
@@ -24,8 +24,10 @@
 // returns x*x for y==2 before any range reduction and tests (iy|ly)==0
 // before its NaN check, and the x86 libm stub multiplies at entry.
 // The guarded cases leave NaNs on their original runtime path, preserving
-// signaling-NaN quieting and payloads. Exponent -1 remains a runtime call
-// because reciprocal need not be bit-exact against the platform stub.
+// signaling-NaN quieting and payloads. Exponent -1 uses guarded division only
+// for SharedRuntime; reciprocal need not be bit-exact against the platform
+// stub. Exact unary zero/one identities are folded for the corresponding
+// selected sin/cos/tan/log/log10/exp entries.
 //
 // The runtime call is opaque to LLVM's libcall machinery, so without this
 // pass the identities are unreachable in the default configuration. The
