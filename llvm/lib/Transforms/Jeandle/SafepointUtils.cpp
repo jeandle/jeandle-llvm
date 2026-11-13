@@ -55,10 +55,10 @@ bool llvm::jeandle::isInclusiveLoopVersioningEnabled() {
 }
 
 bool llvm::jeandle::isSafepointPoll(const Instruction &I) {
-  const auto *CI = dyn_cast<CallInst>(&I);
-  if (!CI || CI->isIndirectCall())
+  const auto *CB = dyn_cast<CallBase>(&I);
+  if (!CB || !isa<CallInst, InvokeInst>(CB) || CB->isIndirectCall())
     return false;
-  const Function *Callee = CI->getCalledFunction();
+  const Function *Callee = CB->getCalledFunction();
   return Callee && Callee->getName() == "jeandle.safepoint_poll";
 }
 
@@ -166,7 +166,7 @@ std::optional<APInt> llvm::jeandle::getConstantAddStep(Value *V, PHINode *Phi) {
 bool llvm::jeandle::isStripMinedPoll(const Instruction &I) {
   if (!isSafepointPoll(I))
     return false;
-  return cast<CallInst>(&I)->hasFnAttr(jeandle::Attribute::StripMinedPoll);
+  return cast<CallBase>(&I)->hasFnAttr(jeandle::Attribute::StripMinedPoll);
 }
 
 bool llvm::jeandle::isMarkedStripMinedInner(Loop &L) {
@@ -250,7 +250,7 @@ llvm::jeandle::LoopSafepointFacts::get(Loop &L, LoopInfo &LI, DominatorTree &DT,
   return Facts;
 }
 
-bool jeandle::AncestorPollRequirements::isRequired(const CallInst &Poll,
+bool jeandle::AncestorPollRequirements::isRequired(const CallBase &Poll,
                                                    DominatorTree &DT) const {
   if (AnyLatchlessUncoveredAncestor)
     return true;
@@ -310,10 +310,10 @@ bool blockHasDeoptCall(BasicBlock *BB) {
   });
 }
 
-CallInst *firstPollInBlock(BasicBlock *BB) {
+CallBase *firstPollInBlock(BasicBlock *BB) {
   for (Instruction &I : *BB)
     if (jeandle::isSafepointPoll(I))
-      return cast<CallInst>(&I);
+      return cast<CallBase>(&I);
   return nullptr;
 }
 
@@ -334,7 +334,7 @@ void allpathsMarkRequired(Loop &L, LoopInfo &LI,
     BasicBlock *BB = Stack.pop_back_val();
     if (blockHasDeoptCall(BB))
       continue; // a call safepoint terminates this path
-    if (CallInst *P = firstPollInBlock(BB)) {
+    if (CallBase *P = firstPollInBlock(BB)) {
       // Any poll terminates the path; a sub-loop poll is one this loop depends
       // on and must keep.
       if (LI.getLoopFor(BB) != &L)
@@ -374,13 +374,13 @@ void llvm::jeandle::analyzeLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
         continue;
       for (Instruction &I : *BB)
         if (jeandle::isSafepointPoll(I))
-          Required.insert(cast<CallInst>(&I));
+          Required.insert(cast<CallBase>(&I));
     }
     return;
   }
   bool HasCall = false;
   bool HasLocal = false;
-  CallInst *NonlocalPoll = nullptr;
+  CallBase *NonlocalPoll = nullptr;
   // Walk the dominator chain from latch up through the header (an LLVM header,
   // unlike C2's head node, can itself hold a poll). C2's check_safepts walks
   // tail..head-exclusive; we include the header so a header poll counts as this
@@ -391,7 +391,7 @@ void llvm::jeandle::analyzeLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
       HasCall = true;
       break;
     }
-    if (CallInst *P = firstPollInBlock(BB)) {
+    if (CallBase *P = firstPollInBlock(BB)) {
       if (LI.getLoopFor(BB) == &L) {
         // A local poll — this loop's, the closest to the latch on the dom chain
         // — is the keep-one keeper. Unlike C2's check_safepts, which sets
@@ -431,7 +431,7 @@ void llvm::jeandle::analyzeLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
 // The latch-closest poll this loop owns on the dominator chain, preferring one
 // required by an ancestor (it must survive anyway); otherwise any dominating
 // poll. Returns null if the loop has no single-latch keeper.
-CallInst *llvm::jeandle::findKeepOne(Loop &L, LoopInfo &LI, DominatorTree &DT,
+CallBase *llvm::jeandle::findKeepOne(Loop &L, LoopInfo &LI, DominatorTree &DT,
                                      const RequiredPolls &Required) {
   BasicBlock *Latch = L.getLoopLatch();
   if (!Latch)
@@ -447,7 +447,7 @@ CallInst *llvm::jeandle::findKeepOne(Loop &L, LoopInfo &LI, DominatorTree &DT,
       for (Instruction &I : llvm::reverse(*BB)) {
         if (!jeandle::isSafepointPoll(I))
           continue;
-        auto *P = cast<CallInst>(&I);
+        auto *P = cast<CallBase>(&I);
         if (RequiredOnly && !Required.contains(P))
           continue;
         return P;

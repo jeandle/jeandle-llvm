@@ -37,6 +37,7 @@
 #include "llvm/Transforms/Jeandle/SafepointUtils.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 
 using namespace llvm;
@@ -311,29 +312,34 @@ std::optional<StripMineShape> checkStripMineShape(Loop *L, const IVInfo &IV,
 // Dominance proves coverage only; relocation's separate memory and deopt-state
 // gates below do the real work; the loop-tree poll-deletion pass owns polls
 // that are not on the back-edge path (early-return, conditional).
-SmallVector<CallInst *, 4> collectBackEdgePolls(Loop *L, LoopInfo &LI,
+SmallVector<CallBase *, 4> collectBackEdgePolls(Loop *L, LoopInfo &LI,
                                                 DominatorTree &DT) {
   BasicBlock *Latch = L->getLoopLatch();
-  SmallVector<CallInst *, 4> Out;
+  SmallVector<CallBase *, 4> Out;
   for (BasicBlock *BB : L->blocks()) {
     if (LI.getLoopFor(BB) != L)
       continue;
     if (!DT.dominates(BB, Latch))
       continue;
-    for (Instruction &I : *BB)
-      if (isSafepointPoll(I))
-        Out.push_back(cast<CallInst>(&I));
+    for (Instruction &I : *BB) {
+      if (!isSafepointPoll(I))
+        continue;
+      auto *Poll = dyn_cast<CallBase>(&I);
+      if (!Poll || !isa<CallInst, InvokeInst>(Poll))
+        return {};
+      Out.push_back(Poll);
+    }
   }
   return Out;
 }
 
-CallInst *findRelocationCandidate(Loop *L, LoopInfo &LI, DominatorTree &DT) {
+CallBase *findRelocationCandidate(Loop *L, LoopInfo &LI, DominatorTree &DT) {
   BasicBlock *Latch = L->getLoopLatch();
   for (BasicBlock *BB = Latch; BB && L->contains(BB);) {
     if (LI.getLoopFor(BB) == L)
       for (Instruction &I : llvm::reverse(*BB))
         if (isSafepointPoll(I))
-          return cast<CallInst>(&I);
+          return dyn_cast<CallBase>(&I);
 
     DomTreeNode *Node = DT.getNode(BB);
     DomTreeNode *IDom = Node ? Node->getIDom() : nullptr;
@@ -394,7 +400,7 @@ struct DeoptBoundaryValue {
 // The returned plans are consumed verbatim during relocation, keeping the
 // eligibility proof and materialization behavior in sync.
 std::optional<SmallVector<DeoptBoundaryValue, 8>>
-analyzeDeoptBoundaryValues(CallInst *P, Loop *L, BasicBlock *Header,
+analyzeDeoptBoundaryValues(CallBase *P, Loop *L, BasicBlock *Header,
                            BasicBlock *Latch) {
   SmallVector<DeoptBoundaryValue, 8> Plans;
   auto OB = P->getOperandBundle(LLVMContext::OB_deopt);
@@ -441,7 +447,7 @@ analyzeDeoptBoundaryValues(CallInst *P, Loop *L, BasicBlock *Header,
   return Plans;
 }
 
-bool memoryStateMatchesBackedge(CallInst *Poll, Loop *L, BasicBlock *Header,
+bool memoryStateMatchesBackedge(CallBase *Poll, Loop *L, BasicBlock *Header,
                                 BasicBlock *Latch, MemorySSA &MSSA) {
   MemoryAccess *PollAccess = MSSA.getMemoryAccess(Poll);
   if (!PollAccess)
@@ -469,7 +475,7 @@ bool isUnmodeledRelocationHazard(const Instruction &I, MemorySSA &MSSA) {
 // Walk backward from the latch and stop at the poll block. Since the poll block
 // dominates the latch, this visits exactly the current-iteration paths that can
 // still reach the backedge and ignores side-exit-only paths.
-bool hasNoUnmodeledRelocationHazardAfterPoll(CallInst *Poll, Loop *L,
+bool hasNoUnmodeledRelocationHazardAfterPoll(CallBase *Poll, Loop *L,
                                              BasicBlock *Latch,
                                              MemorySSA &MSSA) {
   BasicBlock *PollBB = Poll->getParent();
@@ -543,8 +549,10 @@ struct StripMinePlan {
   StripMineShape Shape;
   PHINode *IVPhi;
   ICmpInst *ExitCmp;
-  CallInst *PollToMove;
-  SmallVector<CallInst *, 4> AllPolls;
+  CallBase *PollToMove;
+  SmallVector<CallBase *, 4> AllPolls;
+  BasicBlock *PollNormalDest;
+  BasicBlock *PollUnwindDest;
   SmallVector<PHINode *, 4> LiftedHeaderPhis;
   SmallVector<HeaderPhiState, 4> HeaderPhis;
   SmallVector<PrimaryExitPhiState, 4> PrimaryExitPhis;
@@ -595,9 +603,45 @@ bool isSafeToVersionInclusiveLoop(Loop *L) {
   return true;
 }
 
+// Inlining a Java method through an invoke can turn its backedge poll into an
+// invoke as well. Relocate only the form whose existing outer latch remains
+// the real backedge block: a pre-tested outer has an unconditional latch that
+// the relocated invoke can replace. Post-tested outers require a separate
+// normal continuation and a different coverage-marker protocol; keep them
+// unchanged for now. Exception PHI repair and funclet transfer are similarly
+// outside this narrow form. LCSSA ensures that no unmodelled loop-local value
+// can otherwise leak directly into the unchanged external landingpad.
+bool canRelocateInvokePoll(CallBase *Poll, Loop *L, const StripMineShape &Shape,
+                           bool AllowRuntimeVersioning) {
+  auto *Invoke = dyn_cast<InvokeInst>(Poll);
+  if (!Invoke)
+    return isa<CallInst>(Poll);
+  if (AllowRuntimeVersioning || !Shape.FirstIterationGuaranteed ||
+      !Poll->getType()->isVoidTy() || !Poll->arg_empty() ||
+      Poll->isConvergent() || Poll->getMetadata(LLVMContext::MD_loop) ||
+      !L->contains(Invoke->getNormalDest()) ||
+      L->contains(Invoke->getUnwindDest()))
+    return false;
+  for (unsigned I = 0; I < Poll->getNumOperandBundles(); ++I)
+    if (Poll->getOperandBundleAt(I).getTagID() != LLVMContext::OB_deopt)
+      return false;
+  // The clone helper preserves attributes and the debug location, but not
+  // instruction metadata. Only the invoke's normal/unwind weights transfer;
+  // other attachments need their own relocation proof.
+  SmallVector<std::pair<unsigned, MDNode *>, 4> Metadata;
+  Poll->getAllMetadataOtherThanDebugLoc(Metadata);
+  for (const auto &MD : Metadata)
+    if (MD.first != LLVMContext::MD_prof)
+      return false;
+  BasicBlock *Unwind = Invoke->getUnwindDest();
+  auto Pad = Unwind->getFirstNonPHIIt();
+  return Unwind->phis().empty() && Pad != Unwind->end() &&
+         isa<LandingPadInst>(&*Pad);
+}
+
 std::optional<StripMinePlan>
 buildStripMinePlanWithIV(Loop *L, const IVInfo &IV, ICmpInst *ExitCmp,
-                         CallInst *PollToMove, ArrayRef<CallInst *> AllPolls,
+                         CallBase *PollToMove, ArrayRef<CallBase *> AllPolls,
                          MemorySSA &MSSA, DominatorTree &DT,
                          ScalarEvolution &SE, bool AllowRuntimeVersioning) {
   auto MaybeShape = checkStripMineShape(L, IV, ExitCmp, SE);
@@ -607,6 +651,12 @@ buildStripMinePlanWithIV(Loop *L, const IVInfo &IV, ICmpInst *ExitCmp,
     return std::nullopt;
   }
   StripMineShape Shape = *MaybeShape;
+
+  if (!canRelocateInvokePoll(PollToMove, L, Shape, AllowRuntimeVersioning)) {
+    LLVM_DEBUG(dbgs() << "  reject " << L->getHeader()->getName()
+                      << ": unsupported invoke poll relocation\n");
+    return std::nullopt;
+  }
 
   if (!memoryStateMatchesBackedge(PollToMove, L, Shape.Header, Shape.Latch,
                                   MSSA)) {
@@ -806,7 +856,13 @@ buildStripMinePlanWithIV(Loop *L, const IVInfo &IV, ICmpInst *ExitCmp,
                        IV.Phi,
                        ExitCmp,
                        PollToMove,
-                       SmallVector<CallInst *, 4>(AllPolls),
+                       SmallVector<CallBase *, 4>(AllPolls),
+                       isa<InvokeInst>(PollToMove)
+                           ? cast<InvokeInst>(PollToMove)->getNormalDest()
+                           : nullptr,
+                       isa<InvokeInst>(PollToMove)
+                           ? cast<InvokeInst>(PollToMove)->getUnwindDest()
+                           : nullptr,
                        std::move(LiftedHeaderPhis),
                        std::move(HeaderPhis),
                        std::move(PrimaryExitPhis),
@@ -855,7 +911,7 @@ buildStripMinePlan(Loop *L, LoopInfo &LI, DominatorTree &DT,
     return std::nullopt;
   }
 
-  SmallVector<CallInst *, 4> Polls = collectBackEdgePolls(L, LI, DT);
+  SmallVector<CallBase *, 4> Polls = collectBackEdgePolls(L, LI, DT);
   if (Polls.empty()) {
     LLVM_DEBUG(dbgs() << "  reject " << L->getHeader()->getName()
                       << ": no backedge poll\n");
@@ -863,7 +919,7 @@ buildStripMinePlan(Loop *L, LoopInfo &LI, DominatorTree &DT,
   }
   jeandle::AncestorPollRequirements AncestorRequirements =
       jeandle::computeAncestorPollRequirements(*L, LI, DT, SE);
-  for (CallInst *P : Polls)
+  for (CallBase *P : Polls)
     if (AncestorRequirements.isRequired(*P, DT)) {
       LLVM_DEBUG(dbgs() << "  reject " << L->getHeader()->getName()
                         << ": backedge poll required by an ancestor loop\n");
@@ -873,7 +929,7 @@ buildStripMinePlan(Loop *L, LoopInfo &LI, DominatorTree &DT,
   // Select the poll closest to the latch on the dominator chain, and the last
   // poll in that block. This is independent of Loop::blocks() traversal order
   // and matches the keep-one policy used by poll elimination.
-  CallInst *PollToMove = findRelocationCandidate(L, LI, DT);
+  CallBase *PollToMove = findRelocationCandidate(L, LI, DT);
   if (!PollToMove) {
     LLVM_DEBUG(dbgs() << "  reject " << L->getHeader()->getName()
                       << ": no relocation candidate poll\n");
@@ -919,6 +975,15 @@ bool StripMinePlan::stillStructurallyValid(LoopInfo &LI,
       LI.getLoopFor(PollToMove->getParent()) != L ||
       !DT.dominates(PollToMove->getParent(), Shape.Latch))
     return false;
+  if (auto *Invoke = dyn_cast<InvokeInst>(PollToMove)) {
+    if (Invoke->getNormalDest() != PollNormalDest ||
+        Invoke->getUnwindDest() != PollUnwindDest ||
+        !canRelocateInvokePoll(PollToMove, L, Shape,
+                               /*AllowRuntimeVersioning=*/false))
+      return false;
+  } else if (PollNormalDest || PollUnwindDest) {
+    return false;
+  }
   if (ExitCmp->getParent() != Shape.ExitingBB || !ExitCmp->hasOneUse() ||
       ExitCmp->getOperand(Shape.LimitOperandIdx) != Limit ||
       ExitCmp->getOperand(1 - Shape.LimitOperandIdx) != Shape.ResumeIV ||
@@ -926,7 +991,7 @@ bool StripMinePlan::stillStructurallyValid(LoopInfo &LI,
       Shape.ExitingBr->getCondition() != ExitCmp ||
       Shape.ExitingBr->getSuccessor(Shape.ExitSuccessorIdx) != Shape.ExitBB)
     return false;
-  for (CallInst *P : AllPolls)
+  for (CallBase *P : AllPolls)
     if (!jeandle::isSafepointPoll(*P) || !P->getParent() ||
         LI.getLoopFor(P->getParent()) != L)
       return false;
@@ -1249,7 +1314,7 @@ static void relocatePollToOuterLatch(StripMinePlan &Plan, Value *OuterIVNext,
                                      BranchInst *OuterBr) {
   Loop *L = Plan.L;
   const StripMineShape &Shape = Plan.Shape;
-  CallInst *PollToMove = Plan.PollToMove;
+  CallBase *PollToMove = Plan.PollToMove;
   ArrayRef<PHINode *> LiftedHeaderPhis = Plan.LiftedHeaderPhis;
 
   DenseMap<Value *, Value *> Remap;
@@ -1296,7 +1361,21 @@ static void relocatePollToOuterLatch(StripMinePlan &Plan, Value *OuterIVNext,
   }
   auto *RelocatedPoll =
       CallBase::Create(PollToMove, Bundles, OuterBr->getIterator());
-  RelocatedPoll->addFnAttr(Attribute::get(OuterBr->getContext(),
+  if (auto *Invoke = dyn_cast<InvokeInst>(RelocatedPoll)) {
+    // The legality plan rejected a post-tested outer and EH PHIs. Preserve
+    // the original unwind destination, but resume the new outer recurrence
+    // normally instead of jumping back into the middle of the inner loop.
+    assert(Shape.FirstIterationGuaranteed && OuterBr->isUnconditional() &&
+           "invoke poll needs an unconditional outer backedge");
+    assert(Invoke->getUnwindDest() == Plan.PollUnwindDest &&
+           Invoke->getUnwindDest()->phis().empty() &&
+           "invoke unwind contract changed after planning");
+    Invoke->setNormalDest(OuterBr->getSuccessor(0));
+    Invoke->setMetadata(LLVMContext::MD_prof,
+                        PollToMove->getMetadata(LLVMContext::MD_prof));
+    OuterBr->eraseFromParent();
+  }
+  RelocatedPoll->addFnAttr(Attribute::get(RelocatedPoll->getContext(),
                                           jeandle::Attribute::StripMinedPoll));
 }
 
@@ -1497,7 +1576,7 @@ void applyStripMinePlan(StripMinePlan &Plan, LoopInfo &LI, DominatorTree &DT,
                         ScalarEvolution &SE) {
   Loop *L = Plan.L;
   StripMineShape &Shape = Plan.Shape;
-  CallInst *PollToMove = Plan.PollToMove;
+  CallBase *PollToMove = Plan.PollToMove;
   const APInt &AbsStepN = Plan.AbsStepN;
   uint64_t N = Plan.ChunkIters;
   Value *InitVal = Plan.InitVal;
@@ -1536,6 +1615,12 @@ void applyStripMinePlan(StripMinePlan &Plan, LoopInfo &LI, DominatorTree &DT,
   // Drop the selected back-edge poll after cloning it to the outer backedge.
   // The subsequent poll-elimination stage removes any other inner-loop polls
   // only after validating the complete strip-mined structure.
+  // Removing an invoke also removes its old unwind edge and replaces its
+  // terminator with the original normal branch. Do not leave a dangling
+  // exceptional predecessor or synthesize a nounwind promise on the poll.
+  // DT is rebuilt below; stale MemorySSA is not queried after this mutation.
+  if (auto *Invoke = dyn_cast<InvokeInst>(PollToMove))
+    PollToMove = changeToCall(Invoke);
   PollToMove->eraseFromParent();
 
   // Maintain analyses by hand (no LPMUpdater): reparent the nest so it becomes
