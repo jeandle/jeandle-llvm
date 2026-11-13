@@ -1,0 +1,4 @@
+RequiresStrictLockOrder = 1
+ElementBasicTypeOfArrayKlass 12345 = 1
+HasFinalizer 23456 = 0
+CanVirtualize 23456 = 1

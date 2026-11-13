@@ -32,7 +32,10 @@ unwind:
 ; CHECK-LABEL: define void @fixed_vector_falls_back_before_deopt(
 ; CHECK: %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance
 ; CHECK: %pea.matslot = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 8
-; CHECK-NEXT: store atomic <4 x i32> %value, ptr addrspace(1) %pea.matslot unordered, align 16
+; CHECK-NEXT: store atomic i64 %{{[^ ]+}}, ptr addrspace(1) %pea.matslot unordered, align 8
+; CHECK-NEXT: %[[VHIGH:[^ ]+]] = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 16
+; CHECK-NEXT: store atomic i64 %{{[^ ]+}}, ptr addrspace(1) %[[VHIGH]] unordered, align 8
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @safepoint()
 ; CHECK-SAME: [ "deopt"(i32 1, i32 1, i64 12, ptr addrspace(1) %obj) ]
 
@@ -56,7 +59,10 @@ unwind:
 ; CHECK-LABEL: define void @i128_falls_back_before_deopt(
 ; CHECK: %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance
 ; CHECK: %pea.matslot = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 8
-; CHECK-NEXT: store atomic i128 %value, ptr addrspace(1) %pea.matslot unordered, align 16
+; CHECK-NEXT: store atomic i64 %{{[^ ]+}}, ptr addrspace(1) %pea.matslot unordered, align 8
+; CHECK-NEXT: %[[IHIGH:[^ ]+]] = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 16
+; CHECK-NEXT: store atomic i64 %{{[^ ]+}}, ptr addrspace(1) %[[IHIGH]] unordered, align 8
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @safepoint()
 ; CHECK-SAME: [ "deopt"(i32 2, i32 2, i64 12, ptr addrspace(1) %obj) ]
 
@@ -81,6 +87,7 @@ unwind:
 ; CHECK: %obj = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance
 ; CHECK: %pea.matslot = getelementptr inbounds i8, ptr addrspace(1) %obj, i64 8
 ; CHECK-NEXT: store atomic half %value, ptr addrspace(1) %pea.matslot unordered, align 2
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: call void @safepoint()
 ; CHECK-SAME: [ "deopt"(i32 3, i32 3, i64 12, ptr addrspace(1) %obj) ]
 

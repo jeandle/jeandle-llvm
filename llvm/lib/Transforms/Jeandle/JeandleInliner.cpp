@@ -58,6 +58,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AssumptionCache.h"
+#include "llvm/Analysis/BlockFrequencyInfo.h"
 #include "llvm/Analysis/InlineCost.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/Analysis/ProfileSummaryInfo.h"
@@ -519,7 +520,11 @@ InlineRoundResult JeandleInliner::runInlineRound(
     logInlineEvent("inlined", ScopeCaller, BCI, Callee, InlineScopeID, ThreadID,
                    InlineScopes);
 
-    FAM.invalidate(*Caller, PreservedAnalyses::none());
+    // InlineFunction updates frequencies for cloned and split blocks. Reuse
+    // those frequencies across inlines; other CFG analyses are stale.
+    PreservedAnalyses InlinePA;
+    InlinePA.preserve<BlockFrequencyAnalysis>();
+    FAM.invalidate(*Caller, InlinePA);
 
     // Record this inlining in the inline scope chain. Each entry stores
     // (the callee that was inlined, the parent scope ID). The chain identifies

@@ -721,7 +721,8 @@ void PEAResult::computeEscapePointLocks() {
 static void destroyUnparentedOwnedInstructions(
     ArrayRef<WeakTrackingVH> Phis, ArrayRef<WeakTrackingVH> Insts,
     ArrayRef<WeakTrackingVH> LoopFieldPhis = {},
-    ArrayRef<WeakTrackingVH> SyntheticReplayPhis = {}) {
+    ArrayRef<WeakTrackingVH> SyntheticReplayPhis = {},
+    ArrayRef<WeakTrackingVH> CopyLoads = {}) {
   SmallPtrSet<Instruction *, 16> Seen;
   SmallVector<Instruction *, 16> ToDelete;
   auto Collect = [&](ArrayRef<WeakTrackingVH> Values) {
@@ -733,6 +734,7 @@ static void destroyUnparentedOwnedInstructions(
 
   Collect(LoopFieldPhis);
   Collect(SyntheticReplayPhis);
+  Collect(CopyLoads);
   Collect(Phis);
   Collect(Insts);
 
@@ -750,7 +752,44 @@ PEAResult::~PEAResult() {
   // that block's ilist owns it. WeakTrackingVH also auto-nulls when an
   // unrelated cleanup path has already deleted the value.
   destroyUnparentedOwnedInstructions(OwnedPhis, OwnedInsts, OwnedLoopFieldPhis,
-                                     OwnedSyntheticReplayPhis);
+                                     OwnedSyntheticReplayPhis, OwnedCopyLoads);
+}
+
+void PEAResult::suspendOwnedUses() {
+  SmallPtrSet<Instruction *, 16> Seen;
+  auto Suspend = [&](ArrayRef<WeakTrackingVH> Owned) {
+    for (const auto &VH : Owned) {
+      auto *I = dyn_cast_or_null<Instruction>((Value *)VH);
+      if (!I || I->getParent() || !Seen.insert(I).second)
+        continue;
+      for (unsigned Index = 0; Index < I->getNumOperands(); ++Index) {
+        auto *Operand = dyn_cast_or_null<Instruction>(I->getOperand(Index));
+        if (!Operand || !Operand->getParent())
+          continue;
+        SuspendedOperands.push_back({I, Index, Operand});
+        I->setOperand(Index, PoisonValue::get(Operand->getType()));
+      }
+    }
+  };
+  Suspend(OwnedPhis);
+  Suspend(OwnedInsts);
+  Suspend(OwnedLoopFieldPhis);
+  Suspend(OwnedSyntheticReplayPhis);
+  Suspend(OwnedCopyLoads);
+}
+
+void PEAResult::resumeOwnedUses() {
+  for (const auto &Saved : SuspendedOperands) {
+    auto *I = dyn_cast_or_null<Instruction>((Value *)Saved.User);
+    Value *Operand = Saved.Operand;
+    // A nulled handle means the owning IR was destroyed while this result
+    // stayed cached; restoring would corrupt the use lists. Fail loudly
+    // instead of dereferencing null in a release build.
+    if (!I || !Operand)
+      report_fatal_error("cached PEA plan outlived its input IR");
+    I->setOperand(Saved.Index, Operand);
+  }
+  SuspendedOperands.clear();
 }
 
 void PEAResult::truncateOwnedTo(size_t PhisMark, size_t InstsMark) {
@@ -777,7 +816,7 @@ ObjectID PEAResult::createVirtualObject(std::unique_ptr<VirtualObject> VO) {
 
 void PEAResult::addBlockEffect(std::unique_ptr<Effect> E) {
   assert(E && E->hasValidMutationOwner() &&
-         "only deopt-pool or placement effects may be ownerless");
+         "invalid PEA effect mutation owner");
   assert(E->Block);
   BasicBlock *BB = E->Block;
   BlockEffects[BB].add(std::move(E));
@@ -819,6 +858,16 @@ bool PEAResult::hasLegalMaterializationAtomicTypes(const DataLayout &DL) const {
   return true;
 }
 
+bool RewriteMemoryBarrierEffect::removesOwnerUse(const Use &U,
+                                                 ObjectID ID) const {
+  auto *CB = dyn_cast_or_null<CallBase>(getTarget());
+  if (!CB || U.getUser() != CB || !CB->isArgOperand(&U))
+    return false;
+  unsigned Arg = CB->getArgOperandNo(&U);
+  return Arg % 2 == 1 && Arg / 2 < Owners.size() &&
+         Owners[Arg / 2].VirtualOwner == ID;
+}
+
 void Effect::dump(raw_ostream &OS) const {
   OS << "PEA: ";
   switch (getKind()) {
@@ -827,6 +876,9 @@ void Effect::dump(raw_ostream &OS) const {
     break;
   case Kind::ReplaceCall:
     OS << "ReplaceCall";
+    break;
+  case Kind::RewriteMemoryBarrier:
+    OS << "RewriteMemoryBarrier";
     break;
   case Kind::EliminateStore:
     OS << "EliminateStore";

@@ -1,8 +1,7 @@
 ; RUN: opt -S -verify-each -passes='copy-specialization' %s | FileCheck %s --check-prefix=JAVAOP
 ; RUN: opt -S -verify-each -passes='function(copy-specialization),java-operation-lower<phase=1>' %s | FileCheck %s --check-prefix=LOWERED
 
-; A full template keeps the clone's publication ordering as a phase-1 JavaOp.
-; clone-expansion.ll separately covers the standalone release-fence fallback.
+; Copy publication remains receiver-owned until phase 1.
 @WordSize = constant i64 8
 @heapOopSize = constant i32 4
 @personality = global ptr null
@@ -31,7 +30,7 @@ exception:
 ; JAVAOP-NOT: @jeandle.membar_storestore
 ; JAVAOP-NOT: fence
 ; JAVAOP: arraycopy.result:
-; JAVAOP-NEXT: call hotspotcc void @jeandle.membar_storestore()
+; JAVAOP-NEXT: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dest)
 ; JAVAOP-NEXT: br label %normal
 ; JAVAOP-NOT: fence
 

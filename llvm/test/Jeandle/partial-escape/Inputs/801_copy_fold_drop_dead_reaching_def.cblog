@@ -1,0 +1,11 @@
+RequiresStrictLockOrder = 1
+ElementBasicTypeOfArrayKlass 12345 = 4
+IsInterface 12345 = false
+GetSecondarySupers 12345 = []
+IsValueBased 12345 = true
+HasFinalizer 30001 = false
+CanVirtualize 30001 = true
+HasFinalizer 30002 = false
+CanVirtualize 30002 = true
+IsValueBased 30001 = true
+GetCloneInstanceInfo 30001 true 0 = (4, 3, [(16, 4), (20, 4), (24, 8)])
