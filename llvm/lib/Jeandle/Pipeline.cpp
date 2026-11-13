@@ -13,7 +13,9 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Jeandle/BitShuffleFolding.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
+#include "llvm/Transforms/Jeandle/CopySignStoreLowering.h"
 #include "llvm/Transforms/Jeandle/CopySpecialization.h"
 #include "llvm/Transforms/Jeandle/ExpandNarrowOopCast.h"
 #include "llvm/Transforms/Jeandle/InsertGCBarriers.h"
@@ -22,6 +24,8 @@
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
 #include "llvm/Transforms/Jeandle/JeandleNarrowOopMarker.h"
+#include "llvm/Transforms/Jeandle/LibmIdentityFolding.h"
+#include "llvm/Transforms/Jeandle/NumericIntrinsicFolding.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeIterative.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeTransform.h"
 #include "llvm/Transforms/Jeandle/PrePEAAllocationUnrollHints.h"
@@ -72,11 +76,12 @@ static cl::opt<InlinePolicy> JeandleInlinePolicy(
                           "Inline accessor methods only"),
                clEnumValN(InlinePolicy::Off, "off", "Disable inlining")));
 
-Pipeline::Pipeline(OptimizationLevel Level, LLVMContext &Ctx, PipelineMode Mode)
+Pipeline::Pipeline(OptimizationLevel Level, LLVMContext &Ctx, TargetMachine *TM,
+                   PipelineMode Mode)
     : SI(Ctx, /*DebugLogging=*/false) {
   SI.registerCallbacks(PIC, &MAM);
 
-  PassBuilder PB(nullptr, PipelineTuningOptions(), std::nullopt, &PIC);
+  PassBuilder PB(TM, PipelineTuningOptions(), std::nullopt, &PIC);
 
   // Register all the basic analyses with the managers.
   PB.registerModuleAnalyses(MAM);
@@ -181,6 +186,22 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PostInlinePollCleanup.addPass(SimplifyCFGPass());
   PM.addPass(
       createModuleToFunctionPassAdaptor(std::move(PostInlinePollCleanup)));
+  // Specialize constant-exponent runtime dpow calls here and again after O3.
+  // Exact identities and guarded fast paths for one/half feed the high-tier
+  // pipeline: literal exponents and exponents revealed by the inline driver
+  // are visible at this point, so the specialized values feed the
+  // high-tier loop cluster and everything below; the second run catches
+  // exponents the O3 SCCP/instcombine rounds reveal. The pass itself does
+  // not look through selects/PHIs -- that division of labor is what keeps
+  // the frontend free of constant-exponent checks. See LibmIdentityFolding.h.
+  PM.addPass(createModuleToFunctionPassAdaptor(NumericIntrinsicFoldingPass()));
+  PM.addPass(createModuleToFunctionPassAdaptor(LibmIdentityFolding()));
+  // Inline exposes bitshuffle compositions before loop optimization. Revisit
+  // after O3 for masks and compositions revealed by scalar simplification.
+  PM.addPass(createModuleToFunctionPassAdaptor(BitShuffleFoldingPass()));
+  // Primitive stores are already native here. Lower before loop transforms
+  // insert LCSSA PHIs between copySign results and their deopt-state uses.
+  PM.addPass(createModuleToFunctionPassAdaptor(CopySignStoreLoweringPass()));
   PM.addPass(
       createModuleToFunctionPassAdaptor(StringIntrinsicSpecialization()));
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
@@ -370,8 +391,16 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // name. Once those passes finish, prune unused private kernels before
   // expanding their bodies; late GC operations remain rooted by llvm.used.
   PM.addPass(GlobalDCEPass());
+  // Keep round semantic until inlining and high-tier propagation have exposed
+  // exact integer inputs; unfold the remaining calls before general O3.
+  PM.addPass(createModuleToFunctionPassAdaptor(NumericIntrinsicFoldingPass()));
   PM.addPass(JavaOperationLower(1));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(Level)));
+  // Second LibmIdentityFolding run: catch dpow exponents the O3 pipeline
+  // revealed as constants (see the first run above).
+  PM.addPass(createModuleToFunctionPassAdaptor(NumericIntrinsicFoldingPass()));
+  PM.addPass(createModuleToFunctionPassAdaptor(LibmIdentityFolding()));
+  PM.addPass(createModuleToFunctionPassAdaptor(BitShuffleFoldingPass()));
   PM.addPass(ExpandNarrowOopCast());
   PM.addPass(RewriteStatepointsForGC());
   PM.addPass(createModuleToFunctionPassAdaptor(JeandleNarrowOopMarker()));

@@ -1,4 +1,6 @@
 add_llvm_component_library(LLVMJeandleTransforms
+  BitShuffleFolding.cpp
+  CopySignStoreLowering.cpp
   CopySpecialization.cpp
   StringIntrinsicSpecialization.cpp
   CHADevirtualization.cpp
@@ -8,6 +10,8 @@ add_llvm_component_library(LLVMJeandleTransforms
   JavaOperationDeletion.cpp
   JavaOperationLower.cpp
   JavaOpLengthFolding.cpp
+  LibmIdentityFolding.cpp
+  NumericIntrinsicFolding.cpp
   PartialEscapeIterative.cpp
   PartialEscapeTransform.cpp
   PrePEAAllocationUnrollHints.cpp

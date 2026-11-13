@@ -17,7 +17,9 @@
 
 namespace llvm::jeandle {
 
-void optimize(Module &M, OptimizationLevel Level = OptimizationLevel::O3,
+// Use the code generation target machine, which must outlive optimization.
+void optimize(Module &M, TargetMachine *TM,
+              OptimizationLevel Level = OptimizationLevel::O3,
               PipelineMode Mode = PipelineMode::MethodCompilation);
 
 } // end namespace llvm::jeandle

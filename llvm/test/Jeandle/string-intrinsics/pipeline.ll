@@ -8,17 +8,17 @@
 ; ON: repeated-constant-field-folding
 ; ON: copy-specialization
 ; ON: insert-gc-barriers
-; ON: globaldce,java-operation-lower<phase=1>
+; ON: globaldce,function(numeric-intrinsic-folding),java-operation-lower<phase=1>
 ; OFF: function(string-intrinsic-specialization),function(repeated-constant-field-folding)
 ; OFF-NOT: partial-escape-iterative
 ; OFF: function(string-intrinsic-specialization)
 ; OFF: repeated-constant-field-folding
 ; OFF: copy-specialization
 ; OFF: insert-gc-barriers
-; OFF: globaldce,java-operation-lower<phase=1>
+; OFF: globaldce,function(numeric-intrinsic-folding),java-operation-lower<phase=1>
 ; LIFETIME-NOT: globaldce
 ; LIFETIME: copy-specialization
 ; LIFETIME-NOT: globaldce
 ; LIFETIME: insert-gc-barriers
-; LIFETIME: globaldce,java-operation-lower<phase=1>
+; LIFETIME: globaldce,function(numeric-intrinsic-folding),java-operation-lower<phase=1>
 define void @pipeline() { ret void }
