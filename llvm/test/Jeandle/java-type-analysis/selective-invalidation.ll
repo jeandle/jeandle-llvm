@@ -17,7 +17,7 @@
 ; SELECTIVE: base entries retained: 20
 ;
 ; FULL: queries: 3
-; FULL: base insertions: 12
+; FULL: base insertions: 8
 ; FULL: clears: 5
 ; FULL: selective invalidations: 0
 ; FULL: base entries retained: 0
