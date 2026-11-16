@@ -75,13 +75,20 @@ enum class CloneInstanceInfoStatus : int {
 /// to interpreted execution by construction. Keep the values stable: they
 /// are recorded in callback logs.
 enum class LibmEntry : int {
-  SinStub = 0,    SinShared = 1,
-  CosStub = 2,    CosShared = 3,
-  TanStub = 4,    TanShared = 5,
-  LogStub = 6,    LogShared = 7,
-  Log10Stub = 8,  Log10Shared = 9,
-  ExpStub = 10,   ExpShared = 11,
-  PowStub = 12,   PowShared = 13,
+  SinStub = 0,
+  SinShared = 1,
+  CosStub = 2,
+  CosShared = 3,
+  TanStub = 4,
+  TanShared = 5,
+  LogStub = 6,
+  LogShared = 7,
+  Log10Stub = 8,
+  Log10Shared = 9,
+  ExpStub = 10,
+  ExpShared = 11,
+  PowStub = 12,
+  PowShared = 13,
 };
 
 /// Field-state folding uses semantic field loads and ordinary replay stores;

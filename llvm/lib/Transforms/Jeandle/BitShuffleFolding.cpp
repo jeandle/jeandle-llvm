@@ -208,14 +208,12 @@ PreservedAnalyses BitShuffleFoldingPass::run(Function &F,
   }
   for (auto [Cnt, Pext] : Popcounts) {
     IRBuilder<> Builder(Cnt);
-    Cnt->setArgOperand(
-        0, Builder.CreateAnd(Pext->getArgOperand(0), Pext->getArgOperand(1),
-                             "compress.masked"));
-    RecursivelyDeleteTriviallyDeadInstructions(Pext, nullptr, nullptr,
-                                               [&](Value *Dead) {
-                                                 Worklist.remove(
-                                                     cast<Instruction>(Dead));
-                                               });
+    Cnt->setArgOperand(0, Builder.CreateAnd(Pext->getArgOperand(0),
+                                            Pext->getArgOperand(1),
+                                            "compress.masked"));
+    RecursivelyDeleteTriviallyDeadInstructions(
+        Pext, nullptr, nullptr,
+        [&](Value *Dead) { Worklist.remove(cast<Instruction>(Dead)); });
     Changed = true;
   }
 

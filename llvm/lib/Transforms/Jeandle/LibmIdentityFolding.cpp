@@ -90,13 +90,27 @@ void collectLibmCallees(Module &M, CalleeMap &Callees) {
 int libmEntrySelector(LibmCallee Callee) {
   int KindIndex;
   switch (Callee.Kind) {
-  case LibmKind::Sin:   KindIndex = 0; break;
-  case LibmKind::Cos:   KindIndex = 1; break;
-  case LibmKind::Tan:   KindIndex = 2; break;
-  case LibmKind::Log:   KindIndex = 3; break;
-  case LibmKind::Log10: KindIndex = 4; break;
-  case LibmKind::Exp:   KindIndex = 5; break;
-  case LibmKind::Pow:   KindIndex = 6; break;
+  case LibmKind::Sin:
+    KindIndex = 0;
+    break;
+  case LibmKind::Cos:
+    KindIndex = 1;
+    break;
+  case LibmKind::Tan:
+    KindIndex = 2;
+    break;
+  case LibmKind::Log:
+    KindIndex = 3;
+    break;
+  case LibmKind::Log10:
+    KindIndex = 4;
+    break;
+  case LibmKind::Exp:
+    KindIndex = 5;
+    break;
+  case LibmKind::Pow:
+    KindIndex = 6;
+    break;
   }
   return KindIndex * 2 + (Callee.IsShared ? 1 : 0);
 }
