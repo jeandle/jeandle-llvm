@@ -29,7 +29,8 @@
 ; CHECK: %query = call i32 @jeandle.class_is_primitive
 ;
 ; CHECK-LABEL: define i32 @cyclic_mirrors(
-; CHECK: %query = call i32 @jeandle.class_is_primitive
+; CHECK-NOT: call i32 @jeandle.class_is_primitive
+; CHECK: ret i32 0
 
 ; CHECK-LABEL: define i1 @equality_shared_left(
 ; CHECK-NOT: icmp eq

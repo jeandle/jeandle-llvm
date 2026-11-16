@@ -13,6 +13,8 @@
 declare hotspotcc ptr @jeandle.load_mirror_klass(ptr addrspace(1))
 declare hotspotcc i1 @jeandle.check_instanceof(ptr, ptr addrspace(1))
 declare hotspotcc i1 @jeandle.checkcast_nonnull_with_offset(ptr, ptr addrspace(1), i32)
+declare hotspotcc i1 @jeandle.check_klass_subtype(ptr, ptr)
+declare hotspotcc i1 @jeandle.check_klass_subtype_with_offset(ptr, ptr, i32)
 
 ; MISSING-LABEL: define i1 @constant_chain(
 ; MISSING: call hotspotcc i1 @jeandle.check_instanceof(ptr inttoptr (i64 234567 to ptr), ptr addrspace(1) %obj)
@@ -55,4 +57,27 @@ define i1 @secondary_offset(ptr addrspace(1) %obj) #0 gc "hotspotgc" {
   ret i1 %r
 }
 attributes #0 = { "java-method"="1" }
+
+; MISSING-LABEL: define i1 @klass_primary(
+; MISSING: call hotspotcc i1 @jeandle.check_klass_subtype(ptr %sub, ptr inttoptr (i64 234567 to ptr))
+; CHECK-LABEL: define i1 @klass_primary(
+; CHECK: call hotspotcc i1 @jeandle.check_klass_subtype_with_offset(ptr %sub, ptr inttoptr (i64 234567 to ptr), i32 56)
+define i1 @klass_primary(ptr %sub) {
+  %r = call hotspotcc i1 @jeandle.check_klass_subtype(ptr %sub, ptr inttoptr (i64 234567 to ptr))
+  ret i1 %r
+}
+
+; CHECK-LABEL: define i1 @klass_secondary(
+; CHECK: call hotspotcc i1 @jeandle.check_klass_subtype(ptr %sub, ptr inttoptr (i64 234569 to ptr))
+define i1 @klass_secondary(ptr %sub) {
+  %r = call hotspotcc i1 @jeandle.check_klass_subtype(ptr %sub, ptr inttoptr (i64 234569 to ptr))
+  ret i1 %r
+}
+
+; CHECK-LABEL: define i1 @klass_null(
+; CHECK: call hotspotcc i1 @jeandle.check_klass_subtype(ptr %sub, ptr null)
+define i1 @klass_null(ptr %sub) {
+  %r = call hotspotcc i1 @jeandle.check_klass_subtype(ptr %sub, ptr null)
+  ret i1 %r
+}
 !java-method-compilation = !{}

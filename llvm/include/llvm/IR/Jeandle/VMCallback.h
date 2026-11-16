@@ -263,6 +263,9 @@ enum class JeandleInlineReason : int {
   def(GetSuperKlass, uintptr_t, Uintptr,                                         \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetClassSuperclass, uintptr_t, Uintptr,                                    \
+      (int a1), (a1),                                                            \
+      (VMCallbackValueType::Int), 1)                                             \
   def(GetCallerClass, int, Int,                                                 \
       (int a1), (a1),                                                            \
       (VMCallbackValueType::Int), 1)                                             \
@@ -474,6 +477,10 @@ enum class JeandleInlineReason : int {
 ///   GetKlassAccessFlags — Returns the requested immutable access flag bits,
 ///                         or -1 if the Klass or mask is unavailable. The mask
 ///                         must be a subset of ClassQueryAccessFlagsMask.
+///   GetClassSuperclass  — For a constant Class mirror, returns its Java
+///                         superclass as a recorded Klass, 0 for null, or
+///                         MirrorKlassUnavailable. Arrays return Object;
+///                         primitive and interface mirrors return null.
 ///   GetSuperKlass       — Returns the recorded superclass Klass, 0 for a root
 ///                         Klass, or MirrorKlassUnavailable if unavailable.
 ///   GetCallerClass      — Returns the caller mirror oop id for a committed

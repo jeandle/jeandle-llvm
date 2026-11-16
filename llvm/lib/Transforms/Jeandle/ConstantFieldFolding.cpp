@@ -92,20 +92,20 @@ using llvm::jeandle::T_SHORT;
 //
 // meet: Top ⊓ x = x ; Bottom ⊓ x = Bottom ; C{a} ⊓ C{a} = C{a} ;
 //       C{a} ⊓ C{b} = Bottom (when a != b).
-struct ConstOopLattice {
+template <typename T> struct ConstantLattice {
   enum class Kind : uint8_t { Top, Constant, Bottom };
   Kind K = Kind::Top;
-  int Id = 0;
+  T Id = 0;
 
-  static ConstOopLattice top() { return {Kind::Top, 0}; }
-  static ConstOopLattice bottom() { return {Kind::Bottom, 0}; }
-  static ConstOopLattice constant(int Id) { return {Kind::Constant, Id}; }
+  static ConstantLattice top() { return {Kind::Top, 0}; }
+  static ConstantLattice bottom() { return {Kind::Bottom, 0}; }
+  static ConstantLattice constant(T Id) { return {Kind::Constant, Id}; }
 
   bool isTop() const { return K == Kind::Top; }
   bool isConstant() const { return K == Kind::Constant; }
   bool isBottom() const { return K == Kind::Bottom; }
 
-  ConstOopLattice meet(ConstOopLattice O) const {
+  ConstantLattice meet(ConstantLattice O) const {
     if (K == Kind::Top)
       return O;
     if (O.K == Kind::Top)
@@ -115,11 +115,14 @@ struct ConstOopLattice {
     return Id == O.Id ? *this : bottom();
   }
 
-  bool operator==(ConstOopLattice O) const {
+  bool operator==(ConstantLattice O) const {
     return K == O.K && (K != Kind::Constant || Id == O.Id);
   }
-  bool operator!=(ConstOopLattice O) const { return !(*this == O); }
+  bool operator!=(ConstantLattice O) const { return !(*this == O); }
 };
+
+using ConstOopLattice = ConstantLattice<int>;
+using ClassQueryLattice = ConstantLattice<uintptr_t>;
 
 struct FieldLoadMatch {
   LoadInst *Load;
@@ -151,21 +154,23 @@ bool isForwarder(Instruction &I) {
 // Look up V's lattice value. Any oop-typed value not in `States` is
 // implicitly Bottom — it is some opaque producer we cannot trace. Non-oop
 // values are also Bottom (they cannot originate a ConstOop).
-ConstOopLattice getLattice(Value *V,
-                           const DenseMap<Value *, ConstOopLattice> &States) {
+template <typename T>
+ConstantLattice<T>
+getLattice(Value *V, const DenseMap<Value *, ConstantLattice<T>> &States) {
   auto It = States.find(V);
   if (It != States.end())
     return It->second;
-  return ConstOopLattice::bottom();
+  return ConstantLattice<T>::bottom();
 }
 
 // Compute the lattice value for a forwarder instruction by taking the meet
 // of its operand lattice values.
-ConstOopLattice
+template <typename T>
+ConstantLattice<T>
 transferForwarder(Instruction &I,
-                  const DenseMap<Value *, ConstOopLattice> &States) {
+                  const DenseMap<Value *, ConstantLattice<T>> &States) {
   if (auto *PN = dyn_cast<PHINode>(&I)) {
-    ConstOopLattice Result = ConstOopLattice::top();
+    ConstantLattice<T> Result = ConstantLattice<T>::top();
     for (Value *Inc : PN->incoming_values()) {
       Result = Result.meet(getLattice(Inc, States));
       if (Result.isBottom())
@@ -181,7 +186,7 @@ transferForwarder(Instruction &I,
   if (auto *FI = dyn_cast<FreezeInst>(&I))
     return jeandle::isProvenDefined(FI->getOperand(0))
                ? getLattice(FI->getOperand(0), States)
-               : ConstOopLattice::bottom();
+               : ConstantLattice<T>::bottom();
 
   if (isa<BitCastInst>(&I) || isa<AddrSpaceCastInst>(&I))
     return getLattice(I.getOperand(0), States);
@@ -494,7 +499,8 @@ enum class ClassQueryKind {
   IsPrimitive,
   IsHidden,
   GetModifiers,
-  GetAccessFlags
+  GetAccessFlags,
+  GetSuperclass
 };
 
 std::optional<ClassQueryKind> classQueryKind(CallInst *CI) {
@@ -503,8 +509,13 @@ std::optional<ClassQueryKind> classQueryKind(CallInst *CI) {
       CI->getCallingConv() != Callee->getCallingConv() ||
       CI->getFunctionType()->isVarArg() || CI->hasOperandBundles() ||
       CI->isMustTailCall() || CI->arg_size() != 1 ||
-      !isWideOopType(CI->getArgOperand(0)->getType()) ||
-      !CI->getType()->isIntegerTy(32))
+      !isWideOopType(CI->getArgOperand(0)->getType()))
+    return std::nullopt;
+  if (Callee->getName() == "jeandle.class_get_superclass")
+    return isWideOopType(CI->getType())
+               ? std::optional<ClassQueryKind>(ClassQueryKind::GetSuperclass)
+               : std::nullopt;
+  if (!CI->getType()->isIntegerTy(32))
     return std::nullopt;
   return StringSwitch<std::optional<ClassQueryKind>>(Callee->getName())
       .Case("jeandle.class_is_array", ClassQueryKind::IsArray)
@@ -531,7 +542,12 @@ bool isKlassInitializedCall(CallInst *CI) {
 bool isGetClassCall(CallInst *CI) {
   Function *Callee = CI ? CI->getCalledFunction() : nullptr;
   return Callee && Callee->getName() == "jeandle.get_class" &&
-         CI->arg_size() == 1;
+         CI->getFunctionType() == Callee->getFunctionType() &&
+         CI->getCallingConv() == Callee->getCallingConv() &&
+         !Callee->isVarArg() && CI->arg_size() == 1 &&
+         isWideOopType(CI->getType()) &&
+         isWideOopType(CI->getArgOperand(0)->getType()) &&
+         !CI->hasOperandBundles() && !CI->isMustTailCall();
 }
 
 bool isKnownNonNullAt(Value *Receiver, Instruction *Query, DominatorTree &DT,
@@ -639,8 +655,30 @@ bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
 bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
                              const DenseMap<Value *, int> &ConstOops,
                              DenseSet<uintptr_t> &KnownKlasses) {
-  if (!isLoadMirrorKlassCall(CI) || !CI->getType()->isPointerTy() ||
-      !CB.GetMirrorKlass)
+  if (!isLoadMirrorKlassCall(CI) || !CI->getType()->isPointerTy())
+    return false;
+
+  auto *Origin = dyn_cast<CallInst>(CI->getArgOperand(0));
+  Function *LoadKlass = CI->getModule()->getFunction("jeandle.load_klass");
+  Function *Callee = CI->getCalledFunction();
+  if (Origin && isGetClassCall(Origin) && LoadKlass &&
+      CI->getFunctionType() == Callee->getFunctionType() &&
+      CI->getCallingConv() == Callee->getCallingConv() && !Callee->isVarArg() &&
+      !CI->hasOperandBundles() && !CI->isMustTailCall() &&
+      LoadKlass->arg_size() == 1 && !LoadKlass->isVarArg() &&
+      LoadKlass->getReturnType() == CI->getType() &&
+      LoadKlass->getFunctionType()->getParamType(0) ==
+          Origin->getArgOperand(0)->getType() &&
+      LoadKlass->getCallingConv() == CI->getCallingConv()) {
+    IRBuilder<> Builder(CI);
+    CallInst *Klass = Builder.CreateCall(LoadKlass, {Origin->getArgOperand(0)});
+    Klass->setCallingConv(LoadKlass->getCallingConv());
+    Klass->setDebugLoc(CI->getDebugLoc());
+    CI->replaceAllUsesWith(Klass);
+    CI->eraseFromParent();
+    return true;
+  }
+  if (!CB.GetMirrorKlass)
     return false;
 
   std::optional<int> OopId = lookupConstOop(CI->getArgOperand(0), ConstOops);
@@ -677,7 +715,9 @@ bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
 bool specializeConstantClassCheck(CallInst *CI,
                                   const jeandle::VMCallbacks &CB) {
   Function *Callee = CI->getCalledFunction();
-  if (!Callee || Callee->getName() != "jeandle.check_instanceof" ||
+  bool Subtype = Callee && Callee->getName() == "jeandle.check_klass_subtype";
+  if (!Callee ||
+      (!Subtype && Callee->getName() != "jeandle.check_instanceof") ||
       CI->getFunctionType() != Callee->getFunctionType() ||
       CI->getCallingConv() != Callee->getCallingConv() ||
       CI->getFunctionType()->isVarArg() || CI->hasOperandBundles() ||
@@ -686,14 +726,18 @@ bool specializeConstantClassCheck(CallInst *CI,
           PointerType::get(CI->getContext(), 0) ||
       !CI->getType()->isIntegerTy(1))
     return false;
-  uintptr_t Klass = jeandle::extractKlassConstant(CI->getArgOperand(0));
-  Function *WithOffset =
-      CI->getModule()->getFunction("jeandle.checkcast_nonnull_with_offset");
+  unsigned TargetIndex = Subtype ? 1 : 0;
+  uintptr_t Klass =
+      jeandle::extractKlassConstant(CI->getArgOperand(TargetIndex));
+  Function *WithOffset = CI->getModule()->getFunction(
+      Subtype ? "jeandle.check_klass_subtype_with_offset"
+              : "jeandle.checkcast_nonnull_with_offset");
   if (!Klass || Klass == jeandle::MirrorKlassUnavailable || !WithOffset ||
       WithOffset->getCallingConv() != CI->getCallingConv() ||
       WithOffset->isVarArg() || WithOffset->arg_size() != 3 ||
       WithOffset->getReturnType() != CI->getType() ||
-      !isWideOopType(CI->getArgOperand(1)->getType()) ||
+      CI->getArgOperand(1)->getType() !=
+          PointerType::get(CI->getContext(), Subtype ? 0 : 1) ||
       WithOffset->getFunctionType()->getParamType(0) !=
           CI->getArgOperand(0)->getType() ||
       WithOffset->getFunctionType()->getParamType(1) !=
@@ -729,10 +773,18 @@ bool specializeConstantClassCheck(CallInst *CI,
   return true;
 }
 
-std::optional<int>
+std::optional<uintptr_t>
 classQueryForConstantMirror(int OopId, ClassQueryKind Kind,
                             const jeandle::VMCallbacks &CB,
                             const jeandle::VMConstants &VMC) {
+  if (Kind == ClassQueryKind::GetSuperclass) {
+    if (!CB.GetClassSuperclass)
+      return std::nullopt;
+    uintptr_t Super = CB.GetClassSuperclass(OopId);
+    return Super == jeandle::MirrorKlassUnavailable
+               ? std::nullopt
+               : std::optional<uintptr_t>(Super);
+  }
   uintptr_t Klass = CB.GetMirrorKlass(OopId);
   if (Klass == jeandle::MirrorKlassUnavailable)
     return std::nullopt;
@@ -776,67 +828,91 @@ classQueryForConstantMirror(int OopId, ClassQueryKind Kind,
     Flags &= Mask;
     return Kind == ClassQueryKind::GetAccessFlags ? Flags : Flags != 0;
   }
+  case ClassQueryKind::GetSuperclass:
+    llvm_unreachable("superclass handled before the Klass query");
   }
   llvm_unreachable("unknown Class query kind");
 }
 
-// Different constant mirrors can have the same queried property even when the
-// ConstOop lattice cannot retain a single identity. Cache both known and
-// unknown results per query. An empty entry also breaks cycles conservatively.
-// Count every operand visit, including cache hits, so wide PHIs have a bounded
-// cost.
-std::optional<int> classQueryForMirror(
+// Query properties independently of mirror identity. Forwarders start at Top;
+// constant or opaque sources drive a monotonic worklist to a fixed point even
+// through cyclic PHIs. A source-free cycle remains Top and cannot be folded.
+std::optional<uintptr_t> classQueryForMirror(
     Value *Mirror, ClassQueryKind Kind, const jeandle::VMCallbacks &CB,
     const jeandle::VMConstants &VMC, const DenseMap<Value *, int> &ConstOops,
-    DenseMap<Value *, std::optional<int>> &Results, unsigned &RemainingVisits,
-    unsigned Depth = 0) {
-  if (RemainingVisits == 0)
-    return std::nullopt;
-  --RemainingVisits;
-  auto It = Results.find(Mirror);
-  if (It != Results.end())
-    return It->second;
-  if (Depth >= 32)
+    SmallVectorImpl<LoadInst *> &NonNullMirrors) {
+  DenseMap<Value *, ClassQueryLattice> States;
+  DenseMap<Value *, SmallVector<Instruction *, 2>> Users;
+  unsigned RemainingVisits = 256;
+  auto Visit = [&](auto &&Self, Value *V, unsigned Depth) -> bool {
+    if (RemainingVisits == 0)
+      return false;
+    --RemainingVisits;
+    if (States.contains(V))
+      return true;
+    if (Depth >= 32)
+      return false;
+    States[V] = ClassQueryLattice::top();
+    if (auto *Origin = dyn_cast<CallInst>(V);
+        Origin && isGetClassCall(Origin) &&
+        (Kind == ClassQueryKind::IsPrimitive ||
+         Kind == ClassQueryKind::IsInterface)) {
+      States[V] = ClassQueryLattice::constant(0);
+      return true;
+    }
+    if (std::optional<int> OopId = lookupConstOop(V, ConstOops)) {
+      auto Result = classQueryForConstantMirror(*OopId, Kind, CB, VMC);
+      States[V] = Result ? ClassQueryLattice::constant(*Result)
+                         : ClassQueryLattice::bottom();
+      if (Result)
+        if (auto *LI = dyn_cast<LoadInst>(V))
+          if (isWideOopType(LI->getType()) && getOopHandleLoadId(LI))
+            NonNullMirrors.push_back(LI);
+      return true;
+    }
+    auto *I = dyn_cast<Instruction>(V);
+    if (!I || !isForwarder(*I) ||
+        (isa<FreezeInst>(I) && !jeandle::isProvenDefined(I->getOperand(0)))) {
+      States[V] = ClassQueryLattice::bottom();
+      return true;
+    }
+    SmallVector<Value *, 4> Inputs;
+    if (auto *PN = dyn_cast<PHINode>(I)) {
+      // Every incoming edge needs a visit; avoid copying an over-budget PHI.
+      if (PN->getNumIncomingValues() > RemainingVisits)
+        return false;
+      Inputs.append(PN->incoming_values().begin(), PN->incoming_values().end());
+    } else if (auto *SI = dyn_cast<SelectInst>(I))
+      Inputs = {SI->getTrueValue(), SI->getFalseValue()};
+    else
+      Inputs.push_back(I->getOperand(0));
+    for (Value *Input : Inputs) {
+      if (!Self(Self, Input, Depth + 1))
+        return false;
+      Users[Input].push_back(I);
+    }
+    return true;
+  };
+  if (!Visit(Visit, Mirror, 0))
     return std::nullopt;
 
-  Results.try_emplace(Mirror, std::nullopt);
-  std::optional<int> Result;
-  if (std::optional<int> OopId = lookupConstOop(Mirror, ConstOops)) {
-    Result = classQueryForConstantMirror(*OopId, Kind, CB, VMC);
-  } else if (auto *SI = dyn_cast<SelectInst>(Mirror)) {
-    std::optional<int> True =
-        classQueryForMirror(SI->getTrueValue(), Kind, CB, VMC, ConstOops,
-                            Results, RemainingVisits, Depth + 1);
-    if (True) {
-      std::optional<int> False =
-          classQueryForMirror(SI->getFalseValue(), Kind, CB, VMC, ConstOops,
-                              Results, RemainingVisits, Depth + 1);
-      if (False && *True == *False)
-        Result = *True;
-    }
-  } else if (auto *PN = dyn_cast<PHINode>(Mirror)) {
-    for (Value *Incoming : PN->incoming_values()) {
-      std::optional<int> Next =
-          classQueryForMirror(Incoming, Kind, CB, VMC, ConstOops, Results,
-                              RemainingVisits, Depth + 1);
-      if (!Next || (Result && *Result != *Next)) {
-        Result = std::nullopt;
-        break;
+  SmallVector<Value *, 32> Worklist;
+  for (auto &[V, State] : States)
+    Worklist.push_back(V);
+  while (!Worklist.empty()) {
+    Value *V = Worklist.pop_back_val();
+    for (Instruction *User : Users[V]) {
+      ClassQueryLattice Next =
+          States[User].meet(transferForwarder(*User, States));
+      if (Next != States[User]) {
+        States[User] = Next;
+        Worklist.push_back(User);
       }
-      Result = *Next;
     }
-  } else if (auto *FI = dyn_cast<FreezeInst>(Mirror)) {
-    if (jeandle::isProvenDefined(FI->getOperand(0)))
-      Result = classQueryForMirror(FI->getOperand(0), Kind, CB, VMC, ConstOops,
-                                   Results, RemainingVisits, Depth + 1);
-  } else if (isa<BitCastInst>(Mirror) || isa<AddrSpaceCastInst>(Mirror)) {
-    Result = classQueryForMirror(cast<Instruction>(Mirror)->getOperand(0), Kind,
-                                 CB, VMC, ConstOops, Results, RemainingVisits,
-                                 Depth + 1);
   }
-
-  Results[Mirror] = Result;
-  return Result;
+  ClassQueryLattice Result = States[Mirror];
+  return Result.isConstant() ? std::optional<uintptr_t>(Result.Id)
+                             : std::nullopt;
 }
 
 bool foldClassQueryCall(CallInst *CI, ClassQueryKind Kind,
@@ -845,15 +921,34 @@ bool foldClassQueryCall(CallInst *CI, ClassQueryKind Kind,
                         const DenseMap<Value *, int> &ConstOops) {
   if (!CB.GetMirrorKlass)
     return false;
-
-  DenseMap<Value *, std::optional<int>> Results;
-  unsigned RemainingVisits = 256;
-  std::optional<int> Result = classQueryForMirror(
-      CI->getArgOperand(0), Kind, CB, VMC, ConstOops, Results, RemainingVisits);
+  SmallVector<LoadInst *, 4> NonNullMirrors;
+  auto Result = classQueryForMirror(CI->getArgOperand(0), Kind, CB, VMC,
+                                    ConstOops, NonNullMirrors);
   if (!Result)
     return false;
 
-  CI->replaceAllUsesWith(ConstantInt::get(CI->getType(), *Result));
+  Value *Replacement = nullptr;
+  if (Kind == ClassQueryKind::GetSuperclass) {
+    if (*Result == 0) {
+      Replacement = ConstantPointerNull::get(cast<PointerType>(CI->getType()));
+    } else {
+      if (!CB.GetJavaMirror)
+        return false;
+      int OopId = CB.GetJavaMirror(*Result);
+      if (OopId < 0)
+        return false;
+      IRBuilder<> Builder(CI);
+      Replacement = createConstOopLoad(*CI->getModule(), Builder, OopId);
+    }
+  } else {
+    Replacement = ConstantInt::get(CI->getType(), *Result);
+  }
+  // A successful VM query establishes that these handles contain Class
+  // mirrors. Expose that fact so a folded query does not leave a null check
+  // on the original mirror merge behind.
+  for (LoadInst *LI : NonNullMirrors)
+    LI->setMetadata(LLVMContext::MD_nonnull, MDNode::get(CI->getContext(), {}));
+  CI->replaceAllUsesWith(Replacement);
   CI->eraseFromParent();
   return true;
 }
@@ -1330,7 +1425,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
           if (isLoadKlassCall(CI))
             LoadKlassCalls.push_back(CI);
           if (Function *Callee = CI->getCalledFunction();
-              Callee && Callee->getName() == "jeandle.check_instanceof")
+              Callee && (Callee->getName() == "jeandle.check_instanceof" ||
+                         Callee->getName() == "jeandle.check_klass_subtype"))
             ClassInstanceChecks.push_back(CI);
           if (isLoadMirrorKlassCall(CI))
             LoadMirrorKlassCalls.push_back(CI);
