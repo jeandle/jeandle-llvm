@@ -438,6 +438,7 @@ alloc.unwind:
 ; CHECK-COUNT-1: inttoptr (i64 68894 to ptr)
 ; CHECK: %[[SLOT:[-A-Za-z$._0-9]+]] = getelementptr inbounds i8, ptr addrspace(1) %outer, i64 16
 ; CHECK-NEXT: store atomic ptr addrspace(1) %child, ptr addrspace(1) %[[SLOT]] unordered, align 8
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; CHECK-NEXT: invoke void @observe_owner(ptr addrspace(1) %outer)
 ; CHECK-SAME: [ "deopt"(i32 94, i32 94, i64 12,
 ; CHECK-SAME: ptr addrspace(1) %outer,

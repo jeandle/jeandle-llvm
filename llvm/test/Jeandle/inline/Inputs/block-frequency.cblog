@@ -1,0 +1,5 @@
+IsOkToInline -1 7 2 = true
+IsOkToInline -1 11 2 = true
+RecordInlineResult -1 7 2 0 = true
+RecordInlineResult -1 11 2 0 = true
+RecordInliningComplete = true

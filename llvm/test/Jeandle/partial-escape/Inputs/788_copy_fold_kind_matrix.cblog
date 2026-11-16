@@ -1,0 +1,8 @@
+RequiresStrictLockOrder = 1
+ElementBasicTypeOfArrayKlass 12345 = 4
+ElementBasicTypeOfArrayKlass 22222 = 8
+IsInterface 12345 = false
+GetSecondarySupers 12345 = []
+IsInterface 22222 = false
+GetSecondarySupers 22222 = []
+ArrayElementKlass 22222 = 0

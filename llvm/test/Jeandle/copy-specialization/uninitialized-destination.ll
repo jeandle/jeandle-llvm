@@ -6,7 +6,7 @@
 ; MISSING-OFFSET-LABEL: define ptr addrspace(1) @checkcast_fresh(
 ; MISSING-OFFSET-NOT: call i32 @StubRoutines_checkcast_arraycopy
 ; MISSING-OFFSET: invoke hotspotcc void @SharedRuntime_slow_arraycopy_C
-; MISSING-OFFSET: fence release
+; MISSING-OFFSET: call hotspotcc void @jeandle.membar_allocation_init(
 ; MISSING-OFFSET-LABEL: define void @checkcast_existing(
 ; MISSING-OFFSET-NOT: call i32 @StubRoutines_checkcast_arraycopy
 ; MISSING-OFFSET: invoke hotspotcc void @SharedRuntime_slow_arraycopy_C
@@ -46,7 +46,7 @@ exception:
 ; UNINIT: call void @StubRoutines_arrayof_oop_disjoint_arraycopy_uninit({{.*}}i64 8)
 ; INIT: call void @StubRoutines_arrayof_oop_disjoint_arraycopy({{.*}}i64 8)
 ; COMMON: arraycopy.result:
-; COMMON-NEXT: fence release
+; COMMON-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; COMMON-NEXT: br label %normal
 ; COMMON-NOT: @jeandle.copy
 
@@ -66,7 +66,7 @@ exception:
 ; UNINIT: call void @StubRoutines_oop_disjoint_arraycopy_uninit({{.*}}i64 7)
 ; INIT: call void @StubRoutines_oop_disjoint_arraycopy({{.*}}i64 7)
 ; COMMON: arraycopy.result:
-; COMMON-NEXT: fence release
+; COMMON-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; COMMON-NEXT: br label %normal
 ; COMMON-NOT: @jeandle.copy
 
@@ -135,7 +135,7 @@ exception:
 ; COMMON: phi i64 [ 0, %arraycopy.slow_region ], [ {{%.*}}, %arraycopy.checkcast.failure ]
 ; COMMON: invoke hotspotcc void @SharedRuntime_slow_arraycopy_C({{.*}}[ "deopt"(i32 1) ]
 ; COMMON: arraycopy.result:
-; COMMON-NEXT: fence release
+; COMMON-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; COMMON-NOT: @jeandle.copy
 
 define ptr addrspace(1) @copyof_range_checkcast(ptr addrspace(1) %src, ptr %src_klass, ptr %dest_klass) #0 personality ptr @personality {
@@ -157,7 +157,7 @@ exception:
 ; COMMON: sub i64 7, [[OFFSET]]
 ; COMMON: invoke hotspotcc void @SharedRuntime_slow_arraycopy_C({{.*}}[ "deopt"(i32 1) ]
 ; COMMON: arraycopy.result:
-; COMMON-NEXT: fence release
+; COMMON-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; COMMON-NOT: @jeandle.copy
 
 ; Analyze both sites before changing the shared exceptional CFG, and retain
@@ -181,12 +181,12 @@ exception:
 ; UNINIT: call void @StubRoutines_arrayof_oop_disjoint_arraycopy_uninit(
 ; INIT: call void @StubRoutines_arrayof_oop_disjoint_arraycopy(
 ; COMMON: arraycopy.result:
-; COMMON-NEXT: fence release
+; COMMON-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; COMMON: second_copy:
 ; UNINIT: call void @StubRoutines_oop_disjoint_arraycopy_uninit(
 ; INIT: call void @StubRoutines_oop_disjoint_arraycopy(
 ; COMMON: arraycopy.result{{[0-9]+}}:
-; COMMON-NEXT: fence release
+; COMMON-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; COMMON-NOT: @jeandle.copy
 
 attributes #0 = { "java-method"="0" }

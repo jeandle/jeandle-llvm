@@ -1,0 +1,8 @@
+RequiresStrictLockOrder = 0
+HasFinalizer 23456 = false
+CanVirtualize 23456 = true
+IsBoxed 23456 = 9
+HasFinalizer 7777 = false
+CanVirtualize 7777 = true
+IsBoxed 7777 = 9
+IsValueBased 7777 = true

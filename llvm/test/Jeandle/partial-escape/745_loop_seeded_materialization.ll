@@ -19,7 +19,7 @@ define ptr addrspace(1) @loop_seeded_materialization(i1 %first.done,
     gc "hotspotgc" personality ptr null {
 entry:
   %object = call hotspotcc ptr addrspace(1) @jeandle.new_instance(
-      ptr inttoptr (i64 74501 to ptr), i32 0, i1 false)
+      ptr inttoptr (i64 74501 to ptr), i32 8, i1 false)
   store i8 0, ptr addrspace(1) %object, align 1
   br label %outer.preheader
 

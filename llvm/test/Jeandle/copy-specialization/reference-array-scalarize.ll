@@ -38,7 +38,7 @@ exception:
 ; NO-VM-LABEL: define ptr addrspace(1) @small_copyof(
 ; NO-VM-COUNT-8: load atomic volatile ptr addrspace(3)
 ; NO-VM: arraycopy.ideal.result:
-; NO-VM-NEXT: fence release
+; NO-VM-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; NO-VM-NEXT: br label %normal
 ; NARROW: load atomic volatile ptr addrspace(3), ptr addrspace(1) {{%.*}} unordered
 ; NARROW: store atomic ptr addrspace(3) {{%.*}}, ptr addrspace(1) {{%.*}} unordered
@@ -46,12 +46,12 @@ exception:
 ; WIDE: store atomic ptr addrspace(1) {{%.*}}, ptr addrspace(1) {{%.*}} unordered
 ; SCALAR-NOT: @StubRoutines_
 ; SCALAR: arraycopy.ideal.result:
-; SCALAR-NEXT: fence release
+; SCALAR-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; SCALAR-NEXT: br label %normal
 ; BULK-NOT: load atomic
 ; BULK: call void @StubRoutines_arrayof_oop_disjoint_arraycopy_uninit(
 ; BULK: arraycopy.result:
-; BULK-NEXT: fence release
+; BULK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; COMMON-NOT: @jeandle.copy
 
 ; GC-LABEL: define ptr addrspace(1) @small_copyof(
@@ -78,10 +78,10 @@ exception:
 ; SCALAR: load atomic volatile ptr addrspace({{[13]}})
 ; SCALAR: store atomic ptr addrspace({{[13]}})
 ; SCALAR: arraycopy.ideal.result:
-; SCALAR-NEXT: fence release
+; SCALAR-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; BULK: call void @StubRoutines_oop_disjoint_arraycopy_uninit(
 ; BULK: arraycopy.result:
-; BULK-NEXT: fence release
+; BULK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; COMMON-NOT: @jeandle.copy
 
 define ptr addrspace(1) @empty_copyof(ptr addrspace(1) "java-klass"="201" %src) #0 personality ptr @personality {
@@ -98,9 +98,9 @@ exception:
 ; COMMON-LABEL: define ptr addrspace(1) @empty_copyof(
 ; SCALAR-NOT: load atomic
 ; SCALAR: arraycopy.ideal.result:
-; SCALAR-NEXT: fence release
+; SCALAR-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; BULK: arraycopy.result:
-; BULK-NEXT: fence release
+; BULK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; COMMON-NOT: @jeandle.copy
 
 define ptr addrspace(1) @large_copyof(ptr addrspace(1) "java-klass"="201" %src) #0 personality ptr @personality {
@@ -118,7 +118,7 @@ exception:
 ; COMMON-NOT: load atomic
 ; COMMON: call void @StubRoutines_arrayof_oop_disjoint_arraycopy_uninit(
 ; COMMON: arraycopy.result:
-; COMMON-NEXT: fence release
+; COMMON-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; COMMON-NOT: @jeandle.copy
 
 define void @existing_destination(ptr addrspace(1) "java-klass"="201" %src, ptr addrspace(1) "java-klass"="202" %dest) #0 personality ptr @personality {
@@ -153,11 +153,11 @@ exception:
 ; SCALAR: load atomic volatile ptr addrspace({{[13]}})
 ; SCALAR: store atomic ptr addrspace({{[13]}})
 ; SCALAR: arraycopy.ideal.result:
-; SCALAR-NEXT: fence release
+; SCALAR-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; BULK-NOT: load atomic
 ; BULK: call void @StubRoutines_arrayof_oop_disjoint_arraycopy_uninit(
 ; BULK: arraycopy.result:
-; BULK-NEXT: fence release
+; BULK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(
 ; COMMON-NOT: @jeandle.copy
 
 attributes #0 = { "java-method"="0" }

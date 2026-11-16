@@ -362,6 +362,36 @@ bool isJeandleMonitorEnter(const CallBase *CB);
 bool isJeandleMonitorExit(const CallBase *CB);
 bool isJeandleRegisterFinalizerIfNeeded(const CallBase *CB);
 
+// The jeandle.copy pseudo operation (System.arraycopy / Arrays.copyOf[Range] /
+// clone). Not a JavaOp: it carries no lower-phase attribute and survives to
+// CopySpecialization when PEA does not fold it. Canonical 9-operand shape:
+// (src, srcPos, dest, destPos, length, srcKlass, destKlass, srcLength,
+// destLength); positions/lengths are i64.
+bool isJeandleCopyPseudoCall(const CallBase *CB);
+
+// Classification of a jeandle.copy site via its jeandle.copy.kind attribute.
+enum class JeandleCopyPseudoKind : uint8_t {
+  ArrayCopy,
+  CopyOf,
+  CopyOfRange,
+  CloneReferenceArray,
+  CloneInstance,
+  CloneArray,
+  Unknown,
+};
+
+JeandleCopyPseudoKind classifyJeandleCopyPseudo(const CallBase *CB);
+
+// The kinds whose positions/length are ELEMENT indices/counts. The
+// byte-offset payload clones (clone-instance / clone-array) address raw
+// payload words and are not element-indexed.
+bool isElementIndexedCopyKind(JeandleCopyPseudoKind Kind);
+
+// Whether the site carries the frontend's ValidatedCopy marker: the guards
+// dominating the call proved non-null, array-ness, bounds, and — for oop
+// arrays — source/destination element compatibility on the executed path.
+bool isCopyPseudoValidated(const CallBase *CB);
+
 // Whether processIntrinsic treats II's ordinary operands and non-deopt operand
 // bundles as non-escaping. Deopt bundles remain executable frame state and
 // require a surviving whole-pool rewrite.

@@ -202,9 +202,10 @@ public:
   uint32_t ArrayIndexScale = 0;
   uint32_t ArrayBaseOffset = 0;
 
-  // Tracked fields, kept sorted by Offset (see getOrCreateFieldIndex).
-  // Lazily populated as accesses are resolved, so its size is
-  // path-dependent and not a structural invariant of the object.
+  // Physical instance/reference field slots, kept sorted by Offset (see
+  // getOrCreateFieldIndex). Primitive array group spans travel with their
+  // point-sensitive field values, since a copy can replace the grouping.
+  // Lazily populated slots are not a structural invariant of the object.
   SmallVector<FieldDesc, 8> Fields;
 
   // A "synthetic" VirtualObject is created at a multi-pred merge by the
@@ -358,6 +359,8 @@ private:
   // Virtual while the allocation is still elided; Materialized once the
   // object has a real SSA identity on this path.
   StateKind Kind = Virtual;
+  // Ordering removed with this virtual object, owed at its next replay.
+  uint8_t PendingBarriers = 0;
   // Per-VO live monitor stack: each element is a MonitorIdRef identifying
   // the (enter-call, bytecode-depth) pair pushed by a folded monitorenter
   // on this VO whose matching monitorexit hasn't yet been seen on this
@@ -373,11 +376,11 @@ private:
   Value *MaterializedValue = nullptr;
 
 public:
-  // ObjectState carries ONLY the per-VO virtual/materialized flag, the live
-  // lock stack, and (once materialized) the materialized pointer. Per-FIELD
-  // state does NOT live here: LLVM's Analysis/Transform split plus the SSA
-  // single-pass walk prevent propagating a per-field state array across the
-  // CFG inside the block state (see the STATE MODEL comment in
+  // ObjectState carries the per-VO virtual/materialized flag, pending ordering,
+  // the live lock stack, and (once materialized) the materialized pointer.
+  // Per-FIELD state does NOT live here: LLVM's Analysis/Transform split plus
+  // the SSA single-pass walk prevent propagating a per-field state array across
+  // the CFG inside the block state (see the STATE MODEL comment in
   // PartialEscapeAnalysis.cpp), so field values are tracked in the
   // analyzer-wide FieldStates DenseMap keyed by (ObjectID, byte-offset), and
   // ObjectState intentionally carries no field-storage member.
@@ -394,6 +397,11 @@ public:
     return MaterializedValue;
   }
   bool hasLocks() const { return !Locks.empty(); }
+  uint8_t getPendingBarriers() const { return PendingBarriers; }
+  void addPendingBarriers(uint8_t Obligations) {
+    assert(isVirtual());
+    PendingBarriers |= Obligations;
+  }
 
   // The pure virtual->materialized STATE FLIP only — it does NOT emit a
   // Materialize effect or build an allocation invoke (that is the caller's
@@ -403,6 +411,7 @@ public:
   void escape(Value *Ptr) {
     assert(isVirtual());
     assert(Ptr);
+    PendingBarriers = 0;
     Kind = Materialized;
     MaterializedValue = Ptr;
     // The lock state is retained across the virtual->materialized flip: the
@@ -557,6 +566,7 @@ public:
   enum class Kind : uint8_t {
     ReplaceLoad,
     ReplaceCall,
+    RewriteMemoryBarrier,
     EliminateStore,
     EliminateAllocation,
     PlaceInstruction,
@@ -592,7 +602,8 @@ private:
   // ineligible. InvalidObjectID denotes an effect that is deliberately
   // independent of any one VO: RewriteDeoptPool rewrites one complete
   // safepoint pool and may cover several (or no) VOs, while
-  // PlaceInstruction only parents an analysis-created instruction at its
+  // RewriteMemoryBarrier retains per-entry owners in one call transaction,
+  // and PlaceInstruction only parents an analysis-created instruction at its
   // program point. Ownerless effects must therefore not participate in the
   // per-VO ineligibility cascade.
   ObjectID MutationOwner = InvalidObjectID;
@@ -617,7 +628,8 @@ public:
 
   bool hasValidMutationOwner() const {
     return (getKind() == Kind::RewriteDeoptPool ||
-            getKind() == Kind::PlaceInstruction)
+            getKind() == Kind::PlaceInstruction ||
+            getKind() == Kind::RewriteMemoryBarrier)
                ? !hasMutationOwner()
                : hasMutationOwner();
   }
@@ -689,6 +701,35 @@ public:
   void apply(TransformContext &Ctx) override;
   std::unique_ptr<Effect> clone() const override {
     return std::make_unique<ReplaceCallEffect>(*this);
+  }
+};
+
+// Atomically remove only the publication entries whose obligations moved to
+// eligible virtual owners. Other entries, including late-ineligible owners,
+// retain their original receiver and mask. No single VO owns this rewrite.
+class RewriteMemoryBarrierEffect : public Effect {
+public:
+  struct OwnerEntry {
+    WeakTrackingVH Receiver;
+    uint8_t Obligations;
+    ObjectID VirtualOwner = InvalidObjectID;
+  };
+  WeakTrackingVH Target;
+  SmallVector<OwnerEntry, 4> Owners;
+
+  Kind getKind() const override { return Kind::RewriteMemoryBarrier; }
+  static bool classof(const Effect *E) {
+    return E->getKind() == Kind::RewriteMemoryBarrier;
+  }
+  Instruction *getTarget() const override {
+    return dyn_cast_or_null<Instruction>((Value *)Target);
+  }
+  // Identify one exact owner argument; masks/count and retained owners are
+  // never treated as removed semantic uses by an allocation-deletion audit.
+  bool removesOwnerUse(const Use &U, ObjectID ID) const;
+  void apply(TransformContext &Ctx) override;
+  std::unique_ptr<Effect> clone() const override {
+    return std::make_unique<RewriteMemoryBarrierEffect>(*this);
   }
 };
 
@@ -794,6 +835,8 @@ public:
   // per tracked field with a known value (Unknown slots replay nothing and
   // are omitted), in ascending offset order at emission.
   SmallVector<FieldEntry, 8> FieldEntries;
+  // Point-local snapshot, including obligations with no non-default stores.
+  uint8_t PendingBarriers = 0;
   // Surviving (unbalanced) monitorenters to re-emit at the materialize point,
   // sorted ascending by BytecodeDepth.
   SmallVector<MaterializedLock, 2> Locks;
@@ -1148,6 +1191,28 @@ public:
   // BlockExits[BB] would reference a deleted PHI. Lifecycle is identical to
   // OwnedPhis.
   SmallVector<WeakTrackingVH, 4> OwnedLoopFieldPhis;
+
+  // Element loads (and their narrow-oop AS3 -> AS1 casts) created unparented
+  // by the analyzer for concrete-source jeandle.copy folds, keyed by the
+  // per-site CopyElementLoadCache. Stored separately from OwnedInsts for the
+  // same reason as OwnedLoopFieldPhis: the loop fixpoint re-processes a copy
+  // inside a loop and the convergence comparison is by Value* identity, so
+  // the cached instructions must survive every analyzer rollback (they never
+  // enter truncateOwnedTo). Only the per-visit PlaceInstructionEffect is
+  // rebuilt. Lifecycle otherwise identical to OwnedInsts.
+  SmallVector<WeakTrackingVH, 4> OwnedCopyLoads;
+
+  // Deferred instructions must not appear in an in-IR value's use list at an
+  // analysis/pass boundary. Keep their real operands separately while the
+  // cached plan is idle; the transform resumes them before applying effects.
+  struct SuspendedOperand {
+    WeakTrackingVH User;
+    unsigned Index;
+    WeakTrackingVH Operand;
+  };
+  SmallVector<SuspendedOperand, 8> SuspendedOperands;
+  void suspendOwnedUses();
+  void resumeOwnedUses();
 
   // AS1 replay-identity PHIs for compressed Case-C synthetics. Their shells
   // are referenced by VirtualObject::SyntheticReplayPhi and by monotonic

@@ -18,6 +18,7 @@
 target datalayout = "e-p:64:64-p1:64:64-p3:32:32"
 
 declare hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr, i32, i1)
+declare hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1)) nounwind "gc-leaf-function"
 declare void @sink(ptr addrspace(1))
 declare i32 @__gxx_personality_v0(...)
 
@@ -33,6 +34,7 @@ normal:
   %pea.matslot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 16
   store atomic ptr addrspace(3) %pea.encode.oop,
       ptr addrspace(1) %pea.matslot unordered, align 4
+  call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %o)
   %loaded = load atomic ptr addrspace(3), ptr addrspace(1) %pea.matslot
       unordered, align 4
   %wide = addrspacecast ptr addrspace(3) %loaded to ptr addrspace(1)
@@ -53,6 +55,7 @@ normal:
   %pea.matslot = getelementptr inbounds i8, ptr addrspace(1) %o, i64 16
   store atomic ptr addrspace(3) %pea.encode.oop,
       ptr addrspace(1) %pea.matslot unordered, align 4
+  call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %o)
   call void @sink(ptr addrspace(1) %o)
   ret void
 unwind:
@@ -74,6 +77,7 @@ unwind:
 ; CHECK: %pea.encode.oop = addrspacecast ptr addrspace(1) %ref to ptr addrspace(3)
 ; CHECK-NEXT: %pea.matslot = getelementptr inbounds{{( nuw)?}} i8,
 ; CHECK-NEXT: store atomic ptr addrspace(3) %pea.encode.oop,
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %o)
 ; CHECK-NEXT: call void @sink(ptr addrspace(1) %o)
 ; CHECK-NOT: pea.matslot
 ; CHECK-NOT: store atomic ptr addrspace(3)

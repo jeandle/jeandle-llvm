@@ -196,4 +196,23 @@ u:
   resume i64 %lp
 }
 
+; A constant i16 store spanning two byte cells folds through packed-group
+; constant extraction: little-endian bytes 65 and 0 hash to 31*65 + 0 = 2015.
+; CHECK-LABEL: @overlapping_store_const(
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.vectorized_hashcode
+; CHECK: ret i32 2015
+define i32 @overlapping_store_const() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+entry:
+  %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10001 to ptr), i32 4, i32 32, i32 16, i32 100, i1 false, i1 false) to label %work unwind label %u
+work:
+  %p0 = getelementptr i8, ptr addrspace(1) %a, i64 16
+  store atomic i16 65, ptr addrspace(1) %p0 unordered, align 2
+  %r = call i32 @jeandle.vectorized_hashcode(ptr addrspace(1) %a, i32 0, i32 2, i32 0, i32 8)
+  ret i32 %r
+u:
+  %lp = landingpad i64 cleanup
+  resume i64 %lp
+}
+
 !java-method-compilation = !{}

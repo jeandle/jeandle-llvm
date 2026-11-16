@@ -1,0 +1,7 @@
+IsInterface 1000 = false
+GetSecondarySupers 1000 = []
+IsInterface 2000 = false
+GetSecondarySupers 2000 = []
+GetCommonSuperKlass 1000 2000 = 1000
+GetCommonSuperKlass 2000 1000 = 1000
+GetKlassConstant 1000 = 1000

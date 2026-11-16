@@ -61,20 +61,22 @@ u:
   resume i64 %lp
 }
 
-; A partially overlapping i16 store makes the first byte cell unreadable; the
-; fold must not commit anything.
+; A partially overlapping non-constant i16 store leaves byte cells that only
+; a shifted extraction could read; the hash fold places no instructions of its
+; own for cell reads, so the fold must not commit anything. (A constant
+; overlapping store does fold via packed-group extraction; see pea-fold.ll.)
 ; CHECK-LABEL: @overlapping_store(
 ; CHECK: @jeandle.new_array
-; CHECK: store atomic i16 65
+; CHECK: store atomic i16 %v
 ; CHECK: call i32 @jeandle.vectorized_hashcode
 ; CHECK-NOT: poison
 ; CHECK: ret i32
-define i32 @overlapping_store() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+define i32 @overlapping_store(i16 %v) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10001 to ptr), i32 4, i32 32, i32 16, i32 100, i1 false, i1 false) to label %work unwind label %u
 work:
   %p0 = getelementptr i8, ptr addrspace(1) %a, i64 16
-  store atomic i16 65, ptr addrspace(1) %p0 unordered, align 2
+  store atomic i16 %v, ptr addrspace(1) %p0 unordered, align 2
   %r = call i32 @jeandle.vectorized_hashcode(ptr addrspace(1) %a, i32 0, i32 2, i32 0, i32 8)
   ret i32 %r
 u:

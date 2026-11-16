@@ -1,0 +1,14 @@
+RequiresStrictLockOrder = 1
+ElementBasicTypeOfArrayKlass 1000 = 8
+ElementBasicTypeOfArrayKlass 2000 = 8
+IsInterface 1000 = false
+IsInterface 2000 = false
+IsInterface 2001 = false
+GetSecondarySupers 1000 = []
+GetSecondarySupers 2000 = []
+GetSecondarySupers 2001 = []
+IsSubtype 1000 2000 = false
+IsSubtype 2001 2001 = true
+ArrayElementKlass 2000 = 2001
+IsObjectKlass 2001 = false
+IsUnverifiedInterface 2001 = false

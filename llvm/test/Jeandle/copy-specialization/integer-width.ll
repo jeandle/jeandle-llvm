@@ -83,6 +83,7 @@ define void @legacy_primitive_clone(ptr addrspace(1) "java-klass"="101" %src, pt
 ; CHECK-LABEL: define void @legacy_primitive_clone(
 ; CHECK-NOT: load atomic
 ; CHECK: call hotspotcc void @jeandle.clone_payload(ptr addrspace(1) %src, i64 8, ptr addrspace(1) %dest, i64 8, i64 2, i1 false)
+; CHECK-NEXT: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dest)
 ; CHECK-NEXT: ret void
 
 attributes #0 = { "java-method"="0" }

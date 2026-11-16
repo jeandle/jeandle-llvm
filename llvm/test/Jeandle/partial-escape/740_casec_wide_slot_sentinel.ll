@@ -40,7 +40,11 @@ unwind:
 ; CHECK: @jeandle.new_instance
 ; CHECK: store atomic i8 1
 ; CHECK: @jeandle.new_instance
-; CHECK: store atomic i16 2
+; Out-of-bounds fields stay real on their original paths; they must not
+; participate in slot splitting or acquire replay writes at the merge.
+; CHECK: %rf = getelementptr i8, ptr addrspace(1) %o2, i64 9223372036854775805
+; CHECK-NEXT: store atomic i16 2, ptr addrspace(1) %rf unordered, align 1
+; CHECK-NOT: pea.matslot
 ; CHECK: load atomic i16
 
 !java-method-compilation = !{}
