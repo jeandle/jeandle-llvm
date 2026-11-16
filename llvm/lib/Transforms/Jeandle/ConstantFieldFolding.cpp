@@ -568,6 +568,109 @@ bool isKnownNonNullAt(Value *Receiver, Instruction *Query, DominatorTree &DT,
   return NonNull && NonNull->isOne();
 }
 
+// Strip freeze and pointer-cast wrappers that other passes may have added
+// around a well-defined getClass result; comparing the wrapper equals
+// comparing the underlying value.
+static Value *stripMirrorWrappers(Value *V) {
+  V = V->stripPointerCasts();
+  while (auto *Freeze = dyn_cast<FreezeInst>(V)) {
+    V = Freeze->getOperand(0)->stripPointerCasts();
+  }
+  return V;
+}
+
+// Rewrite mirror-identity comparisons so the mirror of a dynamic receiver
+// need not be materialized (C2 performs the same rewrites at parse time in
+// Parse::optimize_cmp_with_klass):
+//   getClass(x) == C        <=>  load_klass(x) == klassOf(C)
+//   getClass(x) == getClass(y)  <=>  load_klass(x) == load_klass(y)
+// A constant primitive mirror has no Klass and can never equal a getClass
+// result, which never denotes a primitive, so the comparison folds instead.
+// The load_klass operand merges with any other header-klass consumer, letting
+// DCE drop the getClass call and its mirror loads entirely.
+bool rewriteGetClassMirrorComparison(ICmpInst *Cmp,
+                                     const jeandle::VMCallbacks &CB,
+                                     const DenseMap<Value *, int> &ConstOops,
+                                     DenseSet<uintptr_t> &KnownKlasses) {
+  if (!Cmp->isEquality() || !isJavaOopType(Cmp->getOperand(0)->getType()) ||
+      Cmp->getParent() == nullptr)
+    return false;
+  auto *LeftOrigin =
+      dyn_cast<CallInst>(stripMirrorWrappers(Cmp->getOperand(0)));
+  auto *RightOrigin =
+      dyn_cast<CallInst>(stripMirrorWrappers(Cmp->getOperand(1)));
+  bool LeftIsOrigin = LeftOrigin != nullptr && isGetClassCall(LeftOrigin);
+  bool RightIsOrigin = RightOrigin != nullptr && isGetClassCall(RightOrigin);
+  if (!LeftIsOrigin && !RightIsOrigin)
+    return false;
+
+  Function *LoadKlass = Cmp->getModule()->getFunction("jeandle.load_klass");
+  Type *KlassTy = PointerType::get(Cmp->getContext(), 0);
+  auto KlassLoadable = [&](Value *Receiver) {
+    return LoadKlass && !LoadKlass->isVarArg() && LoadKlass->arg_size() == 1 &&
+           LoadKlass->getReturnType() == KlassTy &&
+           LoadKlass->getFunctionType()->getParamType(0) == Receiver->getType();
+  };
+  if (!KlassLoadable(LeftIsOrigin ? LeftOrigin->getArgOperand(0)
+                                  : RightOrigin->getArgOperand(0)))
+    return false;
+
+  // Both sides getClass: compare the header Klass values directly.
+  if (LeftIsOrigin && RightIsOrigin) {
+    if (!KlassLoadable(RightOrigin->getArgOperand(0)))
+      return false;
+    IRBuilder<> Builder(Cmp);
+    // Emit in operand order; argument evaluation order is unspecified.
+    auto *LeftLoad =
+        Builder.CreateCall(LoadKlass, {LeftOrigin->getArgOperand(0)});
+    LeftLoad->setCallingConv(LoadKlass->getCallingConv());
+    LeftLoad->setDebugLoc(Cmp->getDebugLoc());
+    auto *RightLoad =
+        Builder.CreateCall(LoadKlass, {RightOrigin->getArgOperand(0)});
+    RightLoad->setCallingConv(LoadKlass->getCallingConv());
+    RightLoad->setDebugLoc(Cmp->getDebugLoc());
+    Value *Rewritten = Builder.CreateICmp(Cmp->getPredicate(), LeftLoad,
+                                          RightLoad, "class.mirror.klass_eq");
+    Cmp->replaceAllUsesWith(Rewritten);
+    Cmp->eraseFromParent();
+    return true;
+  }
+
+  CallInst *Origin = LeftIsOrigin ? LeftOrigin : RightOrigin;
+  Value *ConstSide = LeftIsOrigin ? Cmp->getOperand(1) : Cmp->getOperand(0);
+  std::optional<int> OopId = lookupConstOop(ConstSide, ConstOops);
+  if (!OopId || !CB.GetMirrorKlass)
+    return false;
+
+  uintptr_t Klass = CB.GetMirrorKlass(*OopId);
+  if (Klass == jeandle::MirrorKlassUnavailable)
+    return false;
+  if (Klass == 0) {
+    // Primitive constant mirror: a getClass result is never primitive.
+    bool Result = Cmp->getPredicate() == CmpInst::ICMP_NE;
+    Cmp->replaceAllUsesWith(ConstantInt::get(Cmp->getType(), Result));
+    Cmp->eraseFromParent();
+    return true;
+  }
+
+  IRBuilder<> Builder(Cmp);
+  auto *KlassOfObject =
+      Builder.CreateCall(LoadKlass, {Origin->getArgOperand(0)});
+  KlassOfObject->setCallingConv(LoadKlass->getCallingConv());
+  KlassOfObject->setDebugLoc(Cmp->getDebugLoc());
+  Constant *KlassOfMirror =
+      klassPointerConstant(Cmp->getContext(), KlassOfObject->getType(), Klass);
+  Value *Rewritten = Builder.CreateICmp(
+      Cmp->getPredicate(),
+      LeftIsOrigin ? static_cast<Value *>(KlassOfObject) : KlassOfMirror,
+      LeftIsOrigin ? static_cast<Value *>(KlassOfMirror) : KlassOfObject,
+      "class.mirror.klass_eq");
+  KnownKlasses.insert(Klass);
+  Cmp->replaceAllUsesWith(Rewritten);
+  Cmp->eraseFromParent();
+  return true;
+}
+
 bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
                       const DenseMap<Value *, int> &ConstOops,
                       DominatorTree &DT, const DataLayout &DL,
@@ -1490,7 +1593,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (ICmpInst *Cmp : ClassMirrorComparisons) {
       if (Cmp->getParent() == nullptr)
         continue;
-      if (foldClassMirrorComparison(Cmp, *CB, ConstOops)) {
+      if (rewriteGetClassMirrorComparison(Cmp, *CB, ConstOops, KnownKlasses) ||
+          foldClassMirrorComparison(Cmp, *CB, ConstOops)) {
         RoundChanged = true;
         Changed = true;
       }
