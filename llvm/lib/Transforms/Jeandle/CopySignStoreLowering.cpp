@@ -35,15 +35,23 @@ bool shouldLowerCopySign(const IntrinsicInst &II) {
     return false;
 
   auto *Magnitude = dyn_cast<BitCastInst>(II.getArgOperand(0));
-  auto *Sign = dyn_cast<BitCastInst>(II.getArgOperand(1));
-  // Integer arguments and arithmetic already occupy GPRs. Loads can feed
-  // either register bank; forcing a pair of loads through integer masks is
-  // more expensive than native copySign on machines with vector bit-select.
-  // InstCombine can fold the sign bitcast into its load before this pass.
-  bool IntegerSign = (Sign && Sign->getSrcTy()->isIntegerTy()) ||
-                     isa<LoadInst>(II.getArgOperand(1));
+  // The rewrite only pays off when both operands can stay in the GPR file:
+  // values produced by integer arithmetic (bitcasts from integers) and loads,
+  // which the backend can feed from either register bank. Values computed in
+  // floating point live in XMM, and O3 canonicalizes the integer pattern back
+  // to llvm.copysign while their sources stay FP-typed, so lowering those
+  // shapes is dead work before O3 and a pessimization for the post-O3 rerun.
+  auto IsLoadOrIntCast = [](Value *V) {
+    if (isa<LoadInst>(V))
+      return true;
+    auto *Cast = dyn_cast<BitCastInst>(V);
+    return Cast && Cast->getSrcTy()->isIntegerTy();
+  };
+  if (!IsLoadOrIntCast(II.getArgOperand(0)) ||
+      !IsLoadOrIntCast(II.getArgOperand(1)))
+    return false;
   bool IntegerInputs = Magnitude && Magnitude->getSrcTy()->isIntegerTy() &&
-                       !isa<LoadInst>(Magnitude->getOperand(0)) && IntegerSign;
+                       !isa<LoadInst>(Magnitude->getOperand(0));
   bool HasStore = false;
   bool HasIntegerUse = false;
   for (const Use &U : II.uses()) {

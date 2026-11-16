@@ -101,6 +101,65 @@ Value *getSignumInput(Value *V, AssumptionCache &AC, DominatorTree &DT) {
   return X;
 }
 
+// signum(x) is +1 exactly for x > 0, -1 exactly for x < 0, and the input
+// itself for NaN and both signed zeros, so a comparison against one of the
+// three possible results reduces to a comparison of x against zero:
+//  - against zero, every predicate maps to itself;
+//  - against 1.0, the equality/greater family becomes x > 0 and the
+//    inequality/less family becomes x <= 0, preserving orderedness;
+//  - against -1.0, symmetrically for x < 0 and x >= 0.
+// Degenerate forms (signum > 1 is never true, signum <= 1 is orderedness)
+// do not map to a comparison and are left for other passes.
+std::optional<CmpInst::Predicate>
+mapSignumComparePredicate(const APFloat &C, CmpInst::Predicate Pred) {
+  if (C.isZero())
+    return Pred;
+  bool IsOne = C.isExactlyValue(1.0);
+  bool IsMinusOne = C.isExactlyValue(-1.0);
+  if (!IsOne && !IsMinusOne)
+    return std::nullopt;
+  switch (Pred) {
+  case CmpInst::FCMP_OEQ:
+    return IsOne ? std::optional<CmpInst::Predicate>(CmpInst::FCMP_OGT)
+                 : CmpInst::FCMP_OLT;
+  case CmpInst::FCMP_UEQ:
+    return IsOne ? std::optional<CmpInst::Predicate>(CmpInst::FCMP_UGT)
+                 : CmpInst::FCMP_ULT;
+  case CmpInst::FCMP_OGE:
+    return IsOne ? std::optional<CmpInst::Predicate>(CmpInst::FCMP_OGT)
+                 : std::nullopt;
+  case CmpInst::FCMP_UGE:
+    return IsOne ? std::optional<CmpInst::Predicate>(CmpInst::FCMP_UGT)
+                 : std::nullopt;
+  case CmpInst::FCMP_OLE:
+    return IsMinusOne ? std::optional<CmpInst::Predicate>(CmpInst::FCMP_OLT)
+                      : std::nullopt;
+  case CmpInst::FCMP_ULE:
+    return IsMinusOne ? std::optional<CmpInst::Predicate>(CmpInst::FCMP_ULT)
+                      : std::nullopt;
+  case CmpInst::FCMP_ONE:
+    return IsOne ? std::optional<CmpInst::Predicate>(CmpInst::FCMP_OLE)
+                 : CmpInst::FCMP_OGE;
+  case CmpInst::FCMP_UNE:
+    return IsOne ? std::optional<CmpInst::Predicate>(CmpInst::FCMP_ULE)
+                 : CmpInst::FCMP_UGE;
+  case CmpInst::FCMP_OLT:
+    return IsOne ? std::optional<CmpInst::Predicate>(CmpInst::FCMP_OLE)
+                 : std::nullopt;
+  case CmpInst::FCMP_ULT:
+    return IsOne ? std::optional<CmpInst::Predicate>(CmpInst::FCMP_ULE)
+                 : std::nullopt;
+  case CmpInst::FCMP_OGT:
+    return IsMinusOne ? std::optional<CmpInst::Predicate>(CmpInst::FCMP_OGE)
+                      : std::nullopt;
+  case CmpInst::FCMP_UGT:
+    return IsMinusOne ? std::optional<CmpInst::Predicate>(CmpInst::FCMP_UGE)
+                      : std::nullopt;
+  default:
+    return std::nullopt;
+  }
+}
+
 Value *foldSignumCompare(FCmpInst &Cmp, AssumptionCache &AC,
                          DominatorTree &DT) {
   Value *Signum = Cmp.getOperand(0);
@@ -116,16 +175,11 @@ Value *foldSignumCompare(FCmpInst &Cmp, AssumptionCache &AC,
   Value *X = getSignumInput(Signum, AC, DT);
   if (!X)
     return nullptr;
-  if (C->isZero() && (Pred == CmpInst::FCMP_OGT || Pred == CmpInst::FCMP_OLT)) {
-    // The same ordered predicate excludes NaN and both signed zeros.
-  } else if (Pred == CmpInst::FCMP_OEQ && C->isExactlyValue(1.0)) {
-    Pred = CmpInst::FCMP_OGT;
-  } else if (Pred == CmpInst::FCMP_OEQ && C->isExactlyValue(-1.0)) {
-    Pred = CmpInst::FCMP_OLT;
-  } else {
+  std::optional<CmpInst::Predicate> Mapped =
+      mapSignumComparePredicate(C->getValueAPF(), Pred);
+  if (!Mapped)
     return nullptr;
-  }
-  return IRBuilder<>(&Cmp).CreateFCmp(Pred, X,
+  return IRBuilder<>(&Cmp).CreateFCmp(*Mapped, X,
                                       ConstantFP::get(X->getType(), 0.0));
 }
 

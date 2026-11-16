@@ -19,9 +19,9 @@ define double @two_ones(double noundef %x) {
 
 define double @two_halves(double noundef %x) {
 ; CHECK-LABEL: define double @two_halves(
-; CHECK: fcmp ogt double %x, 0.000000e+00
+; CHECK: fcmp {{o|u}}{{ge|lt}} double %x, 0.000000e+00
 ; CHECK-NOT: @StubRoutines_dpow
-; CHECK: call double @llvm.sqrt.f64(double %x)
+; CHECK: call double @llvm.sqrt.f64(double {{.*}})
 ; CHECK-NOT: @StubRoutines_dpow
 ; CHECK-NOT: fcmp
 ; CHECK-NOT: @llvm.sqrt
@@ -38,8 +38,8 @@ define double @two_halves(double noundef %x) {
 
 define double @branch_halves(double noundef %x, i1 %choose) {
 ; CHECK-LABEL: define double @branch_halves(
-; CHECK: fcmp ogt double %x, 0.000000e+00
-; CHECK: call double @llvm.sqrt.f64(double %x)
+; CHECK: fcmp {{o|u}}{{ge|lt}} double %x, 0.000000e+00
+; CHECK: call double @llvm.sqrt.f64(double {{.*}})
 ; CHECK-NOT: fcmp
 ; CHECK-NOT: @llvm.sqrt
 ; CHECK: call double @StubRoutines_dpow(double %x, double 5.000000e-01) #[[SLOW]]

@@ -50,12 +50,148 @@ define i1 @is_minus_one_32(float noundef %x) {
 
 define i1 @unordered_32(float noundef %x) {
 ; CHECK-LABEL: @unordered_32(
-; CHECK: copysign
-; CHECK: fcmp ugt
+; CHECK-NOT: copysign
+; CHECK: fcmp ugt float %x, 0.000000e+00
   %z = fcmp ueq float %x, 0.0
   %c = call float @llvm.copysign.f32(float 1.0, float %x)
   %s = select i1 %z, float %x, float %c
   %r = fcmp ugt float %s, 0.0
+  ret i1 %r
+}
+
+define i1 @is_zero_32(float noundef %x) {
+; CHECK-LABEL: @is_zero_32(
+; CHECK-NOT: copysign
+; CHECK: fcmp oeq float %x, 0.000000e+00
+  %z = fcmp ueq float %x, 0.0
+  %c = call float @llvm.copysign.f32(float 1.0, float %x)
+  %s = select i1 %z, float %x, float %c
+  %r = fcmp oeq float %s, 0.0
+  ret i1 %r
+}
+
+define i1 @not_zero_32(float noundef %x) {
+; CHECK-LABEL: @not_zero_32(
+; CHECK-NOT: copysign
+; CHECK: fcmp one float %x, 0.000000e+00
+  %z = fcmp ueq float %x, 0.0
+  %c = call float @llvm.copysign.f32(float 1.0, float %x)
+  %s = select i1 %z, float %x, float %c
+  %r = fcmp one float %s, 0.0
+  ret i1 %r
+}
+
+define i1 @ge_one_32(float noundef %x) {
+; CHECK-LABEL: @ge_one_32(
+; CHECK-NOT: copysign
+; CHECK: fcmp ogt float %x, 0.000000e+00
+  %z = fcmp ueq float %x, 0.0
+  %c = call float @llvm.copysign.f32(float 1.0, float %x)
+  %s = select i1 %z, float %x, float %c
+  %r = fcmp oge float %s, 1.0
+  ret i1 %r
+}
+
+define i1 @lt_one_32(float noundef %x) {
+; CHECK-LABEL: @lt_one_32(
+; CHECK-NOT: copysign
+; CHECK: fcmp ole float %x, 0.000000e+00
+  %z = fcmp ueq float %x, 0.0
+  %c = call float @llvm.copysign.f32(float 1.0, float %x)
+  %s = select i1 %z, float %x, float %c
+  %r = fcmp olt float %s, 1.0
+  ret i1 %r
+}
+
+define i1 @ne_one_unordered_64(double noundef %x) {
+; CHECK-LABEL: @ne_one_unordered_64(
+; CHECK-NOT: copysign
+; CHECK: fcmp ule double %x, 0.000000e+00
+  %z = fcmp ueq double %x, 0.0
+  %c = call double @llvm.copysign.f64(double 1.0, double %x)
+  %s = select i1 %z, double %x, double %c
+  %r = fcmp une double %s, 1.0
+  ret i1 %r
+}
+
+define i1 @gt_minus_one_64(double noundef %x) {
+; CHECK-LABEL: @gt_minus_one_64(
+; CHECK-NOT: copysign
+; CHECK: fcmp oge double %x, 0.000000e+00
+  %z = fcmp ueq double %x, 0.0
+  %c = call double @llvm.copysign.f64(double 1.0, double %x)
+  %s = select i1 %z, double %x, double %c
+  %r = fcmp ogt double %s, -1.0
+  ret i1 %r
+}
+
+; Non-degenerate targets outside {-1, 0, +1} are not folded.
+define i1 @vs_half_32(float noundef %x) {
+; CHECK-LABEL: @vs_half_32(
+; CHECK: copysign
+; CHECK: fcmp oeq float {{.*}}, 5.000000e-01
+  %z = fcmp ueq float %x, 0.0
+  %c = call float @llvm.copysign.f32(float 1.0, float %x)
+  %s = select i1 %z, float %x, float %c
+  %r = fcmp oeq float %s, 0.5
+  ret i1 %r
+}
+
+; Degenerate comparisons against -1 never fold to a zero comparison:
+; signum >= -1 holds for every non-NaN input and signum < -1 for none.
+define i1 @ge_minus_one_64(double noundef %x) {
+; CHECK-LABEL: @ge_minus_one_64(
+; CHECK: copysign
+; CHECK: fcmp oge double {{.*}}, -1.000000e+00
+  %z = fcmp ueq double %x, 0.0
+  %c = call double @llvm.copysign.f64(double 1.0, double %x)
+  %s = select i1 %z, double %x, double %c
+  %r = fcmp oge double %s, -1.0
+  ret i1 %r
+}
+
+define i1 @lt_minus_one_64(double noundef %x) {
+; CHECK-LABEL: @lt_minus_one_64(
+; CHECK: copysign
+; CHECK: fcmp olt double {{.*}}, -1.000000e+00
+  %z = fcmp ueq double %x, 0.0
+  %c = call double @llvm.copysign.f64(double 1.0, double %x)
+  %s = select i1 %z, double %x, double %c
+  %r = fcmp olt double %s, -1.0
+  ret i1 %r
+}
+
+define i1 @ult_minus_one_64(double noundef %x) {
+; CHECK-LABEL: @ult_minus_one_64(
+; CHECK: copysign
+; CHECK: fcmp ult double {{.*}}, -1.000000e+00
+  %z = fcmp ueq double %x, 0.0
+  %c = call double @llvm.copysign.f64(double 1.0, double %x)
+  %s = select i1 %z, double %x, double %c
+  %r = fcmp ult double %s, -1.0
+  ret i1 %r
+}
+
+define i1 @eq_minus_one_32(float noundef %x) {
+; CHECK-LABEL: @eq_minus_one_32(
+; CHECK-NOT: copysign
+; CHECK: fcmp olt float %x, 0.000000e+00
+  %z = fcmp ueq float %x, 0.0
+  %c = call float @llvm.copysign.f32(float 1.0, float %x)
+  %s = select i1 %z, float %x, float %c
+  %r = fcmp oeq float %s, -1.0
+  ret i1 %r
+}
+
+; Degenerate ranges (signum > 1 is never true) are left for later passes.
+define i1 @gt_two_32(float noundef %x) {
+; CHECK-LABEL: @gt_two_32(
+; CHECK: copysign
+; CHECK: fcmp ogt float {{.*}}, 2.000000e+00
+  %z = fcmp ueq float %x, 0.0
+  %c = call float @llvm.copysign.f32(float 1.0, float %x)
+  %s = select i1 %z, float %x, float %c
+  %r = fcmp ogt float %s, 2.0
   ret i1 %r
 }
 
@@ -132,8 +268,8 @@ define i1 @is_minus_one_64(double noundef %x) {
 
 define i1 @unordered_64(double noundef %x) {
 ; CHECK-LABEL: @unordered_64(
-; CHECK: copysign
-; CHECK: fcmp ugt
+; CHECK-NOT: copysign
+; CHECK: fcmp ugt double %x, 0.000000e+00
   %z = fcmp ueq double %x, 0.0
   %c = call double @llvm.copysign.f64(double 1.0, double %x)
   %s = select i1 %z, double %x, double %c

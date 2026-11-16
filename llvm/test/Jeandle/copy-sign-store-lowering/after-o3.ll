@@ -1,5 +1,11 @@
 ; RUN: opt -passes='function(copy-sign-store-lowering),default<O3>' -mtriple=x86_64-unknown-linux-gnu -verify-each -S < %s | FileCheck %s
 ; RUN: opt -passes='default<O3>' -mtriple=x86_64-unknown-linux-gnu -verify-each -S < %s | FileCheck %s --check-prefix=CONTROL
+; RUN: opt -passes='function(copy-sign-store-lowering),default<O3>,function(copy-sign-store-lowering)' -mtriple=x86_64-unknown-linux-gnu -verify-each -S < %s | FileCheck %s --check-prefix=SECOND
+; The pipeline runs the pass a second time after O3: a copySign hidden behind
+; a select at the first run becomes store-fed once O3 folds the select.
+; FP-computed operands are canonicalized back to the intrinsic by O3 and the
+; rerun leaves them there.
+; RUN: opt -passes='function(copy-sign-store-lowering),default<O3>,function(copy-sign-store-lowering)' -mtriple=x86_64-unknown-linux-gnu -verify-each -S < %s | FileCheck %s --check-prefix=SECOND
 
 declare float @llvm.copysign.f32(float, float)
 declare double @llvm.copysign.f64(double, double)
@@ -126,6 +132,35 @@ define i64 @raw_reduce(double %m, double %s, i64 %acc) {
   %bits = bitcast double %r to i64
   %sum = add i64 %acc, %bits
   ret i64 %sum
+}
+
+; The pipeline runs the pass a second time after O3: a copySign hidden
+; behind a select at the first run becomes store-fed once O3 folds the
+; select. FP-computed operands are canonicalized back to the intrinsic by
+; O3 and the rerun leaves them there.
+define void @late_exposed_store(ptr %mp, ptr %sp, ptr %p, i1 %c) {
+; SECOND-LABEL: @late_exposed_store(
+; SECOND: and i32 {{.*}}, 2147483647
+; SECOND: and i32 {{.*}}, -2147483648
+; SECOND: store {{(float|i32)}} {{.*}}, ptr %p
+; SECOND-NOT: copysign
+entry:
+  %m = load float, ptr %mp, align 4
+  %s = load float, ptr %sp, align 4
+  %r = call float @llvm.copysign.f32(float %m, float %s)
+  %sel = select i1 %c, float %r, float %r
+  store float %sel, ptr %p, align 4
+  ret void
+}
+
+define void @fp_params_stay_intrinsic(float %m, float %s, ptr %p) {
+; SECOND-LABEL: @fp_params_stay_intrinsic(
+; SECOND: call float @llvm.copysign.f32(float %m, float %s)
+; SECOND-NEXT: store float {{.*}}, ptr %p
+; SECOND-NOT: and i32 {{.*}}, 2147483647
+  %r = call float @llvm.copysign.f32(float %m, float %s)
+  store float %r, ptr %p, align 4
+  ret void
 }
 
 !java-method-compilation = !{!0}

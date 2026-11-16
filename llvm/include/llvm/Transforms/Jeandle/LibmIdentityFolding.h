@@ -17,7 +17,8 @@
 //   dpow(x, 2.0)   -> x * x
 //   dpow(x, +-0.0) -> 1.0
 //   dpow(x, 1.0)   -> x for non-NaN bases, original runtime otherwise
-//   dpow(x, 0.5)   -> sqrt(x) for positive bases, original runtime otherwise
+//   dpow(x, 0.5)   -> sqrt(|x|) for non-negative bases (both signed zeros
+//                     included, pow(+-0, 0.5) = +0), original runtime otherwise
 //
 // The unguarded identities are bit-exact against both runtime entries on every
 // input, NaN payloads and signaling-NaN quieting included: the fdlibm port

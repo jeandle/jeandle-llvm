@@ -150,6 +150,38 @@ PreservedAnalyses BitShuffleFoldingPass::run(Function &F,
   AssumptionCache &AC = FAM.getResult<AssumptionAnalysis>(F);
   DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
   bool Changed = false;
+
+  // popcount(compress(x, m)) == popcount(x & m): the extracted bits are
+  // exactly the masked bits. Rewrite the popcount input before the worklist
+  // runs so a now-dead single-use compress is collected with its operands.
+  // popcount(expand(x, m)) has no such form -- it counts the low
+  // popcount(m) bits of x, not the masked bits -- and stays untouched.
+  SmallVector<std::pair<IntrinsicInst *, IntrinsicInst *>, 4> Popcounts;
+  for (Instruction &I : instructions(F)) {
+    auto *Cnt = dyn_cast<IntrinsicInst>(&I);
+    if (!Cnt || Cnt->getIntrinsicID() != Intrinsic::ctpop ||
+        Cnt->isMustTailCall() || Cnt->hasOperandBundles())
+      continue;
+    auto *Pext = dyn_cast<IntrinsicInst>(Cnt->getArgOperand(0));
+    if (!Pext || !isBitShuffle(*Pext) ||
+        (Pext->getIntrinsicID() != Intrinsic::x86_bmi_pext_32 &&
+         Pext->getIntrinsicID() != Intrinsic::x86_bmi_pext_64))
+      continue;
+    Popcounts.push_back({Cnt, Pext});
+  }
+  for (auto [Cnt, Pext] : Popcounts) {
+    IRBuilder<> Builder(Cnt);
+    Cnt->setArgOperand(
+        0, Builder.CreateAnd(Pext->getArgOperand(0), Pext->getArgOperand(1),
+                             "compress.masked"));
+    RecursivelyDeleteTriviallyDeadInstructions(Pext, nullptr, nullptr,
+                                               [&](Value *Dead) {
+                                                 Worklist.remove(
+                                                     cast<Instruction>(Dead));
+                                               });
+    Changed = true;
+  }
+
   while (!Worklist.isEmpty()) {
     auto *II = dyn_cast_or_null<IntrinsicInst>(Worklist.removeOne());
     if (!II || !isBitShuffle(*II))

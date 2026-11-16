@@ -26,10 +26,11 @@ define double @one(double noundef %x) {
 
 define double @half(double noundef %x) {
 ; CHECK-LABEL: define double @half(
-; CHECK: %[[POS:.*]] = fcmp ogt double %x, 0.000000e+00
+; CHECK: %[[POS:.*]] = fcmp oge double %x, 0.000000e+00
 ; CHECK: br i1 %[[POS]], label %[[FAST:.*]], label %[[SLOW:.*]]
 ; CHECK: [[FAST]]:
-; CHECK: %[[SQRT:.*]] = call double @llvm.sqrt.f64(double %x)
+; CHECK: %[[ABS:.*]] = call double @llvm.fabs.f64(double %x)
+; CHECK: %[[SQRT:.*]] = call double @llvm.sqrt.f64(double %[[ABS]])
 ; CHECK: br label %[[MERGE:.*]]
 ; CHECK: [[SLOW]]:
 ; CHECK: %[[CALL:.*]] = call double @StubRoutines_dpow(double %x, double 5.000000e-01) #{{[0-9]+}}
@@ -44,8 +45,9 @@ define double @half(double noundef %x) {
 
 define double @shared_half(double noundef %x) {
 ; CHECK-LABEL: define double @shared_half(
-; CHECK: fcmp ogt double %x, 0.000000e+00
-; CHECK: call double @llvm.sqrt.f64(double %x)
+; CHECK: fcmp oge double %x, 0.000000e+00
+; CHECK: call double @llvm.fabs.f64(double %x)
+; CHECK: call double @llvm.sqrt.f64(double %[[ABS:.*]])
 ; CHECK: call double inttoptr (i64 4321 to ptr)(double %x, double 5.000000e-01) #{{[0-9]+}}
 ; CHECK: phi double
   %r = call double inttoptr (i64 4321 to ptr)(double %x, double 0.5)
@@ -65,8 +67,9 @@ define double @unstable_base(double %x) {
 define double @poison_base() {
 ; CHECK-LABEL: define double @poison_base(
 ; CHECK: %[[STABLE:.*]] = freeze double poison
-; CHECK: fcmp ogt double %[[STABLE]], 0.000000e+00
-; CHECK: call double @llvm.sqrt.f64(double %[[STABLE]])
+; CHECK: fcmp oge double %[[STABLE]], 0.000000e+00
+; CHECK: call double @llvm.fabs.f64(double %[[STABLE]])
+; CHECK: call double @llvm.sqrt.f64
 ; CHECK: call double @StubRoutines_dpow(double %[[STABLE]], double 5.000000e-01)
   %r = call double @StubRoutines_dpow(double poison, double 0.5)
   ret double %r
@@ -111,7 +114,7 @@ define double @nested(double noundef %x) {
 ; CHECK: fcmp ord
 ; CHECK: call double @StubRoutines_dpow(double %x, double 1.000000e+00) #{{[0-9]+}}
 ; CHECK: phi double
-; CHECK: fcmp ogt
+; CHECK: fcmp oge
 ; CHECK: call double @llvm.sqrt.f64
 ; CHECK: call double @StubRoutines_dpow(double {{.*}}, double 5.000000e-01) #{{[0-9]+}}
 ; CHECK: phi double

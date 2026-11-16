@@ -6,7 +6,7 @@ declare void @llvm.experimental.deoptimize.isVoid(...)
 declare void @safepoint()
 declare void @observe(double)
 
-define void @store_and_deopt_f64(double %m, double %s, ptr %p, i1 %failed) {
+define void @store_and_deopt_f64(ptr %mp, ptr %sp, ptr %p, i1 %failed) {
 ; CHECK-LABEL: @store_and_deopt_f64(
 ; CHECK: %[[BITS:.*]] = or i64
 ; CHECK-NEXT: %[[VALUE:.*]] = bitcast i64 %[[BITS]] to double
@@ -17,6 +17,8 @@ define void @store_and_deopt_f64(double %m, double %s, ptr %p, i1 %failed) {
 ; CHECK: store:
 ; CHECK-NEXT: store atomic double %[[VALUE]], ptr %p unordered, align 8
 ; CHECK-NEXT: ret void
+  %m = load double, ptr %mp, align 8
+  %s = load double, ptr %sp, align 8
   %r = call double @llvm.copysign.f64(double %m, double %s)
   br i1 %failed, label %deopt, label %store
 deopt:
@@ -27,13 +29,15 @@ store:
   ret void
 }
 
-define void @store_and_deopt_f32(float %m, float %s, ptr %p) {
+define void @store_and_deopt_f32(ptr %mp, ptr %sp, ptr %p) {
 ; CHECK-LABEL: @store_and_deopt_f32(
 ; CHECK: %[[BITS:.*]] = or i32
 ; CHECK-NEXT: %[[VALUE:.*]] = bitcast i32 %[[BITS]] to float
 ; CHECK-NEXT: call void @safepoint() [ "deopt"(float %[[VALUE]], float %[[VALUE]]) ]
 ; CHECK-NEXT: store volatile float %[[VALUE]], ptr %p, align 4
 ; CHECK-NEXT: ret void
+  %m = load float, ptr %mp, align 4
+  %s = load float, ptr %sp, align 4
   %r = call float @llvm.copysign.f32(float %m, float %s)
   call void @safepoint() [ "deopt"(float %r, float %r) ]
   store volatile float %r, ptr %p, align 4

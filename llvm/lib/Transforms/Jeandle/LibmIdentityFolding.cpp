@@ -11,8 +11,9 @@
 // Specializes selected Jeandle libm calls without changing the runtime's
 // numerical contract. Unary identities use only exact zeros/ones. For pow,
 // exponent zero returns one and exponent two uses the runtime's entry multiply.
-// Exponent one retains NaN handling, and exponent one half uses sqrt only for
-// positive bases. Constant signed-zero bases return positive zero. A reciprocal
+// Exponent one retains NaN handling, and exponent one half uses sqrt(|x|) for
+// non-negative bases (both signed zeros included). Constant signed-zero bases
+// return positive zero. A reciprocal
 // is exact for SharedRuntime_dpow, whose fdlibm entry shortcuts to division for
 // non-NaN bases, but not for the x86 stub.
 //
@@ -29,6 +30,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/Metadata.h"
+#include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
@@ -83,6 +85,22 @@ void collectLibmCallees(Module &M, CalleeMap &Callees) {
   }
 }
 
+// Selector matching the LibmEntry values in VMCallback.h: kind index times
+// two plus the SharedRuntime bit.
+int libmEntrySelector(LibmCallee Callee) {
+  int KindIndex;
+  switch (Callee.Kind) {
+  case LibmKind::Sin:   KindIndex = 0; break;
+  case LibmKind::Cos:   KindIndex = 1; break;
+  case LibmKind::Tan:   KindIndex = 2; break;
+  case LibmKind::Log:   KindIndex = 3; break;
+  case LibmKind::Log10: KindIndex = 4; break;
+  case LibmKind::Exp:   KindIndex = 5; break;
+  case LibmKind::Pow:   KindIndex = 6; break;
+  }
+  return KindIndex * 2 + (Callee.IsShared ? 1 : 0);
+}
+
 Constant *foldUnaryCall(const CallInst &Call, LibmKind Kind) {
   auto *Arg = dyn_cast<ConstantFP>(Call.getArgOperand(0));
   if (!Arg)
@@ -119,11 +137,15 @@ void specializeGuardedCall(CallInst &Call, PowSpecialization Kind) {
   // paths, so the guard cannot introduce UB or disagree with its result.
   if (!isGuaranteedNotToBeUndefOrPoison(Base))
     Base = Builder.CreateFreeze(Base, "pow.base");
+  // The half fast path admits both signed zeros: pow(+-0, 0.5) is +0.0 and
+  // sqrt(|-0.0|) is +0.0, so evaluating sqrt on the absolute value keeps the
+  // zeros on the fast path while NaN and negative bases stay on the runtime
+  // call (oge is unordered-false, so NaN takes the slow path).
   Value *Safe =
       Kind != PowSpecialization::Half
           ? Builder.CreateFCmpORD(Base, Base, "pow.non_nan")
-          : Builder.CreateFCmpOGT(Base, ConstantFP::get(Base->getType(), 0.0),
-                                  "pow.positive");
+          : Builder.CreateFCmpOGE(Base, ConstantFP::get(Base->getType(), 0.0),
+                                  "pow.nonneg");
   Instruction *FastTerm, *SlowTerm;
   SplitBlockAndInsertIfThenElse(Safe, &Call, &FastTerm, &SlowTerm);
   FastTerm->getParent()->setName("pow.fast");
@@ -142,7 +164,9 @@ void specializeGuardedCall(CallInst &Call, PowSpecialization Kind) {
         ConstantFP::get(Base->getType(), 1.0), Base, "pow.reciprocal");
   else if (Kind == PowSpecialization::Half)
     FastResult = IRBuilder<>(FastTerm).CreateUnaryIntrinsic(
-        Intrinsic::sqrt, Base, nullptr, "pow.sqrt");
+        Intrinsic::sqrt,
+        IRBuilder<>(FastTerm).CreateUnaryIntrinsic(Intrinsic::fabs, Base),
+        nullptr, "pow.sqrt");
 
   PHINode *Result =
       PHINode::Create(Call.getType(), 2, "pow.result", Call.getIterator());
@@ -174,6 +198,13 @@ PreservedAnalyses LibmIdentityFolding::run(Function &F,
       if (!Call->isMustTailCall() && !Call->hasOperandBundles())
         Calls.push_back(Call);
 
+  // Constant arguments can additionally be evaluated on the selected runtime
+  // entry itself through the VM callback, making the folded value bit
+  // identical to interpreted execution by construction. Without a callback
+  // (standalone opt without a callback log) only the exact identities below
+  // apply.
+  const jeandle::VMCallbacks *CB = jeandle::getVMCallbacks();
+
   bool Changed = false;
   bool ChangedCFG = false;
   for (CallInst *Call : Calls) {
@@ -183,6 +214,33 @@ PreservedAnalyses LibmIdentityFolding::run(Function &F,
       continue;
     LibmCallee Callee = It->second;
     Value *Replacement = nullptr;
+    // Fully constant arguments fold to the value the VM reports for the very
+    // runtime entry this call targets, which is bit-identical to interpreted
+    // execution by construction and strictly better than any guarded
+    // specialization. Without the callback (standalone opt without a
+    // callback log) the exact identities below still apply.
+    if (CB && CB->EvaluateLibm) {
+      auto *Base = dyn_cast<ConstantFP>(Call->getArgOperand(0));
+      bool IsPow = Callee.Kind == LibmKind::Pow;
+      if (Base && (!IsPow || isa<ConstantFP>(Call->getArgOperand(1)))) {
+        int64_t ExponentBits = 0;
+        if (IsPow)
+          ExponentBits = cast<ConstantFP>(Call->getArgOperand(1))
+                             ->getValueAPF()
+                             .bitcastToAPInt()
+                             .getSExtValue();
+        int64_t ResultBits = CB->EvaluateLibm(
+            libmEntrySelector(Callee),
+            Base->getValueAPF().bitcastToAPInt().getSExtValue(), ExponentBits);
+        Call->replaceAllUsesWith(ConstantFP::get(
+            Call->getContext(),
+            APFloat(Base->getValueAPF().getSemantics(),
+                    APInt(64, static_cast<uint64_t>(ResultBits)))));
+        Call->eraseFromParent();
+        Changed = true;
+        continue;
+      }
+    }
     if (Callee.Kind != LibmKind::Pow) {
       Replacement = foldUnaryCall(*Call, Callee.Kind);
     } else {
@@ -213,6 +271,8 @@ PreservedAnalyses LibmIdentityFolding::run(Function &F,
         if (Kind) {
           specializeGuardedCall(*Call, *Kind);
           Changed = ChangedCFG = true;
+          // specializeGuardedCall erased the call; nothing remains to fold.
+          continue;
         }
       }
     }

@@ -401,6 +401,11 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(NumericIntrinsicFoldingPass()));
   PM.addPass(createModuleToFunctionPassAdaptor(LibmIdentityFolding()));
   PM.addPass(createModuleToFunctionPassAdaptor(BitShuffleFoldingPass()));
+  // Second CopySignStoreLowering run: O3 can expose store-fed copySign
+  // results that were hidden behind selects or merges at the first run. The
+  // GPR-resident gate keeps this from fighting the O3 canonicalization of
+  // FP-computed operands back to llvm.copysign (see CopySignStoreLowering).
+  PM.addPass(createModuleToFunctionPassAdaptor(CopySignStoreLoweringPass()));
   PM.addPass(ExpandNarrowOopCast());
   PM.addPass(RewriteStatepointsForGC());
   PM.addPass(createModuleToFunctionPassAdaptor(JeandleNarrowOopMarker()));
