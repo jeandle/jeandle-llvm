@@ -125,11 +125,11 @@ define i1 @gt_minus_one_64(double noundef %x) {
   ret i1 %r
 }
 
-; Non-degenerate targets outside {-1, 0, +1} are not folded.
+; No non-NaN signum result equals one half.
 define i1 @vs_half_32(float noundef %x) {
 ; CHECK-LABEL: @vs_half_32(
-; CHECK: copysign
-; CHECK: fcmp oeq float {{.*}}, 5.000000e-01
+; CHECK-NOT: copysign
+; CHECK: ret i1 false
   %z = fcmp ueq float %x, 0.0
   %c = call float @llvm.copysign.f32(float 1.0, float %x)
   %s = select i1 %z, float %x, float %c
@@ -137,12 +137,11 @@ define i1 @vs_half_32(float noundef %x) {
   ret i1 %r
 }
 
-; Degenerate comparisons against -1 never fold to a zero comparison:
-; signum >= -1 holds for every non-NaN input and signum < -1 for none.
+; Degenerate comparisons preserve orderedness and unorderedness.
 define i1 @ge_minus_one_64(double noundef %x) {
 ; CHECK-LABEL: @ge_minus_one_64(
-; CHECK: copysign
-; CHECK: fcmp oge double {{.*}}, -1.000000e+00
+; CHECK-NOT: copysign
+; CHECK: fcmp ord double %x, 0.000000e+00
   %z = fcmp ueq double %x, 0.0
   %c = call double @llvm.copysign.f64(double 1.0, double %x)
   %s = select i1 %z, double %x, double %c
@@ -152,8 +151,8 @@ define i1 @ge_minus_one_64(double noundef %x) {
 
 define i1 @lt_minus_one_64(double noundef %x) {
 ; CHECK-LABEL: @lt_minus_one_64(
-; CHECK: copysign
-; CHECK: fcmp olt double {{.*}}, -1.000000e+00
+; CHECK-NOT: copysign
+; CHECK: ret i1 false
   %z = fcmp ueq double %x, 0.0
   %c = call double @llvm.copysign.f64(double 1.0, double %x)
   %s = select i1 %z, double %x, double %c
@@ -163,8 +162,8 @@ define i1 @lt_minus_one_64(double noundef %x) {
 
 define i1 @ult_minus_one_64(double noundef %x) {
 ; CHECK-LABEL: @ult_minus_one_64(
-; CHECK: copysign
-; CHECK: fcmp ult double {{.*}}, -1.000000e+00
+; CHECK-NOT: copysign
+; CHECK: fcmp uno double %x, 0.000000e+00
   %z = fcmp ueq double %x, 0.0
   %c = call double @llvm.copysign.f64(double 1.0, double %x)
   %s = select i1 %z, double %x, double %c
@@ -183,11 +182,11 @@ define i1 @eq_minus_one_32(float noundef %x) {
   ret i1 %r
 }
 
-; Degenerate ranges (signum > 1 is never true) are left for later passes.
+; No signum result is ordered and greater than two.
 define i1 @gt_two_32(float noundef %x) {
 ; CHECK-LABEL: @gt_two_32(
-; CHECK: copysign
-; CHECK: fcmp ogt float {{.*}}, 2.000000e+00
+; CHECK-NOT: copysign
+; CHECK: ret i1 false
   %z = fcmp ueq float %x, 0.0
   %c = call float @llvm.copysign.f32(float 1.0, float %x)
   %s = select i1 %z, float %x, float %c

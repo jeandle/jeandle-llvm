@@ -151,6 +151,43 @@ PreservedAnalyses BitShuffleFoldingPass::run(Function &F,
   DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
   bool Changed = false;
 
+  // Testing whether any selected bit is set does not require compressing
+  // those bits. Keep a shared PEXT result rather than adding another test.
+  SmallVector<WeakTrackingVH, 4> ZeroTests;
+  for (Instruction &I : instructions(F)) {
+    auto *Cmp = dyn_cast<ICmpInst>(&I);
+    if (!Cmp || !Cmp->isEquality())
+      continue;
+    Value *Input = Cmp->getOperand(0);
+    if (match(Input, m_Zero()))
+      Input = Cmp->getOperand(1);
+    else if (!match(Cmp->getOperand(1), m_Zero()))
+      continue;
+    auto *Pext = dyn_cast<IntrinsicInst>(Input);
+    if (Pext && isBitShuffle(*Pext) && Pext->hasOneUse() &&
+        (Pext->getIntrinsicID() == Intrinsic::x86_bmi_pext_32 ||
+         Pext->getIntrinsicID() == Intrinsic::x86_bmi_pext_64))
+      ZeroTests.push_back(Cmp);
+  }
+  for (WeakTrackingVH &Handle : ZeroTests) {
+    auto *Cmp = dyn_cast_or_null<ICmpInst>(Handle);
+    if (!Cmp)
+      continue;
+    auto *Pext = dyn_cast<IntrinsicInst>(Cmp->getOperand(0));
+    if (!Pext)
+      Pext = cast<IntrinsicInst>(Cmp->getOperand(1));
+    IRBuilder<> Builder(Cmp);
+    Value *Masked = Builder.CreateAnd(
+        Pext->getArgOperand(0), Pext->getArgOperand(1), "compress.masked");
+    Value *Replacement = Builder.CreateICmp(
+        Cmp->getPredicate(), Masked, ConstantInt::get(Masked->getType(), 0));
+    Cmp->replaceAllUsesWith(Replacement);
+    RecursivelyDeleteTriviallyDeadInstructions(
+        Cmp, nullptr, nullptr,
+        [&](Value *Dead) { Worklist.remove(cast<Instruction>(Dead)); });
+    Changed = true;
+  }
+
   // popcount(compress(x, m)) == popcount(x & m): the extracted bits are
   // exactly the masked bits. Rewrite the popcount input before the worklist
   // runs so a now-dead single-use compress is collected with its operands.
