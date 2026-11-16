@@ -173,6 +173,9 @@ VMConstants VMConstants::fromModule(const Module &M) {
   if (auto V = readGlobalInt(M, "AccessFlags.jvm_acc_is_hidden_class"))
     C.JvmAccIsHiddenClass = *V;
 
+  if (auto V = readGlobalInt(M, "AccessFlags.jvm_acc_written_flags"))
+    C.JvmAccWrittenFlags = *V;
+
   return C;
 }
 

@@ -498,8 +498,13 @@ enum class ClassQueryKind {
 };
 
 std::optional<ClassQueryKind> classQueryKind(CallInst *CI) {
-  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
-  if (!Callee || CI->arg_size() != 1)
+  Function *Callee = CI->getCalledFunction();
+  if (!Callee || CI->getFunctionType() != Callee->getFunctionType() ||
+      CI->getCallingConv() != Callee->getCallingConv() ||
+      CI->getFunctionType()->isVarArg() || CI->hasOperandBundles() ||
+      CI->isMustTailCall() || CI->arg_size() != 1 ||
+      !isWideOopType(CI->getArgOperand(0)->getType()) ||
+      !CI->getType()->isIntegerTy(32))
     return std::nullopt;
   return StringSwitch<std::optional<ClassQueryKind>>(Callee->getName())
       .Case("jeandle.class_is_array", ClassQueryKind::IsArray)
@@ -655,6 +660,11 @@ bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
   if (!KlassConstant)
     return false;
 
+  if (auto *LI = dyn_cast<LoadInst>(CI->getArgOperand(0)))
+    if (isWideOopType(LI->getType()) && getOopHandleLoadId(LI))
+      LI->setMetadata(LLVMContext::MD_nonnull,
+                      MDNode::get(CI->getContext(), {}));
+
   if (Klass != 0)
     KnownKlasses.insert(Klass);
   CI->replaceAllUsesWith(KlassConstant);
@@ -666,16 +676,24 @@ bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
 // propagation has proved the target Klass constant.
 bool specializeConstantClassCheck(CallInst *CI,
                                   const jeandle::VMCallbacks &CB) {
-  if (!CB.GetSuperCheckOffset || CI->arg_size() != 2 ||
+  Function *Callee = CI->getCalledFunction();
+  if (!Callee || Callee->getName() != "jeandle.check_instanceof" ||
+      CI->getFunctionType() != Callee->getFunctionType() ||
+      CI->getCallingConv() != Callee->getCallingConv() ||
+      CI->getFunctionType()->isVarArg() || CI->hasOperandBundles() ||
+      CI->isMustTailCall() || !CB.GetSuperCheckOffset || CI->arg_size() != 2 ||
+      CI->getArgOperand(0)->getType() !=
+          PointerType::get(CI->getContext(), 0) ||
       !CI->getType()->isIntegerTy(1))
     return false;
   uintptr_t Klass = jeandle::extractKlassConstant(CI->getArgOperand(0));
   Function *WithOffset =
       CI->getModule()->getFunction("jeandle.checkcast_nonnull_with_offset");
-  if (!Klass || !WithOffset || WithOffset->isVarArg() ||
-      WithOffset->arg_size() != 3 ||
+  if (!Klass || Klass == jeandle::MirrorKlassUnavailable || !WithOffset ||
+      WithOffset->getCallingConv() != CI->getCallingConv() ||
+      WithOffset->isVarArg() || WithOffset->arg_size() != 3 ||
       WithOffset->getReturnType() != CI->getType() ||
-      !isJavaOopType(CI->getArgOperand(1)->getType()) ||
+      !isWideOopType(CI->getArgOperand(1)->getType()) ||
       WithOffset->getFunctionType()->getParamType(0) !=
           CI->getArgOperand(0)->getType() ||
       WithOffset->getFunctionType()->getParamType(1) !=
@@ -692,7 +710,7 @@ bool specializeConstantClassCheck(CallInst *CI,
           ? dyn_cast<ConstantInt>(SecondaryOffset->getInitializer())
           : nullptr;
   int Offset = CB.GetSuperCheckOffset(Klass);
-  if (!Secondary ||
+  if (Offset < 0 || !Secondary || !Secondary->getType()->isIntegerTy(32) ||
       Secondary->getValue().getLimitedValue() == static_cast<uint32_t>(Offset))
     return false;
   IRBuilder<> Builder(CI);
@@ -703,6 +721,8 @@ bool specializeConstantClassCheck(CallInst *CI,
       {CI->getArgOperand(0), CI->getArgOperand(1), Builder.getInt32(Offset)},
       Bundles);
   Check->setCallingConv(CI->getCallingConv());
+  Check->setAttributes(CI->getAttributes());
+  Check->copyMetadata(*CI);
   Check->setDebugLoc(CI->getDebugLoc());
   CI->replaceAllUsesWith(Check);
   CI->eraseFromParent();
@@ -716,33 +736,46 @@ classQueryForConstantMirror(int OopId, ClassQueryKind Kind,
   uintptr_t Klass = CB.GetMirrorKlass(OopId);
   if (Klass == jeandle::MirrorKlassUnavailable)
     return std::nullopt;
-  if (Klass == 0) {
+  if (!Klass) {
     if (Kind == ClassQueryKind::IsPrimitive)
       return 1;
     if (Kind == ClassQueryKind::GetModifiers ||
         Kind == ClassQueryKind::GetAccessFlags)
-      // java.lang.Class reports these modifiers for primitive mirrors.
-      return static_cast<int>(VMC.jvmAccPublic() | VMC.jvmAccFinal() |
-                              VMC.jvmAccAbstract());
+      return VMC.jvmAccPublic() | VMC.jvmAccFinal() | VMC.jvmAccAbstract();
     return 0;
   }
   switch (Kind) {
   case ClassQueryKind::IsArray: {
-    int LayoutHelper = CB.GetKlassLayoutHelper(Klass);
-    if (LayoutHelper == 0)
+    if (!CB.GetKlassLayoutHelper)
       return std::nullopt;
-    return LayoutHelper < 0 ? 1 : 0;
+    int Layout = CB.GetKlassLayoutHelper(Klass);
+    return Layout ? std::optional<int>(Layout < 0) : std::nullopt;
   }
-  case ClassQueryKind::IsInterface:
-    return CB.IsInterface(Klass) ? 1 : 0;
   case ClassQueryKind::IsPrimitive:
     return 0;
+  case ClassQueryKind::GetModifiers: {
+    if (!CB.GetKlassModifierFlags)
+      return std::nullopt;
+    int Modifiers = CB.GetKlassModifierFlags(Klass);
+    return Modifiers >= 0 ? std::optional<int>(Modifiers) : std::nullopt;
+  }
+  case ClassQueryKind::IsInterface:
   case ClassQueryKind::IsHidden:
-    return CB.IsHiddenKlass(Klass) ? 1 : 0;
-  case ClassQueryKind::GetModifiers:
-    return CB.GetKlassModifierFlags(Klass);
-  case ClassQueryKind::GetAccessFlags:
-    return CB.GetKlassAccessFlags(Klass);
+  case ClassQueryKind::GetAccessFlags: {
+    if (!CB.GetKlassAccessFlags)
+      return std::nullopt;
+    uint32_t Mask = Kind == ClassQueryKind::IsInterface ? VMC.jvmAccInterface()
+                    : Kind == ClassQueryKind::IsHidden
+                        ? VMC.jvmAccIsHiddenClass()
+                        : VMC.jvmAccWrittenFlags();
+    if (Mask & ~jeandle::ClassQueryAccessFlagsMask)
+      return std::nullopt;
+    int64_t Flags = CB.GetKlassAccessFlags(Klass, Mask);
+    if (Flags < 0 || Flags > UINT32_MAX)
+      return std::nullopt;
+    Flags &= Mask;
+    return Kind == ClassQueryKind::GetAccessFlags ? Flags : Flags != 0;
+  }
   }
   llvm_unreachable("unknown Class query kind");
 }
@@ -792,6 +825,14 @@ std::optional<int> classQueryForMirror(
       }
       Result = *Next;
     }
+  } else if (auto *FI = dyn_cast<FreezeInst>(Mirror)) {
+    if (jeandle::isProvenDefined(FI->getOperand(0)))
+      Result = classQueryForMirror(FI->getOperand(0), Kind, CB, VMC, ConstOops,
+                                   Results, RemainingVisits, Depth + 1);
+  } else if (isa<BitCastInst>(Mirror) || isa<AddrSpaceCastInst>(Mirror)) {
+    Result = classQueryForMirror(cast<Instruction>(Mirror)->getOperand(0), Kind,
+                                 CB, VMC, ConstOops, Results, RemainingVisits,
+                                 Depth + 1);
   }
 
   Results[Mirror] = Result;
@@ -802,12 +843,7 @@ bool foldClassQueryCall(CallInst *CI, ClassQueryKind Kind,
                         const jeandle::VMCallbacks &CB,
                         const jeandle::VMConstants &VMC,
                         const DenseMap<Value *, int> &ConstOops) {
-  if (!CI->getType()->isIntegerTy(32) || !CB.GetMirrorKlass ||
-      (Kind == ClassQueryKind::IsArray && !CB.GetKlassLayoutHelper) ||
-      (Kind == ClassQueryKind::IsInterface && !CB.IsInterface) ||
-      (Kind == ClassQueryKind::IsHidden && !CB.IsHiddenKlass) ||
-      (Kind == ClassQueryKind::GetModifiers && !CB.GetKlassModifierFlags) ||
-      (Kind == ClassQueryKind::GetAccessFlags && !CB.GetKlassAccessFlags))
+  if (!CB.GetMirrorKlass)
     return false;
 
   DenseMap<Value *, std::optional<int>> Results;
@@ -818,6 +854,126 @@ bool foldClassQueryCall(CallInst *CI, ClassQueryKind Kind,
     return false;
 
   CI->replaceAllUsesWith(ConstantInt::get(CI->getType(), *Result));
+  CI->eraseFromParent();
+  return true;
+}
+
+enum class KlassQueryKind { Modifiers, AccessFlags, Super, Mirror };
+
+std::optional<KlassQueryKind> getKlassQueryKind(CallInst *CI) {
+  Function *Callee = CI->getCalledFunction();
+  if (!Callee || CI->getFunctionType() != Callee->getFunctionType() ||
+      CI->getCallingConv() != Callee->getCallingConv() ||
+      CI->getFunctionType()->isVarArg() || CI->hasOperandBundles() ||
+      CI->isMustTailCall())
+    return std::nullopt;
+
+  StringRef Name = Callee->getName();
+  KlassQueryKind Kind;
+  if (Name == "jeandle.klass_modifiers")
+    Kind = KlassQueryKind::Modifiers;
+  else if (Name == "jeandle.klass_access_flags")
+    Kind = KlassQueryKind::AccessFlags;
+  else if (Name == "jeandle.klass_super")
+    Kind = KlassQueryKind::Super;
+  else if (Name == "jeandle.klass_mirror")
+    Kind = KlassQueryKind::Mirror;
+  else
+    return std::nullopt;
+
+  unsigned NumArgs = Kind == KlassQueryKind::AccessFlags ? 2 : 1;
+  Type *KlassTy = PointerType::get(CI->getContext(), 0);
+  if (CI->arg_size() != NumArgs || CI->getArgOperand(0)->getType() != KlassTy)
+    return std::nullopt;
+
+  switch (Kind) {
+  case KlassQueryKind::AccessFlags:
+    if (!CI->getArgOperand(1)->getType()->isIntegerTy(32))
+      return std::nullopt;
+    [[fallthrough]];
+  case KlassQueryKind::Modifiers:
+    if (!CI->getType()->isIntegerTy(32))
+      return std::nullopt;
+    break;
+  case KlassQueryKind::Super:
+    if (CI->getType() != KlassTy)
+      return std::nullopt;
+    break;
+  case KlassQueryKind::Mirror:
+    if (!isWideOopType(CI->getType()))
+      return std::nullopt;
+    break;
+  }
+  return Kind;
+}
+
+bool foldKlassQueryCall(CallInst *CI, KlassQueryKind Kind,
+                        const jeandle::VMCallbacks &CB, LazyValueInfo &LVI,
+                        DenseSet<uintptr_t> &KnownKlasses) {
+  Value *KlassValue = CI->getArgOperand(0);
+  uintptr_t Klass = jeandle::extractKlassConstant(KlassValue);
+  if (!Klass)
+    if (Constant *C = LVI.getConstant(KlassValue, CI))
+      Klass = jeandle::extractKlassConstant(C);
+  if (!Klass || Klass == jeandle::MirrorKlassUnavailable)
+    return false;
+
+  Value *Replacement = nullptr;
+  switch (Kind) {
+  case KlassQueryKind::Modifiers: {
+    if (!CB.GetKlassModifierFlags)
+      return false;
+    int Modifiers = CB.GetKlassModifierFlags(Klass);
+    if (Modifiers < 0)
+      return false;
+    Replacement = ConstantInt::get(CI->getType(), Modifiers);
+    break;
+  }
+  case KlassQueryKind::AccessFlags: {
+    if (!CB.GetKlassAccessFlags)
+      return false;
+    auto *MaskValue = dyn_cast<ConstantInt>(CI->getArgOperand(1));
+    if (!MaskValue)
+      MaskValue = dyn_cast_or_null<ConstantInt>(
+          LVI.getConstant(CI->getArgOperand(1), CI));
+    if (!MaskValue)
+      return false;
+    uint32_t Mask = MaskValue->getZExtValue();
+    // Other access bits are transient VM state, not stable class properties.
+    if (Mask & ~jeandle::ClassQueryAccessFlagsMask)
+      return false;
+    int64_t Flags = CB.GetKlassAccessFlags(Klass, Mask);
+    if (Flags < 0 || Flags > UINT32_MAX)
+      return false;
+    Replacement = ConstantInt::get(CI->getType(), Flags & Mask);
+    break;
+  }
+  case KlassQueryKind::Super: {
+    if (!CB.GetSuperKlass)
+      return false;
+    uintptr_t Super = CB.GetSuperKlass(Klass);
+    if (Super == jeandle::MirrorKlassUnavailable)
+      return false;
+    if (Super)
+      KnownKlasses.insert(Super);
+    Replacement =
+        Super ? klassPointerConstant(CI->getContext(), CI->getType(), Super)
+              : ConstantPointerNull::get(cast<PointerType>(CI->getType()));
+    break;
+  }
+  case KlassQueryKind::Mirror: {
+    if (!CB.GetJavaMirror || !CB.GetOopHandleName)
+      return false;
+    int MirrorId = CB.GetJavaMirror(Klass);
+    if (MirrorId < 0)
+      return false;
+    IRBuilder<> Builder(CI);
+    Replacement = createConstOopLoad(*CI->getModule(), Builder, MirrorId);
+    break;
+  }
+  }
+
+  CI->replaceAllUsesWith(Replacement);
   CI->eraseFromParent();
   return true;
 }
@@ -1121,7 +1277,6 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
 
   // The runtime-defined flag globals keep a constant initializer for the
   // whole compilation, so read them back once instead of per folding round.
-  const jeandle::VMConstants VMC = jeandle::VMConstants::fromModule(*M);
 
   const DataLayout &DL = M->getDataLayout();
   const jeandle::VMConstants VMConsts = jeandle::VMConstants::fromModule(*M);
@@ -1157,6 +1312,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     SmallVector<CallInst *, 16> ClassInstanceChecks;
     SmallVector<CallInst *, 16> LoadMirrorKlassCalls;
     SmallVector<std::pair<CallInst *, ClassQueryKind>, 16> ClassQueryCalls;
+    SmallVector<std::pair<CallInst *, KlassQueryKind>, 16> KlassQueryCalls;
     SmallVector<CallInst *, 16> GetClassCalls;
     SmallVector<CallInst *, 16> LayoutHelperCalls;
     SmallVector<CallInst *, 16> KlassInitializedCalls;
@@ -1180,6 +1336,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
             LoadMirrorKlassCalls.push_back(CI);
           if (auto Kind = classQueryKind(CI))
             ClassQueryCalls.emplace_back(CI, *Kind);
+          if (auto Kind = getKlassQueryKind(CI))
+            KlassQueryCalls.emplace_back(CI, *Kind);
           if (isGetClassCall(CI))
             GetClassCalls.push_back(CI);
           if (isLayoutHelperCall(CI))
@@ -1252,7 +1410,14 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (auto [CI, Kind] : ClassQueryCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldClassQueryCall(CI, Kind, *CB, VMC, ConstOops)) {
+      if (foldClassQueryCall(CI, Kind, *CB, VMConsts, ConstOops)) {
+        RoundChanged = true;
+        Changed = true;
+      }
+    }
+
+    for (auto [CI, Kind] : KlassQueryCalls) {
+      if (foldKlassQueryCall(CI, Kind, *CB, LVI, KnownKlasses)) {
         RoundChanged = true;
         Changed = true;
       }

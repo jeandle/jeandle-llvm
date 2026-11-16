@@ -1,0 +1,5 @@
+IsOkToInline -1 4 101 = true
+RecordInlineResult -1 4 101 0 = true
+RecordInliningComplete = true
+GetCallerClass 0 = 0
+GetOopHandleName 0 = "oop_handle_zero"

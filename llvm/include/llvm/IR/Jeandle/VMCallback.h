@@ -92,6 +92,9 @@ using CloneInstanceInfoResult =
 /// known-null Klass field of a primitive Class mirror.
 inline constexpr uintptr_t MirrorKlassUnavailable = ~uintptr_t{0};
 
+/// Class-file access flags and the immutable hidden-class bit.
+inline constexpr uint32_t ClassQueryAccessFlagsMask = 0x04007fff;
+
 /// Result reported for an inline attempt after LLVM starts processing it.
 /// Keep the numeric values stable because the JVM records them.
 enum class JeandleInlineReason : int {
@@ -254,12 +257,15 @@ enum class JeandleInlineReason : int {
   def(GetKlassModifierFlags, int, Int,                                           \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
-  def(GetKlassAccessFlags, int, Int,                                             \
+  def(GetKlassAccessFlags, int64_t, Long,                                        \
+      (uintptr_t a1, int a2), (a1, a2),                                         \
+      (VMCallbackValueType::Uintptr, VMCallbackValueType::Int), 2)               \
+  def(GetSuperKlass, uintptr_t, Uintptr,                                         \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
-  def(IsHiddenKlass, bool, Bool,                                                 \
-      (uintptr_t a1), (a1),                                                      \
-      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetCallerClass, int, Int,                                                 \
+      (int a1), (a1),                                                            \
+      (VMCallbackValueType::Int), 1)                                             \
   def(GetKlassConstantField, ConstantFieldResult, Tuple,                          \
       (uintptr_t a1, int a2, int a3), (a1, a2, a3),                              \
       (VMCallbackValueType::Uintptr, VMCallbackValueType::Int,                    \
@@ -462,9 +468,17 @@ enum class JeandleInlineReason : int {
 ///                         layout helper).
 ///   GetSuperCheckOffset — Return the immutable subtype-check offset for a
 ///                         known, non-null recorded Klass.
-///   GetKlassModifierFlags / GetKlassAccessFlags / IsHiddenKlass
-///                       — Return immutable Klass properties for Class queries.
-///                         Only call these for a known, non-null Klass.
+///   GetKlassModifierFlags
+///                       — Returns immutable Java modifier flags for a known,
+///                         non-null Klass.
+///   GetKlassAccessFlags — Returns the requested immutable access flag bits,
+///                         or -1 if the Klass or mask is unavailable. The mask
+///                         must be a subset of ClassQueryAccessFlagsMask.
+///   GetSuperKlass       — Returns the recorded superclass Klass, 0 for a root
+///                         Klass, or MirrorKlassUnavailable if unavailable.
+///   GetCallerClass      — Returns the caller mirror oop id for a committed
+///                         inline scope, or -1 when the stack query must
+///                         remain.
 ///   GetKlassConstantField
 ///                       — Returns (HotSpot BasicType, raw value) for a
 ///                         VM-approved immutable field of a known Klass.

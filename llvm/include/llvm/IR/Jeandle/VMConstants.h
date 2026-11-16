@@ -125,6 +125,7 @@ struct VMConstants {
   int64_t JvmAccAbstract = 0x0400;
   int64_t JvmAccInterface = 0x0200;
   int64_t JvmAccIsHiddenClass = 0x04000000;
+  int64_t JvmAccWrittenFlags = 0x7fff;
 
   // Convenience accessors.
   int64_t arrayLengthOffset() const { return ArrayLengthOffset; }
@@ -143,6 +144,7 @@ struct VMConstants {
   int64_t jvmAccAbstract() const { return JvmAccAbstract; }
   int64_t jvmAccInterface() const { return JvmAccInterface; }
   int64_t jvmAccIsHiddenClass() const { return JvmAccIsHiddenClass; }
+  int64_t jvmAccWrittenFlags() const { return JvmAccWrittenFlags; }
   bool reduceBulkZeroing() const { return ReduceBulkZeroing; }
   bool reduceInitialCardMarks() const { return ReduceInitialCardMarks; }
 
