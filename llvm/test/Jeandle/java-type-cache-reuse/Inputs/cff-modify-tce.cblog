@@ -1,0 +1,5 @@
+GetKlassConstant 123 = 777
+IsSubtype 123 123 = true
+IsObjectKlass 123 = false
+IsInterface 123 = false
+GetSecondarySupers 123 = []

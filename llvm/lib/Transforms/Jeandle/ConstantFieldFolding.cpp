@@ -15,6 +15,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/Jeandle/JavaTypeAnalysis.h"
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/SimplifyQuery.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -428,7 +429,7 @@ bool isGetClassCall(CallInst *CI) {
 bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
                       const DenseMap<Value *, int> &ConstOops,
                       DominatorTree &DT, const DataLayout &DL,
-                      jeandle::IsNullEdgeOracle IsNullEdge) {
+                      jeandle::JavaTypeAnalysisResult &JavaTypes) {
   if (!isGetClassCall(CI) || !isJavaOopType(CI->getType()) || !CB.GetJavaMirror)
     return false;
 
@@ -448,8 +449,7 @@ bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
     if (!isKnownNonZero(Receiver, SQ))
       return false;
 
-    jeandle::JavaType ReceiverType =
-        jeandle::getJavaType(Receiver, &DT, CI, IsNullEdge);
+    jeandle::JavaType ReceiverType = JavaTypes.getJavaType(Receiver, CI);
     if (!ReceiverType.isKnown() || !ReceiverType.Exact)
       return false;
     MirrorOopId = CB.GetJavaMirror(ReceiverType.Klass);
@@ -462,6 +462,8 @@ bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
     return false;
   IRBuilder<> Builder(CI);
   LoadInst *Mirror = createConstOopLoad(*M, Builder, MirrorOopId);
+  // Notify while the old use graph is intact: the fold deletes the call.
+  JavaTypes.invalidate(*CI);
   CI->replaceAllUsesWith(Mirror);
   CI->eraseFromParent();
   return true;
@@ -470,7 +472,7 @@ bool foldGetClassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
 bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
                        const DenseMap<Value *, int> &ConstOops,
                        DominatorTree &DT, const DataLayout &DL,
-                       jeandle::IsNullEdgeOracle IsNullEdge) {
+                       jeandle::JavaTypeAnalysisResult &JavaTypes) {
   if (!isLoadKlassCall(CI))
     return false;
 
@@ -486,8 +488,7 @@ bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
     SimplifyQuery SQ(DL, &DT, nullptr, CI);
     if (!isKnownNonZero(Receiver, SQ))
       return false;
-    jeandle::JavaType ReceiverType =
-        jeandle::getJavaType(Receiver, &DT, CI, IsNullEdge);
+    jeandle::JavaType ReceiverType = JavaTypes.getJavaType(Receiver, CI);
     if (!ReceiverType.isKnown() || !ReceiverType.Exact)
       return false;
     if (!CB.GetKlassConstant)
@@ -499,13 +500,16 @@ bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
   if (!KlassConstant)
     return false;
 
+  // Notify while the old use graph is intact: the fold deletes the call.
+  JavaTypes.invalidate(*CI);
   CI->replaceAllUsesWith(KlassConstant);
   CI->eraseFromParent();
   return true;
 }
 
 bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
-                             const DenseMap<Value *, int> &ConstOops) {
+                             const DenseMap<Value *, int> &ConstOops,
+                             jeandle::JavaTypeAnalysisResult &JavaTypes) {
   if (!isLoadMirrorKlassCall(CI) || !CI->getType()->isPointerTy() ||
       !CB.GetMirrorKlass)
     return false;
@@ -527,12 +531,15 @@ bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
   if (!KlassConstant)
     return false;
 
+  // Notify while the old use graph is intact: the fold deletes the call.
+  JavaTypes.invalidate(*CI);
   CI->replaceAllUsesWith(KlassConstant);
   CI->eraseFromParent();
   return true;
 }
 
-bool foldLayoutHelperCall(CallInst *CI, const jeandle::VMCallbacks &CB) {
+bool foldLayoutHelperCall(CallInst *CI, const jeandle::VMCallbacks &CB,
+                          jeandle::JavaTypeAnalysisResult &JavaTypes) {
   if (!isLayoutHelperCall(CI) || !CI->getType()->isIntegerTy(32) ||
       !CB.GetKlassLayoutHelper)
     return false;
@@ -545,12 +552,15 @@ bool foldLayoutHelperCall(CallInst *CI, const jeandle::VMCallbacks &CB) {
   if (LayoutHelper == 0)
     return false;
 
+  // Notify while the old use graph is intact: the fold deletes the call.
+  JavaTypes.invalidate(*CI);
   CI->replaceAllUsesWith(ConstantInt::get(CI->getType(), LayoutHelper));
   CI->eraseFromParent();
   return true;
 }
 
-bool foldKlassInitializedCall(CallInst *CI, const jeandle::VMCallbacks &CB) {
+bool foldKlassInitializedCall(CallInst *CI, const jeandle::VMCallbacks &CB,
+                              jeandle::JavaTypeAnalysisResult &JavaTypes) {
   if (!isKlassInitializedCall(CI) || !CI->getType()->isIntegerTy(1) ||
       !CB.IsKlassInitialized)
     return false;
@@ -566,6 +576,8 @@ bool foldKlassInitializedCall(CallInst *CI, const jeandle::VMCallbacks &CB) {
   if (!CB.IsKlassInitialized(Klass))
     return false;
 
+  // Notify while the old use graph is intact: the fold deletes the call.
+  JavaTypes.invalidate(*CI);
   CI->replaceAllUsesWith(ConstantInt::getTrue(CI->getContext()));
   CI->eraseFromParent();
   return true;
@@ -576,7 +588,8 @@ bool isSubIntBasicType(int BasicType) {
          BasicType == T_SHORT;
 }
 
-bool replaceSubIntLoad(LoadInst *LI, int BasicType, int Value) {
+bool replaceSubIntLoad(LoadInst *LI, int BasicType, int Value,
+                       jeandle::JavaTypeAnalysisResult &JavaTypes) {
   if (!isSubIntBasicType(BasicType))
     return false;
 
@@ -602,6 +615,9 @@ bool replaceSubIntLoad(LoadInst *LI, int BasicType, int Value) {
               ? isa<ZExtInst>(Ext)
               : isa<SExtInst>(Ext)) {
         auto *C = ConstantInt::get(Ext->getType(), Value);
+        // Notify the load before the fold erases it and its cast user. The
+        // cache traverses the old use graph, so Ext is covered by LI.
+        JavaTypes.invalidate(*LI);
         Ext->replaceAllUsesWith(C);
         Ext->eraseFromParent();
         if (LI->use_empty())
@@ -613,13 +629,16 @@ bool replaceSubIntLoad(LoadInst *LI, int BasicType, int Value) {
 
   bool IsSigned = (BasicType == T_BYTE || BasicType == T_SHORT);
   auto *C = ConstantInt::get(IntTy, Value, IsSigned);
+  // Notify the load before the fold erases it.
+  JavaTypes.invalidate(*LI);
   LI->replaceAllUsesWith(C);
   LI->eraseFromParent();
   return true;
 }
 
 bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
-                   const FieldLoadMatch &Match) {
+                   const FieldLoadMatch &Match,
+                   jeandle::JavaTypeAnalysisResult &JavaTypes) {
   LoadInst *LI = Match.Load;
   int OopId = Match.OopId;
   int Offset = Match.Offset;
@@ -630,17 +649,25 @@ bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
 
   IRBuilder<> Builder(LI);
 
+  // A fold replaces LI (and possibly its decode casts) with a constant, so the
+  // cache must be notified while those values and their users still exist.
+  // Every successful branch notifies here or in replaceSubIntLoad() before
+  // replacing or erasing those values.
+  auto notifyChanged = [&]() { JavaTypes.invalidate(*LI); };
+
   switch (BasicType) {
   case T_BOOLEAN:
   case T_BYTE:
   case T_CHAR:
   case T_SHORT:
-    return replaceSubIntLoad(LI, BasicType, static_cast<int>(RawValue));
+    return replaceSubIntLoad(LI, BasicType, static_cast<int>(RawValue),
+                             JavaTypes);
 
   case T_INT: {
     if (!LI->getType()->isIntegerTy(32))
       return false;
     auto *C = ConstantInt::get(LI->getType(), static_cast<int>(RawValue));
+    notifyChanged();
     LI->replaceAllUsesWith(C);
     LI->eraseFromParent();
     return true;
@@ -650,6 +677,7 @@ bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
     if (!LI->getType()->isIntegerTy(64))
       return false;
     auto *C = ConstantInt::get(LI->getType(), RawValue);
+    notifyChanged();
     LI->replaceAllUsesWith(C);
     LI->eraseFromParent();
     return true;
@@ -661,6 +689,7 @@ bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
     uint32_t RawBits = static_cast<uint32_t>(RawValue);
     auto *C = ConstantFP::get(
         LI->getType(), APFloat(APFloat::IEEEsingle(), APInt(32, RawBits)));
+    notifyChanged();
     LI->replaceAllUsesWith(C);
     LI->eraseFromParent();
     return true;
@@ -672,6 +701,7 @@ bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
     uint64_t RawBits = static_cast<uint64_t>(RawValue);
     auto *C = ConstantFP::get(
         LI->getType(), APFloat(APFloat::IEEEdouble(), APInt(64, RawBits)));
+    notifyChanged();
     LI->replaceAllUsesWith(C);
     LI->eraseFromParent();
     return true;
@@ -695,6 +725,7 @@ bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
         NewValue = createConstOopLoad(M, Builder, NewOopId);
         ++NumOopChains;
       }
+      notifyChanged();
       LI->replaceAllUsesWith(NewValue);
       LI->eraseFromParent();
       return true;
@@ -712,6 +743,11 @@ bool foldFieldLoad(Module &M, const jeandle::VMCallbacks &CB,
     // would lower a surviving cast into a jeandle.encode/decode_heap_oop call.
     Type *WideTy =
         PointerType::get(M.getContext(), jeandle::AddrSpace::JavaHeapAddrSpace);
+
+    // Notify while LI and its old use graph are intact. This also covers a
+    // use-empty load: CFF still erases it, and a Java type query could have
+    // populated its base key before this pass ran.
+    notifyChanged();
 
     SmallVector<AddrSpaceCastInst *, 4> DecodeCasts;
     for (User *U : LI->users())
@@ -772,6 +808,12 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
   const DataLayout &DL = M->getDataLayout();
   const jeandle::VMConstants VMConsts = jeandle::VMConstants::fromModule(*M);
 
+  // Share Java type results across folding rounds, notifying the cache while
+  // each replaced value and its old users are still live. A changed run does
+  // not preserve JavaTypeAnalysis, so FAM discards it when this pass returns.
+  jeandle::JavaTypeAnalysisResult &JavaTypes =
+      FAM.getResult<jeandle::JavaTypeAnalysis>(F);
+
   constexpr unsigned MaxRounds = 64;
   unsigned Round = 0;
   bool Changed = false;
@@ -786,15 +828,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     DenseMap<Value *, int> ConstOops = computeConstOops(F);
     ReversePostOrderTraversal<Function *> RPOT(&F);
     DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
-    // getResult returns the same cached LVI across rounds within this run;
-    // that is safe because CFF only erases non-terminator instructions and
-    // never splits blocks (LVI's ValueHandles purge erased values, block
-    // state stays valid). Freshness across runs comes from RepeatedConstant
-    // Folding's cleanup passes invalidating LVI between wrapper iterations.
-    // Any fold that touches terminators or blocks would need to drop the
-    // oracle first.
     LazyValueInfo &LVI = FAM.getResult<LazyValueAnalysis>(F);
-    LVINullEdgeOracle IsNullEdge{LVI};
 
     SmallVector<CallInst *, 16> ArrayLengthCalls;
     SmallVector<CallInst *, 16> StringGetCharCalls;
@@ -848,7 +882,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : LoadKlassCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldLoadKlassCall(CI, *CB, ConstOops, DT, DL, IsNullEdge)) {
+      if (foldLoadKlassCall(CI, *CB, ConstOops, DT, DL, JavaTypes)) {
         ++NumKlassesFolded;
         RoundChanged = true;
         Changed = true;
@@ -858,7 +892,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : LoadMirrorKlassCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldLoadMirrorKlassCall(CI, *CB, ConstOops)) {
+      if (foldLoadMirrorKlassCall(CI, *CB, ConstOops, JavaTypes)) {
         ++NumMirrorKlassesFolded;
         RoundChanged = true;
         Changed = true;
@@ -868,7 +902,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : GetClassCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldGetClassCall(CI, *CB, ConstOops, DT, DL, IsNullEdge)) {
+      if (foldGetClassCall(CI, *CB, ConstOops, DT, DL, JavaTypes)) {
         ++NumGetClassesFolded;
         RoundChanged = true;
         Changed = true;
@@ -878,7 +912,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : LayoutHelperCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldLayoutHelperCall(CI, *CB)) {
+      if (foldLayoutHelperCall(CI, *CB, JavaTypes)) {
         ++NumKlassLayoutHelpersFolded;
         RoundChanged = true;
         Changed = true;
@@ -888,7 +922,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : KlassInitializedCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldKlassInitializedCall(CI, *CB)) {
+      if (foldKlassInitializedCall(CI, *CB, JavaTypes)) {
         ++NumKlassInitializedFolded;
         RoundChanged = true;
         Changed = true;
@@ -905,12 +939,16 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
 
       LLVM_DEBUG(dbgs() << "CFF: candidate " << *LI << " oop=" << Match->OopId
                         << " offset=" << Match->Offset << "\n");
-      if (foldFieldLoad(*M, *CB, *Match)) {
+      if (foldFieldLoad(*M, *CB, *Match, JavaTypes)) {
         ++NumFieldsFolded;
         RoundChanged = true;
         Changed = true;
-        if (Match->GEP && Match->GEP->use_empty())
+        if (Match->GEP && Match->GEP->use_empty()) {
+          // The address is dead but may still be a cached base key; notify
+          // before erasing it so a recycled Value cannot hit a stale entry.
+          JavaTypes.invalidate(*Match->GEP);
           Match->GEP->eraseFromParent();
+        }
       }
     }
   } while (RoundChanged);

@@ -1,0 +1,12 @@
+ArrayElementKlass 5 = 0
+GetFieldType 5 16 = 7
+IsUnverifiedInterface 7 = false
+IsEffectivelyFinal 7 = false
+IsObjectKlass 5 = false
+IsInterface 5 = false
+GetSecondarySupers 5 = []
+IsObjectKlass 7 = false
+IsInterface 7 = false
+GetSecondarySupers 7 = []
+GetCHAOptInfo 100 200 300 7 false 0 -1 = (600, 700, 50, "Optimized_target")
+UpdateCallSite 42 2 false 700 = true
