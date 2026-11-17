@@ -13,8 +13,9 @@
 
 namespace llvm::jeandle {
 
-void optimize(Module &M, OptimizationLevel Level, PipelineMode Mode) {
-  Pipeline P(Level, M.getContext(), Mode);
+void optimize(Module &M, TargetMachine *TM, OptimizationLevel Level,
+              PipelineMode Mode) {
+  Pipeline P(Level, M.getContext(), TM, Mode);
   P.run(M);
 }
 

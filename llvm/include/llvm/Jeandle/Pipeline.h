@@ -17,6 +17,10 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
 
+namespace llvm {
+class TargetMachine;
+}
+
 namespace llvm::jeandle {
 
 // Selects which kind of compilation the pipeline is built for.
@@ -27,7 +31,7 @@ enum class PipelineMode {
 
 class Pipeline {
 public:
-  Pipeline(OptimizationLevel Level, LLVMContext &Ctx,
+  Pipeline(OptimizationLevel Level, LLVMContext &Ctx, TargetMachine *TM,
            PipelineMode Mode = PipelineMode::MethodCompilation);
 
   LLVM_ABI static ModulePassManager
