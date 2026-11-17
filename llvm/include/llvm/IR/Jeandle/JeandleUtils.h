@@ -196,6 +196,60 @@ inline bool isJavaOopType(Type *Ty) {
   return isWideOopType(Ty) || isNarrowOopType(Ty);
 }
 
+enum class JavaTypeCheckKind { NonNullObject, ExactKlass, KlassSubtype };
+
+/// Recognize the complete signature of a boolean Java type-check helper.
+/// The preloaded-offset variants have the same semantics as their two-argument
+/// counterparts and additionally require an i32 offset.
+inline std::optional<JavaTypeCheckKind>
+getJavaTypeCheckKind(const Function *F) {
+  if (!F)
+    return std::nullopt;
+
+  StringRef Name = F->getName();
+  bool WithOffset = Name == "jeandle.checkcast_nonnull_with_offset" ||
+                    Name == "jeandle.check_klass_subtype_with_offset";
+  JavaTypeCheckKind Kind;
+  if (Name == "jeandle.check_instanceof" ||
+      Name == "jeandle.checkcast_nonnull_with_offset")
+    Kind = JavaTypeCheckKind::NonNullObject;
+  else if (Name == "jeandle.check_exact_klass")
+    Kind = JavaTypeCheckKind::ExactKlass;
+  else if (Name == "jeandle.check_klass_subtype" ||
+           Name == "jeandle.check_klass_subtype_with_offset")
+    Kind = JavaTypeCheckKind::KlassSubtype;
+  else
+    return std::nullopt;
+
+  FunctionType *Ty = F->getFunctionType();
+  if (Ty->isVarArg() || !Ty->getReturnType()->isIntegerTy(1) ||
+      Ty->getNumParams() != (WithOffset ? 3u : 2u))
+    return std::nullopt;
+  Type *KlassTy = PointerType::get(F->getContext(), AddrSpace::CHeapAddrSpace);
+  Type *ObjectTy =
+      PointerType::get(F->getContext(), AddrSpace::JavaHeapAddrSpace);
+  if (Ty->getParamType(0) != KlassTy ||
+      Ty->getParamType(1) !=
+          (Kind == JavaTypeCheckKind::NonNullObject ? ObjectTy : KlassTy) ||
+      (WithOffset && !Ty->getParamType(2)->isIntegerTy(32)))
+    return std::nullopt;
+  return Kind;
+}
+
+/// Match only calls that obey the helper declaration's ABI. Unsupported call
+/// forms cannot establish type facts or have their observable effects removed.
+inline std::optional<JavaTypeCheckKind>
+getJavaTypeCheckKind(const CallBase *CB) {
+  const Function *Callee = CB ? CB->getCalledFunction() : nullptr;
+  auto Kind = getJavaTypeCheckKind(Callee);
+  if (!Kind || CB->getFunctionType() != Callee->getFunctionType() ||
+      CB->arg_size() != Callee->arg_size() ||
+      CB->getCallingConv() != Callee->getCallingConv() ||
+      CB->isMustTailCall() || CB->hasOperandBundles())
+    return std::nullopt;
+  return Kind;
+}
+
 /// Constant oop handle naming convention.
 ///
 /// The frontend (and ConstantFieldFolding) represent a compile-time-known

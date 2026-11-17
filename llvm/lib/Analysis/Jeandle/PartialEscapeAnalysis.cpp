@@ -6995,17 +6995,10 @@ bool Analyzer::foldCheckInstanceOf(CallBase *CB) {
   // Phase-0 lowering expands checkcast and instanceof into null checks and
   // this phase-1 subtype query. Virtual receivers are non-null and have an
   // exact allocation klass.
-  LLVMContext &Ctx = F.getContext();
-  Type *KlassTy = PointerType::get(Ctx, 0);
   bool WithOffset = CB->getCalledFunction()->getName() ==
                     "jeandle.checkcast_nonnull_with_offset";
-  SmallVector<Type *, 3> Params{KlassTy, PointerType::get(Ctx, 1)};
-  if (WithOffset)
-    Params.push_back(Type::getInt32Ty(Ctx));
-  FunctionType *CheckTy =
-      FunctionType::get(Type::getInt1Ty(Ctx), Params, false);
-  if (CB->getFunctionType() != CheckTy)
-    return false;
+  assert(jeandle::pea::isJeandleCheckInstanceOf(CB) &&
+         "expected a valid non-null object type check");
   auto BaseID = jeandle::pea::resolveVirtualRef(CB->getArgOperand(1),
                                                 CurrentState, Aliases, DL);
   if (!BaseID)
@@ -7032,9 +7025,8 @@ bool Analyzer::foldCheckInstanceOf(CallBase *CB) {
       return false;
     Function *Subtype =
         F.getParent()->getFunction("jeandle.check_klass_subtype");
-    FunctionType *SubtypeTy =
-        FunctionType::get(Type::getInt1Ty(Ctx), {KlassTy, KlassTy}, false);
-    if (!Subtype || Subtype->getFunctionType() != SubtypeTy ||
+    if (jeandle::getJavaTypeCheckKind(Subtype) !=
+            jeandle::JavaTypeCheckKind::KlassSubtype ||
         Subtype->getCallingConv() != CB->getCallingConv() ||
         !Subtype->doesNotThrow() ||
         !Subtype->hasFnAttribute("gc-leaf-function"))

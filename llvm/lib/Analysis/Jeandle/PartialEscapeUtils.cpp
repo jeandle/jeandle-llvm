@@ -29,6 +29,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/JavaType.h"
+#include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/Type.h"
@@ -115,8 +116,7 @@ bool isJeandleGetClass(const CallBase *CB) {
 }
 
 bool isJeandleCheckInstanceOf(const CallBase *CB) {
-  return isJeandleCallNamed(CB, "jeandle.check_instanceof") ||
-         isJeandleCallNamed(CB, "jeandle.checkcast_nonnull_with_offset");
+  return getJavaTypeCheckKind(CB) == JavaTypeCheckKind::NonNullObject;
 }
 
 bool isJeandleCheckIfValueBased(const CallBase *CB) {

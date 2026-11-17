@@ -166,23 +166,11 @@ bool jeandle::areKlassesIncompatible(uintptr_t Klass, bool KlassExact,
          !CB->IsUnverifiedInterface(OtherKlass);
 }
 
-/// Recognize non-null subtype checks, including the preloaded-offset form.
-static bool isCheckInstanceofFn(const Function *F) {
-  return F && (F->getName() == "jeandle.check_instanceof" ||
-               F->getName() == "jeandle.checkcast_nonnull_with_offset");
-}
-
 /// If CB is a call/invoke to a non-null subtype check, return the super klass
-/// and obj. The name match alone is not an identity: legal IR may declare a
-/// same-named function with a different signature, so the operand accesses
-/// are guarded by an arity check.
+/// and obj. Same-named functions with a different ABI are not type checks.
 static bool isCheckInstanceofCall(const CallBase *CB, uintptr_t &Klass,
                                   Value *&Obj) {
-  if (!isCheckInstanceofFn(CB->getCalledFunction()) ||
-      CB->arg_size() != (CB->getCalledFunction()->getName() ==
-                                 "jeandle.checkcast_nonnull_with_offset"
-                             ? 3u
-                             : 2u))
+  if (getJavaTypeCheckKind(CB) != JavaTypeCheckKind::NonNullObject)
     return false;
   Klass = extractKlassConstant(CB->getArgOperand(0));
   Obj = CB->getArgOperand(1);
@@ -529,13 +517,9 @@ getDefinednessInputs(Value *V, SmallVectorImpl<Value *> &Inputs) {
     // The Jeandle check helpers return a concrete boolean for every contract-
     // valid input (their templates compute it from memory reads and
     // comparisons), so their results are defined without a noundef attribute.
-    // This is the same name-based helper contract the tracing relies on.
-    if (const Function *Callee = CB->getCalledFunction())
-      if (Callee->getName() == "jeandle.check_instanceof" ||
-          Callee->getName() == "jeandle.checkcast_nonnull_with_offset" ||
-          Callee->getName() == "jeandle.check_exact_klass" ||
-          Callee->getName() == "jeandle.check_klass_subtype")
-        return true;
+    // Apply the same ABI validation as condition tracing.
+    if (getJavaTypeCheckKind(CB))
+      return true;
     return CB->hasRetAttr(llvm::Attribute::NoUndef) ||
            CB->hasRetAttr(llvm::Attribute::Dereferenceable) ||
            CB->hasRetAttr(llvm::Attribute::DereferenceableOrNull);
@@ -1186,18 +1170,8 @@ static uintptr_t traceExactKlassGuard(Value *Cond, Value *QueryObj,
     Right = Cmp->getOperand(1);
   } else {
     auto *CB = dyn_cast<CallBase>(Cond);
-    Function *Callee = CB ? CB->getCalledFunction() : nullptr;
-    if (!Callee || Callee->getName() != "jeandle.check_exact_klass" ||
-        CB->arg_size() != 2 ||
-        CB->getFunctionType() != Callee->getFunctionType() ||
-        Callee->isVarArg() ||
-        CB->getCallingConv() != Callee->getCallingConv() ||
-        Callee->getCallingConv() != CallingConv::Hotspot_JIT ||
-        !CB->getType()->isIntegerTy(1) || CB->hasOperandBundles() ||
-        CB->getArgOperand(0)->getType() !=
-            PointerType::get(CB->getContext(), 0) ||
-        CB->getArgOperand(1)->getType() !=
-            PointerType::get(CB->getContext(), 0))
+    if (getJavaTypeCheckKind(CB) != JavaTypeCheckKind::ExactKlass ||
+        CB->getCallingConv() != CallingConv::Hotspot_JIT)
       return 0;
     EqualWhenTrue = true;
     Left = CB->getArgOperand(0);

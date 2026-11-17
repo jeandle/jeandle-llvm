@@ -22,6 +22,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/JavaType.h"
+#include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/IR/Module.h"
@@ -88,28 +89,12 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
   SmallVector<CallInst *, 16> SubtypeChecks;
   for (auto &I : instructions(F)) {
     auto *Check = dyn_cast<CallInst>(&I);
-    if (!Check || Check->isMustTailCall() || Check->hasOperandBundles())
+    if (!Check)
       continue;
-    Function *Callee = Check->getCalledFunction();
-    if (!Callee || Check->getFunctionType() != Callee->getFunctionType() ||
-        Callee->isVarArg() ||
-        Check->getCallingConv() != Callee->getCallingConv() ||
-        !Check->getType()->isIntegerTy(1))
-      continue;
-    bool WithOffset = Callee == OffsetCheckFn || Callee == OffsetSubtypeFn;
-    bool Subtype = Callee == SubtypeFn || Callee == OffsetSubtypeFn;
-    if (Check->arg_size() != (WithOffset ? 3u : 2u) ||
-        Check->getArgOperand(0)->getType() !=
-            PointerType::get(F.getContext(), 0) ||
-        Check->getArgOperand(1)->getType() !=
-            PointerType::get(F.getContext(), Subtype ? 0 : 1) ||
-        (WithOffset && !Check->getArgOperand(2)->getType()->isIntegerTy(32)))
-      continue;
-    if ((CheckFn && Check->getCalledFunction() == CheckFn) ||
-        (OffsetCheckFn && Check->getCalledFunction() == OffsetCheckFn))
+    auto Kind = jeandle::getJavaTypeCheckKind(Check);
+    if (Kind == jeandle::JavaTypeCheckKind::NonNullObject)
       Checks.push_back(Check);
-    if ((SubtypeFn && Check->getCalledFunction() == SubtypeFn) ||
-        (OffsetSubtypeFn && Check->getCalledFunction() == OffsetSubtypeFn))
+    if (Kind == jeandle::JavaTypeCheckKind::KlassSubtype)
       SubtypeChecks.push_back(Check);
   }
 
