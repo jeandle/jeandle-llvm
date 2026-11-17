@@ -1092,6 +1092,11 @@ private:
   // FreshRetry path); distinct from the invalid-deopt sites in that the
   // current attempt is abandoned immediately once this is non-empty.
   SmallVector<CallBase *, 4> RetryVirtualizationAllocationSites;
+  // Hash folds can consume scalar aliases from other virtual objects. If
+  // eligibility is revoked, rebuild the attempt rather than retain arithmetic
+  // whose producing field PHI or replacement effect may be discarded. This
+  // flag deliberately overapproximates folds rewound by a loop retry.
+  bool HasFoldedVectorizedHashCode = false;
   bool hasPendingRetry() const {
     return !RetryVirtualizationAllocationSites.empty() ||
            !InvalidCFGProofKillers.empty();
@@ -8043,7 +8048,7 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
 
 // Fold a bounded, in-range virtual array hash without materializing its
 // receiver. Cheap hashes combine constant segments into affine updates;
-// expensive hashes use independent polynomials to bound serial dependency.
+// expensive hashes use independent weighted vectors and a balanced reduction.
 // Non-positive counts replace the call with the initial value alone, exactly
 // like the kernel's pre-dispatch exit.
 bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
@@ -8070,6 +8075,7 @@ bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
   // needs no layout match, in-range proof, or constant from index.
   if (Length && *Length <= 0) {
     emitReplaceCall(CB, Initial, *ID);
+    HasFoldedVectorizedHashCode = true;
     return true;
   }
   auto From = N(1);
@@ -8263,37 +8269,113 @@ bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
   if (ScalarCost <= HashCodeScalarChainCostLimit) {
     H = FoldChain(Initial, 0, 1, 31);
   } else {
-    // Each lane hashes every fourth cell with 31^4. The last index of a
-    // lane determines its remaining 31^k weight (k is in [0, 3]). Reduce
-    // the weighted lanes as a tree, then add initial*31^length. All math
-    // wraps in i32; no signed or unsigned no-overflow flags are valid.
+    // The bounded, constant length makes every coefficient known. Independent
+    // vector products and a balanced sum avoid a loop-carried multiply chain.
+    // Plain vector IR also exposes constant lanes to the regular optimizers.
+    // All math wraps in i32; no no-overflow flags are valid.
     constexpr unsigned Lanes = 4;
-    assert(Cells.size() >= Lanes && "parallel hash needs four populated lanes");
-    constexpr uint32_t LaneMultiplier = 31 * 31 * 31 * 31;
-    Value *Parts[Lanes];
-    for (unsigned Lane = 0; Lane < Lanes; ++Lane) {
-      Value *Part =
-          FoldChain(ConstantInt::get(I32, 0), Lane, Lanes, LaneMultiplier);
-      unsigned Tail = (Cells.size() - 1 - Lane) % Lanes;
-      uint32_t Weight = 1;
-      for (unsigned I = 0; I < Tail; ++I)
-        Weight *= 31;
-      Parts[Lane] = Binary(Instruction::Mul, Part,
-                           ConstantInt::get(I32, Weight), "vhc.weight");
-    }
-    Value *Left = Binary(Instruction::Add, Parts[0], Parts[1], "vhc.sum");
-    Value *Right = Binary(Instruction::Add, Parts[2], Parts[3], "vhc.sum");
+    auto *VecTy = FixedVectorType::get(I32, Lanes);
+    SmallVector<Constant *, HashCodeMaxFoldLength> Weights(Cells.size());
     uint32_t InitialWeight = 1;
-    for (unsigned I = 0; I < Cells.size(); ++I)
+    for (unsigned I = Cells.size(); I != 0; --I) {
+      Weights[I - 1] = ConstantInt::get(I32, InitialWeight);
       InitialWeight *= 31;
+    }
+    SmallVector<Value *, HashCodeMaxFoldLength / Lanes> Parts;
+    for (unsigned Start = 0; Start < Cells.size(); Start += Lanes) {
+      // Preserve narrow cells through packing so their extension can operate
+      // on the whole vector. UTF16 packed reads and byte-pair reconstruction
+      // may have different widths within a group; widen those cells first.
+      unsigned End = std::min<unsigned>(Start + Lanes, Cells.size());
+      Type *PackElementTy = Cells[Start]->getType();
+      for (unsigned I = Start + 1; I < End; ++I) {
+        if (Cells[I]->getType() != PackElementTy) {
+          PackElementTy = I32;
+          break;
+        }
+      }
+      // Unsigned cells truncated from i32 can be masked after packing their
+      // sources, avoiding scalar masks and a narrow-vector extension.
+      Type *CellTy = PackElementTy;
+      bool MaskPackedSources = !Signed && PackElementTy != I32;
+      for (unsigned I = Start; MaskPackedSources && I < End; ++I) {
+        if (isa<ConstantInt>(Cells[I]))
+          continue;
+        auto *Trunc = dyn_cast<TruncInst>(Cells[I]);
+        MaskPackedSources = Trunc && Trunc->getSrcTy() == I32;
+      }
+      if (MaskPackedSources)
+        PackElementTy = I32;
+      auto *PackTy = FixedVectorType::get(PackElementTy, Lanes);
+      Value *Pack = Constant::getNullValue(PackTy);
+      SmallVector<Constant *, Lanes> Coefficients(Lanes,
+                                                  ConstantInt::get(I32, 0));
+      for (unsigned Lane = 0; Lane < Lanes && Start + Lane < Cells.size();
+           ++Lane) {
+        Value *Cell = Cells[Start + Lane];
+        if (MaskPackedSources && isa<TruncInst>(Cell))
+          Cell = cast<TruncInst>(Cell)->getOperand(0);
+        else if (PackElementTy == I32)
+          Cell = Widen(Cell);
+        auto *Index = ConstantInt::get(I32, Lane);
+        if (auto *PC = dyn_cast<Constant>(Pack)) {
+          if (auto *CC = dyn_cast<Constant>(Cell)) {
+            Pack = ConstantExpr::getInsertElement(PC, CC, Index);
+          } else {
+            Pack =
+                Place(InsertElementInst::Create(Pack, Cell, Index, "vhc.pack"));
+          }
+        } else {
+          Pack =
+              Place(InsertElementInst::Create(Pack, Cell, Index, "vhc.pack"));
+        }
+        Coefficients[Lane] = Weights[Start + Lane];
+      }
+      if (MaskPackedSources) {
+        auto *Mask = ConstantVector::getSplat(
+            ElementCount::getFixed(Lanes),
+            ConstantInt::get(
+                I32, APInt::getLowBitsSet(32, CellTy->getIntegerBitWidth())));
+        Pack = Binary(Instruction::And, Pack, Mask, "vhc.mask");
+      }
+      if (PackTy != VecTy) {
+        auto Opcode = Signed ? Instruction::SExt : Instruction::ZExt;
+        if (auto *C = dyn_cast<Constant>(Pack))
+          Pack = ConstantFoldCastOperand(Opcode, C, VecTy, DL);
+        else
+          Pack = Place(CastInst::Create(Opcode, Pack, VecTy, "vhc.widen"));
+      }
+      Parts.push_back(Binary(Instruction::Mul, Pack,
+                             ConstantVector::get(Coefficients), "vhc.weight"));
+    }
+    while (Parts.size() > 1) {
+      unsigned End = Parts.size();
+      unsigned Out = 0;
+      for (unsigned I = 0; I + 1 < End; I += 2)
+        Parts[Out++] =
+            Binary(Instruction::Add, Parts[I], Parts[I + 1], "vhc.sum");
+      if (End & 1)
+        Parts[Out++] = Parts[End - 1];
+      Parts.resize(Out);
+    }
+    auto Shuffle = [&](Value *V, ArrayRef<int> Mask) {
+      return Place(new ShuffleVectorInst(V, PoisonValue::get(VecTy), Mask,
+                                         "vhc.shuffle"));
+    };
+    Value *Sum = Parts.front();
+    Sum = Binary(Instruction::Add, Sum, Shuffle(Sum, {2, 3, -1, -1}),
+                 "vhc.reduce");
+    Sum = Binary(Instruction::Add, Sum, Shuffle(Sum, {1, -1, -1, -1}),
+                 "vhc.reduce");
+    Value *Reduced = Place(ExtractElementInst::Create(
+        Sum, ConstantInt::get(I32, 0), "vhc.reduced"));
     Value *Seed = Binary(Instruction::Mul, Initial,
                          ConstantInt::get(I32, InitialWeight), "vhc.seed");
-    H = Binary(Instruction::Add,
-               Binary(Instruction::Add, Left, Right, "vhc.sum"), Seed,
-               "vhc.add");
+    H = Binary(Instruction::Add, Reduced, Seed, "vhc.add");
   }
   observeFieldDefinitions(*ID, FieldDefinitions);
   emitReplaceCall(CB, H, *ID);
+  HasFoldedVectorizedHashCode = true;
   return true;
 }
 
@@ -11304,6 +11386,15 @@ void Analyzer::commit() {
     bool IsEligible = (EIt != Eligible.end()) && EIt->second;
     if (!IsEligible)
       IneligibleIDs.insert(ID);
+  }
+  if (HasFoldedVectorizedHashCode && !IneligibleIDs.empty()) {
+    // A hash can use another fold as its seed or as a stored cell. Rebuilding
+    // from the original IR restores the whole scalar-alias dependency graph;
+    // dropping only the receiver's arithmetic effects would be insufficient.
+    for (jeandle::ObjectID ID : IneligibleIDs)
+      collectRetryVirtualizationSites(ID);
+    if (hasPendingRetry())
+      return;
   }
   dropEffectsForIneligible(IneligibleIDs);
 

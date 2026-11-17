@@ -1,7 +1,8 @@
 ; RUN: opt -S -passes='require<partial-escape-analysis>,partial-escape-transform' -jeandle-pea-max-array-length=256 -jeandle-vm-callback-log=%S/Inputs/layout.cblog -verify-each %s | FileCheck %s --implicit-check-not='{{call|invoke}}{{.*}}@jeandle.new_array' --implicit-check-not='{{call|invoke}}{{.*}}@jeandle.vectorized_hashcode'
 ;
 ; Independent dynamic cells must stay virtual past the scalar-chain budget.
-; Four interleaved polynomials bound the longest chain to 32 steps at length128.
+; Independent weighted vector groups and a balanced reduction avoid long
+; multiply recurrences, including partial groups at lengths 22 and 33.
 target datalayout = "e-p:64:64-p1:64:64"
 @arrayOopDesc.base_offset_in_bytes.byte = constant i32 16
 @arrayOopDesc.base_offset_in_bytes.char = constant i32 16
@@ -11,7 +12,11 @@ declare i32 @jeandle.vectorized_hashcode(ptr addrspace(1), i32, i32, i32, i32)
 declare i32 @__gxx_personality_v0(...)
 
 ; CHECK-LABEL: @byte22(
-; CHECK: mul i32 {{.*}}, 923521
+; CHECK: sext <4 x i8>
+; CHECK-COUNT-6: mul <4 x i32>
+; CHECK-NOT: mul <4 x i32>
+; CHECK: shufflevector <4 x i32>
+; CHECK: extractelement <4 x i32>
 ; CHECK: ret i32
 define i32 @byte22(i8 %v0, i8 %v1, i8 %v2, i8 %v3, i8 %v4, i8 %v5, i8 %v6, i8 %v7, i8 %v8, i8 %v9, i8 %v10, i8 %v11, i8 %v12, i8 %v13, i8 %v14, i8 %v15, i8 %v16, i8 %v17, i8 %v18, i8 %v19, i8 %v20, i8 %v21, i32 %seed) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
@@ -69,7 +74,11 @@ u:
 }
 
 ; CHECK-LABEL: @char22(
-; CHECK: mul i32 {{.*}}, 923521
+; CHECK: zext <4 x i16>
+; CHECK-COUNT-6: mul <4 x i32>
+; CHECK-NOT: mul <4 x i32>
+; CHECK: shufflevector <4 x i32>
+; CHECK: extractelement <4 x i32>
 ; CHECK: ret i32
 define i32 @char22(i16 %v0, i16 %v1, i16 %v2, i16 %v3, i16 %v4, i16 %v5, i16 %v6, i16 %v7, i16 %v8, i16 %v9, i16 %v10, i16 %v11, i16 %v12, i16 %v13, i16 %v14, i16 %v15, i16 %v16, i16 %v17, i16 %v18, i16 %v19, i16 %v20, i16 %v21, i32 %seed) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
@@ -127,14 +136,10 @@ u:
 }
 
 ; CHECK-LABEL: @int33(
-; CHECK: %[[M0:.*]] = mul i32 %v0, 923521
-; CHECK: add i32 %[[M0]], %v4
-; CHECK: %[[M1:.*]] = mul i32 %v1, 923521
-; CHECK: add i32 %[[M1]], %v5
-; CHECK: %[[M2:.*]] = mul i32 %v2, 923521
-; CHECK: add i32 %[[M2]], %v6
-; CHECK: %[[M3:.*]] = mul i32 %v3, 923521
-; CHECK: add i32 %[[M3]], %v7
+; CHECK-COUNT-9: mul <4 x i32>
+; CHECK-NOT: mul <4 x i32>
+; CHECK: shufflevector <4 x i32>
+; CHECK: extractelement <4 x i32>
 ; CHECK: ret i32
 define i32 @int33(i32 %v0, i32 %v1, i32 %v2, i32 %v3, i32 %v4, i32 %v5, i32 %v6, i32 %v7, i32 %v8, i32 %v9, i32 %v10, i32 %v11, i32 %v12, i32 %v13, i32 %v14, i32 %v15, i32 %v16, i32 %v17, i32 %v18, i32 %v19, i32 %v20, i32 %v21, i32 %v22, i32 %v23, i32 %v24, i32 %v25, i32 %v26, i32 %v27, i32 %v28, i32 %v29, i32 %v30, i32 %v31, i32 %v32, i32 %seed) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
@@ -214,14 +219,10 @@ u:
 }
 
 ; CHECK-LABEL: @int40(
-; CHECK: %[[M0:.*]] = mul i32 %v0, 923521
-; CHECK: add i32 %[[M0]], %v4
-; CHECK: %[[M1:.*]] = mul i32 %v1, 923521
-; CHECK: add i32 %[[M1]], %v5
-; CHECK: %[[M2:.*]] = mul i32 %v2, 923521
-; CHECK: add i32 %[[M2]], %v6
-; CHECK: %[[M3:.*]] = mul i32 %v3, 923521
-; CHECK: add i32 %[[M3]], %v7
+; CHECK-COUNT-10: mul <4 x i32>
+; CHECK-NOT: mul <4 x i32>
+; CHECK: shufflevector <4 x i32>
+; CHECK: extractelement <4 x i32>
 ; CHECK: ret i32
 define i32 @int40(i32 %v0, i32 %v1, i32 %v2, i32 %v3, i32 %v4, i32 %v5, i32 %v6, i32 %v7, i32 %v8, i32 %v9, i32 %v10, i32 %v11, i32 %v12, i32 %v13, i32 %v14, i32 %v15, i32 %v16, i32 %v17, i32 %v18, i32 %v19, i32 %v20, i32 %v21, i32 %v22, i32 %v23, i32 %v24, i32 %v25, i32 %v26, i32 %v27, i32 %v28, i32 %v29, i32 %v30, i32 %v31, i32 %v32, i32 %v33, i32 %v34, i32 %v35, i32 %v36, i32 %v37, i32 %v38, i32 %v39, i32 %seed) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
@@ -315,14 +316,10 @@ u:
 }
 
 ; CHECK-LABEL: @int128(
-; CHECK: %[[M0:.*]] = mul i32 %v0, 923521
-; CHECK: add i32 %[[M0]], %v4
-; CHECK: %[[M1:.*]] = mul i32 %v1, 923521
-; CHECK: add i32 %[[M1]], %v5
-; CHECK: %[[M2:.*]] = mul i32 %v2, 923521
-; CHECK: add i32 %[[M2]], %v6
-; CHECK: %[[M3:.*]] = mul i32 %v3, 923521
-; CHECK: add i32 %[[M3]], %v7
+; CHECK-COUNT-32: mul <4 x i32>
+; CHECK-NOT: mul <4 x i32>
+; CHECK: shufflevector <4 x i32>
+; CHECK: extractelement <4 x i32>
 ; CHECK: ret i32
 define i32 @int128(i32 %v0, i32 %v1, i32 %v2, i32 %v3, i32 %v4, i32 %v5, i32 %v6, i32 %v7, i32 %v8, i32 %v9, i32 %v10, i32 %v11, i32 %v12, i32 %v13, i32 %v14, i32 %v15, i32 %v16, i32 %v17, i32 %v18, i32 %v19, i32 %v20, i32 %v21, i32 %v22, i32 %v23, i32 %v24, i32 %v25, i32 %v26, i32 %v27, i32 %v28, i32 %v29, i32 %v30, i32 %v31, i32 %v32, i32 %v33, i32 %v34, i32 %v35, i32 %v36, i32 %v37, i32 %v38, i32 %v39, i32 %v40, i32 %v41, i32 %v42, i32 %v43, i32 %v44, i32 %v45, i32 %v46, i32 %v47, i32 %v48, i32 %v49, i32 %v50, i32 %v51, i32 %v52, i32 %v53, i32 %v54, i32 %v55, i32 %v56, i32 %v57, i32 %v58, i32 %v59, i32 %v60, i32 %v61, i32 %v62, i32 %v63, i32 %v64, i32 %v65, i32 %v66, i32 %v67, i32 %v68, i32 %v69, i32 %v70, i32 %v71, i32 %v72, i32 %v73, i32 %v74, i32 %v75, i32 %v76, i32 %v77, i32 %v78, i32 %v79, i32 %v80, i32 %v81, i32 %v82, i32 %v83, i32 %v84, i32 %v85, i32 %v86, i32 %v87, i32 %v88, i32 %v89, i32 %v90, i32 %v91, i32 %v92, i32 %v93, i32 %v94, i32 %v95, i32 %v96, i32 %v97, i32 %v98, i32 %v99, i32 %v100, i32 %v101, i32 %v102, i32 %v103, i32 %v104, i32 %v105, i32 %v106, i32 %v107, i32 %v108, i32 %v109, i32 %v110, i32 %v111, i32 %v112, i32 %v113, i32 %v114, i32 %v115, i32 %v116, i32 %v117, i32 %v118, i32 %v119, i32 %v120, i32 %v121, i32 %v122, i32 %v123, i32 %v124, i32 %v125, i32 %v126, i32 %v127, i32 %seed) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
@@ -592,3 +589,84 @@ u:
 }
 
 !java-method-compilation = !{}
+
+; CHECK-LABEL: @char22_from_int(
+; CHECK: and <4 x i32>
+; CHECK-COUNT-6: mul <4 x i32>
+; CHECK: ret i32
+define i32 @char22_from_int(i32 %v0, i32 %v1, i32 %v2, i32 %v3, i32 %v4, i32 %v5, i32 %v6, i32 %v7, i32 %v8, i32 %v9, i32 %v10, i32 %v11, i32 %v12, i32 %v13, i32 %v14, i32 %v15, i32 %v16, i32 %v17, i32 %v18, i32 %v19, i32 %v20, i32 %v21, i32 %seed) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+entry:
+  %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10002 to ptr), i32 22, i32 64, i32 16, i32 100, i1 false, i1 false) to label %work unwind label %u
+work:
+  %c0 = trunc i32 %v0 to i16
+  %c1 = trunc i32 %v1 to i16
+  %c2 = trunc i32 %v2 to i16
+  %c3 = trunc i32 %v3 to i16
+  %c4 = trunc i32 %v4 to i16
+  %c5 = trunc i32 %v5 to i16
+  %c6 = trunc i32 %v6 to i16
+  %c7 = trunc i32 %v7 to i16
+  %c8 = trunc i32 %v8 to i16
+  %c9 = trunc i32 %v9 to i16
+  %c10 = trunc i32 %v10 to i16
+  %c11 = trunc i32 %v11 to i16
+  %c12 = trunc i32 %v12 to i16
+  %c13 = trunc i32 %v13 to i16
+  %c14 = trunc i32 %v14 to i16
+  %c15 = trunc i32 %v15 to i16
+  %c16 = trunc i32 %v16 to i16
+  %c17 = trunc i32 %v17 to i16
+  %c18 = trunc i32 %v18 to i16
+  %c19 = trunc i32 %v19 to i16
+  %c20 = trunc i32 %v20 to i16
+  %c21 = trunc i32 %v21 to i16
+  %p0 = getelementptr i8, ptr addrspace(1) %a, i64 16
+  store atomic i16 %c0, ptr addrspace(1) %p0 unordered, align 2
+  %p1 = getelementptr i8, ptr addrspace(1) %a, i64 18
+  store atomic i16 %c1, ptr addrspace(1) %p1 unordered, align 2
+  %p2 = getelementptr i8, ptr addrspace(1) %a, i64 20
+  store atomic i16 %c2, ptr addrspace(1) %p2 unordered, align 2
+  %p3 = getelementptr i8, ptr addrspace(1) %a, i64 22
+  store atomic i16 %c3, ptr addrspace(1) %p3 unordered, align 2
+  %p4 = getelementptr i8, ptr addrspace(1) %a, i64 24
+  store atomic i16 %c4, ptr addrspace(1) %p4 unordered, align 2
+  %p5 = getelementptr i8, ptr addrspace(1) %a, i64 26
+  store atomic i16 %c5, ptr addrspace(1) %p5 unordered, align 2
+  %p6 = getelementptr i8, ptr addrspace(1) %a, i64 28
+  store atomic i16 %c6, ptr addrspace(1) %p6 unordered, align 2
+  %p7 = getelementptr i8, ptr addrspace(1) %a, i64 30
+  store atomic i16 %c7, ptr addrspace(1) %p7 unordered, align 2
+  %p8 = getelementptr i8, ptr addrspace(1) %a, i64 32
+  store atomic i16 %c8, ptr addrspace(1) %p8 unordered, align 2
+  %p9 = getelementptr i8, ptr addrspace(1) %a, i64 34
+  store atomic i16 %c9, ptr addrspace(1) %p9 unordered, align 2
+  %p10 = getelementptr i8, ptr addrspace(1) %a, i64 36
+  store atomic i16 %c10, ptr addrspace(1) %p10 unordered, align 2
+  %p11 = getelementptr i8, ptr addrspace(1) %a, i64 38
+  store atomic i16 %c11, ptr addrspace(1) %p11 unordered, align 2
+  %p12 = getelementptr i8, ptr addrspace(1) %a, i64 40
+  store atomic i16 %c12, ptr addrspace(1) %p12 unordered, align 2
+  %p13 = getelementptr i8, ptr addrspace(1) %a, i64 42
+  store atomic i16 %c13, ptr addrspace(1) %p13 unordered, align 2
+  %p14 = getelementptr i8, ptr addrspace(1) %a, i64 44
+  store atomic i16 %c14, ptr addrspace(1) %p14 unordered, align 2
+  %p15 = getelementptr i8, ptr addrspace(1) %a, i64 46
+  store atomic i16 %c15, ptr addrspace(1) %p15 unordered, align 2
+  %p16 = getelementptr i8, ptr addrspace(1) %a, i64 48
+  store atomic i16 %c16, ptr addrspace(1) %p16 unordered, align 2
+  %p17 = getelementptr i8, ptr addrspace(1) %a, i64 50
+  store atomic i16 %c17, ptr addrspace(1) %p17 unordered, align 2
+  %p18 = getelementptr i8, ptr addrspace(1) %a, i64 52
+  store atomic i16 %c18, ptr addrspace(1) %p18 unordered, align 2
+  %p19 = getelementptr i8, ptr addrspace(1) %a, i64 54
+  store atomic i16 %c19, ptr addrspace(1) %p19 unordered, align 2
+  %p20 = getelementptr i8, ptr addrspace(1) %a, i64 56
+  store atomic i16 %c20, ptr addrspace(1) %p20 unordered, align 2
+  %p21 = getelementptr i8, ptr addrspace(1) %a, i64 58
+  store atomic i16 %c21, ptr addrspace(1) %p21 unordered, align 2
+  %r = call i32 @jeandle.vectorized_hashcode(ptr addrspace(1) %a, i32 0, i32 22, i32 %seed, i32 5)
+  ret i32 %r
+u:
+  %lp = landingpad i64 cleanup
+  resume i64 %lp
+}

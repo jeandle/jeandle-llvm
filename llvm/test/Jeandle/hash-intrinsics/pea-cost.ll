@@ -117,7 +117,7 @@ u:
 ; CHECK-LABEL: @scalar_cost_polynomials(
 ; CHECK-NOT: @jeandle.new_array
 ; CHECK-NOT: @jeandle.vectorized_hashcode
-; CHECK: mul i32 %v,
+; CHECK: mul <4 x i32>
 ; CHECK: ret i32
 define i32 @scalar_cost_polynomials(i32 %v) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
