@@ -1,0 +1,5 @@
+IsSubtype 900 900 = true
+
+IsInterface 900 = false
+IsObjectKlass 900 = false
+GetSecondarySupers 900 = []

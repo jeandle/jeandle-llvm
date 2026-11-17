@@ -4,3 +4,7 @@ GetMirrorKlass 1 = 234567
 GetSuperCheckOffset 234567 = 56
 GetSuperCheckOffset 234568 = 0
 GetSuperCheckOffset 234569 = 32
+
+IsEffectivelyFinal 234567 = false
+IsEffectivelyFinal 234568 = false
+IsEffectivelyFinal 234569 = false

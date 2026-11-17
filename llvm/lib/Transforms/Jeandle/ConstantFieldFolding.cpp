@@ -544,6 +544,7 @@ bool isGetClassCall(CallInst *CI) {
   return Callee && Callee->getName() == "jeandle.get_class" &&
          CI->getFunctionType() == Callee->getFunctionType() &&
          CI->getCallingConv() == Callee->getCallingConv() &&
+         Callee->getCallingConv() == CallingConv::Hotspot_JIT &&
          !Callee->isVarArg() && CI->arg_size() == 1 &&
          isWideOopType(CI->getType()) &&
          isWideOopType(CI->getArgOperand(0)->getType()) &&
@@ -580,8 +581,7 @@ static Value *stripMirrorWrappers(Value *V) {
 }
 
 // Rewrite mirror-identity comparisons so the mirror of a dynamic receiver
-// need not be materialized (C2 performs the same rewrites at parse time in
-// Parse::optimize_cmp_with_klass):
+// need not be materialized (see C2's CmpPNode::Ideal):
 //   getClass(x) == C        <=>  load_klass(x) == klassOf(C)
 //   getClass(x) == getClass(y)  <=>  load_klass(x) == load_klass(y)
 // A constant primitive mirror has no Klass and can never equal a getClass
@@ -591,7 +591,11 @@ static Value *stripMirrorWrappers(Value *V) {
 bool rewriteGetClassMirrorComparison(ICmpInst *Cmp,
                                      const jeandle::VMCallbacks &CB,
                                      const DenseMap<Value *, int> &ConstOops,
-                                     DenseSet<uintptr_t> &KnownKlasses) {
+                                     DenseSet<uintptr_t> &KnownKlasses,
+                                     DominatorTree &DT, const DataLayout &DL,
+                                     jeandle::IsNullEdgeOracle IsNullEdge,
+                                     LazyValueInfo &LVI,
+                                     const jeandle::VMConstants &VMC) {
   if (!Cmp->isEquality() || !isJavaOopType(Cmp->getOperand(0)->getType()) ||
       Cmp->getParent() == nullptr)
     return false;
@@ -608,6 +612,7 @@ bool rewriteGetClassMirrorComparison(ICmpInst *Cmp,
   Type *KlassTy = PointerType::get(Cmp->getContext(), 0);
   auto KlassLoadable = [&](Value *Receiver) {
     return LoadKlass && !LoadKlass->isVarArg() && LoadKlass->arg_size() == 1 &&
+           LoadKlass->getCallingConv() == CallingConv::Hotspot_JIT &&
            LoadKlass->getReturnType() == KlassTy &&
            LoadKlass->getFunctionType()->getParamType(0) == Receiver->getType();
   };
@@ -620,7 +625,7 @@ bool rewriteGetClassMirrorComparison(ICmpInst *Cmp,
     if (!KlassLoadable(RightOrigin->getArgOperand(0)))
       return false;
     IRBuilder<> Builder(Cmp);
-    // Emit in operand order; argument evaluation order is unspecified.
+    // The original calls retain their effects until ordinary cleanup.
     auto *LeftLoad =
         Builder.CreateCall(LoadKlass, {LeftOrigin->getArgOperand(0)});
     LeftLoad->setCallingConv(LoadKlass->getCallingConv());
@@ -637,16 +642,69 @@ bool rewriteGetClassMirrorComparison(ICmpInst *Cmp,
   }
 
   CallInst *Origin = LeftIsOrigin ? LeftOrigin : RightOrigin;
-  Value *ConstSide = LeftIsOrigin ? Cmp->getOperand(1) : Cmp->getOperand(0);
-  std::optional<int> OopId = lookupConstOop(ConstSide, ConstOops);
-  if (!OopId || !CB.GetMirrorKlass)
+  Value *OtherMirror = LeftIsOrigin ? Cmp->getOperand(1) : Cmp->getOperand(0);
+  std::optional<int> OopId = lookupConstOop(OtherMirror, ConstOops);
+  if (!OopId) {
+    // Only a non-null Class value has the hidden mirror Klass field. In
+    // particular, equality with an arbitrary Object must stay an oop test.
+    GlobalVariable *ClassGlobal =
+        Cmp->getModule()->getGlobalVariable("java_lang_Class.klass", true);
+    auto *ClassKlass =
+        ClassGlobal && ClassGlobal->isConstant() &&
+                ClassGlobal->hasInitializer()
+            ? dyn_cast<ConstantInt>(ClassGlobal->getInitializer())
+            : nullptr;
+    Function *LoadMirrorKlass =
+        Cmp->getModule()->getFunction("jeandle.load_mirror_klass");
+    if (!ClassKlass || !ClassKlass->getType()->isIntegerTy(64) ||
+        ClassKlass->isZero() || !CB.IsSubtype || !LoadMirrorKlass ||
+        LoadMirrorKlass->isVarArg() || LoadMirrorKlass->arg_size() != 1 ||
+        LoadMirrorKlass->getCallingConv() != CallingConv::Hotspot_JIT ||
+        LoadMirrorKlass->getReturnType() != KlassTy ||
+        LoadMirrorKlass->getFunctionType()->getParamType(0) !=
+            OtherMirror->getType() ||
+        !isKnownNonNullAt(OtherMirror, Cmp, DT, DL, LVI))
+      return false;
+    jeandle::JavaType MirrorType =
+        jeandle::getJavaType(OtherMirror, &DT, Cmp, IsNullEdge);
+    if (!MirrorType.isKnown() ||
+        !CB.IsSubtype(MirrorType.Klass, ClassKlass->getZExtValue()))
+      return false;
+
+    IRBuilder<> Builder(Cmp);
+    auto *ObjectKlass =
+        Builder.CreateCall(LoadKlass, {Origin->getArgOperand(0)});
+    ObjectKlass->setCallingConv(LoadKlass->getCallingConv());
+    auto *MirrorKlass = Builder.CreateCall(LoadMirrorKlass, {OtherMirror});
+    MirrorKlass->setCallingConv(LoadMirrorKlass->getCallingConv());
+    ObjectKlass->setDebugLoc(Cmp->getDebugLoc());
+    MirrorKlass->setDebugLoc(Cmp->getDebugLoc());
+    // getClass never denotes a primitive: a primitive mirror's null Klass
+    // therefore compares unequal without materializing the source mirror.
+    Value *Rewritten = Builder.CreateICmp(Cmp->getPredicate(), ObjectKlass,
+                                          MirrorKlass, "class.mirror.klass_eq");
+    Cmp->replaceAllUsesWith(Rewritten);
+    Cmp->eraseFromParent();
+    return true;
+  }
+  if (!CB.GetMirrorKlass)
     return false;
 
   uintptr_t Klass = CB.GetMirrorKlass(*OopId);
   if (Klass == jeandle::MirrorKlassUnavailable)
     return false;
-  if (Klass == 0) {
-    // Primitive constant mirror: a getClass result is never primitive.
+  bool Impossible = Klass == 0;
+  if (Klass && CB.GetKlassModifierFlags) {
+    int Flags = CB.GetKlassModifierFlags(Klass);
+    // Arrays also have ABSTRACT modifiers, but can be instantiated. Only
+    // positive instance layouts prove that an abstract target is impossible.
+    Impossible = Flags >= 0 &&
+                 ((Flags & VMC.jvmAccInterface()) ||
+                  ((Flags & VMC.jvmAccAbstract()) && CB.GetKlassLayoutHelper &&
+                   CB.GetKlassLayoutHelper(Klass) > 0));
+  }
+  if (Impossible) {
+    // getClass can only denote an instantiable reference type.
     bool Result = Cmp->getPredicate() == CmpInst::ICMP_NE;
     Cmp->replaceAllUsesWith(ConstantInt::get(Cmp->getType(), Result));
     Cmp->eraseFromParent();
@@ -823,8 +881,9 @@ bool specializeConstantClassCheck(CallInst *CI,
       (!Subtype && Callee->getName() != "jeandle.check_instanceof") ||
       CI->getFunctionType() != Callee->getFunctionType() ||
       CI->getCallingConv() != Callee->getCallingConv() ||
+      Callee->getCallingConv() != CallingConv::Hotspot_JIT ||
       CI->getFunctionType()->isVarArg() || CI->hasOperandBundles() ||
-      CI->isMustTailCall() || !CB.GetSuperCheckOffset || CI->arg_size() != 2 ||
+      CI->isMustTailCall() || CI->arg_size() != 2 ||
       CI->getArgOperand(0)->getType() !=
           PointerType::get(CI->getContext(), 0) ||
       !CI->getType()->isIntegerTy(1))
@@ -832,15 +891,43 @@ bool specializeConstantClassCheck(CallInst *CI,
   unsigned TargetIndex = Subtype ? 1 : 0;
   uintptr_t Klass =
       jeandle::extractKlassConstant(CI->getArgOperand(TargetIndex));
+  if (!Klass || Klass == jeandle::MirrorKlassUnavailable ||
+      CI->getArgOperand(1)->getType() !=
+          PointerType::get(CI->getContext(), Subtype ? 0 : 1))
+    return false;
+
+  // This VM predicate is structural: it handles final instance classes and
+  // recurses through array element types without speculating on leaf classes.
+  if (CB.IsEffectivelyFinal && CB.IsEffectivelyFinal(Klass)) {
+    IRBuilder<> Builder(CI);
+    Value *ActualKlass = CI->getArgOperand(0);
+    if (!Subtype) {
+      Function *LoadKlass = CI->getModule()->getFunction("jeandle.load_klass");
+      if (!LoadKlass || LoadKlass->isVarArg() || LoadKlass->arg_size() != 1 ||
+          LoadKlass->getCallingConv() != CI->getCallingConv() ||
+          LoadKlass->getReturnType() != CI->getArgOperand(0)->getType() ||
+          LoadKlass->getFunctionType()->getParamType(0) !=
+              CI->getArgOperand(1)->getType())
+        return false;
+      auto *Load = Builder.CreateCall(LoadKlass, {CI->getArgOperand(1)});
+      Load->setCallingConv(LoadKlass->getCallingConv());
+      Load->setDebugLoc(CI->getDebugLoc());
+      ActualKlass = Load;
+    }
+    Value *Exact = Builder.CreateICmpEQ(
+        ActualKlass, CI->getArgOperand(TargetIndex), "class.exact");
+    CI->replaceAllUsesWith(Exact);
+    CI->eraseFromParent();
+    return true;
+  }
+  if (!CB.GetSuperCheckOffset)
+    return false;
   Function *WithOffset = CI->getModule()->getFunction(
       Subtype ? "jeandle.check_klass_subtype_with_offset"
               : "jeandle.checkcast_nonnull_with_offset");
-  if (!Klass || Klass == jeandle::MirrorKlassUnavailable || !WithOffset ||
-      WithOffset->getCallingConv() != CI->getCallingConv() ||
+  if (!WithOffset || WithOffset->getCallingConv() != CI->getCallingConv() ||
       WithOffset->isVarArg() || WithOffset->arg_size() != 3 ||
       WithOffset->getReturnType() != CI->getType() ||
-      CI->getArgOperand(1)->getType() !=
-          PointerType::get(CI->getContext(), Subtype ? 0 : 1) ||
       WithOffset->getFunctionType()->getParamType(0) !=
           CI->getArgOperand(0)->getType() ||
       WithOffset->getFunctionType()->getParamType(1) !=
@@ -1593,7 +1680,8 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (ICmpInst *Cmp : ClassMirrorComparisons) {
       if (Cmp->getParent() == nullptr)
         continue;
-      if (rewriteGetClassMirrorComparison(Cmp, *CB, ConstOops, KnownKlasses) ||
+      if (rewriteGetClassMirrorComparison(Cmp, *CB, ConstOops, KnownKlasses, DT,
+                                          DL, IsNullEdge, LVI, VMConsts) ||
           foldClassMirrorComparison(Cmp, *CB, ConstOops)) {
         RoundChanged = true;
         Changed = true;
