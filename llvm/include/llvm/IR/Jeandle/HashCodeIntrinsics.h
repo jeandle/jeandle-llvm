@@ -58,10 +58,11 @@ inline std::optional<uint8_t> decodeVectorizedHashCode(const CallBase &CB) {
   }
 }
 
-// Bound both cell inspection and generated scalar work. Constant segments
-// collapse to one multiply/add pair independently of their element count.
+// Bound cell inspection and generated work. Above the serial-chain cost
+// threshold, independent polynomials bound the hash dependency depth.
+// Constant segments collapse independently of their element count.
 inline constexpr unsigned HashCodeMaxFoldLength = 128;
-inline constexpr unsigned HashCodeScalarCostLimit = 64;
+inline constexpr unsigned HashCodeScalarChainCostLimit = 64;
 
 } // namespace llvm::jeandle
 

@@ -30,10 +30,18 @@ u:
   resume i64 %lp
 }
 ; CHECK-LABEL: @hash_result_deopt(
-; CHECK: mul i32 %n, 31
-; CHECK: add i32 {{.*}}, %init
-; CHECK: call void @safepoint()
-; CHECK: ret i32
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.vectorized_hashcode
+; CHECK: %[[M:.*]] = mul i32 %n, 31
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.vectorized_hashcode
+; CHECK: %[[HASH:.*]] = add i32 %[[M]], %init
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.vectorized_hashcode
+; CHECK: call void @safepoint() [ "deopt"(i32 99, i32 99, i64 262157, i64 10004, i32 1, i64 68719476746, i32 %[[HASH]], i64 10, i32 %[[HASH]], i64 524300, i32 0) ]
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.vectorized_hashcode
+; CHECK: ret i32 %[[HASH]]
 define i32 @hash_result_deopt(i32 %init, i32 %n) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10004 to ptr), i32 1, i32 24, i32 16, i32 100, i1 false, i1 false) to label %work unwind label %u

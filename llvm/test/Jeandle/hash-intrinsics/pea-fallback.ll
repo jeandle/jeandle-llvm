@@ -2,7 +2,8 @@
 
 ; Negative shapes keep the original op and materialize the virtual array:
 ; non-constant lengths, out-of-range ranges, unreadable cells,
-; non-virtual receivers, and utf16 payloads with non-constant bytes.
+; and non-virtual receivers. Supported packed cells and dynamic utf16
+; composition are also checked at these boundaries.
 
 target datalayout = "e-p:64:64-p1:64:64"
 @arrayOopDesc.base_offset_in_bytes.byte = constant i32 16
@@ -61,15 +62,13 @@ u:
   resume i64 %lp
 }
 
-; A partially overlapping non-constant i16 store leaves byte cells that only
-; a shifted extraction could read; the hash fold places no instructions of its
-; own for cell reads, so the fold must not commit anything. (A constant
-; overlapping store does fold via packed-group extraction; see pea-fold.ll.)
+; A packed dynamic i16 supplies both signed byte cells through extraction.
 ; CHECK-LABEL: @overlapping_store(
-; CHECK: @jeandle.new_array
-; CHECK: store atomic i16 %v
-; CHECK: call i32 @jeandle.vectorized_hashcode
-; CHECK-NOT: poison
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.vectorized_hashcode
+; CHECK: sext i8
+; CHECK: mul{{( nsw)?}} i32
+; CHECK: add{{( nsw)?}} i32
 ; CHECK: ret i32
 define i32 @overlapping_store(i16 %v) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
@@ -97,12 +96,12 @@ u:
   resume i64 %lp
 }
 
-; utf16 composition needs both bytes of every pair constant.
+; One dynamic byte and one default byte form an unsigned UTF16 code unit.
 ; CHECK-LABEL: @utf16_unknown_cell(
-; CHECK: @jeandle.new_array
-; CHECK: call i32 @jeandle.vectorized_hashcode
-; CHECK-NOT: poison
-; CHECK: ret i32
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.vectorized_hashcode
+; CHECK: %[[W:.*]] = zext i8 %v to i32
+; CHECK: ret i32 %[[W]]
 define i32 @utf16_unknown_cell(i8 %v) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10001 to ptr), i32 4, i32 32, i32 16, i32 100, i1 false, i1 false) to label %work unwind label %u

@@ -114,12 +114,12 @@ u:
   resume i64 %lp
 }
 
-; CHECK-LABEL: @scalar_cost_fallback(
-; CHECK: @jeandle.new_array
-; CHECK: call i32 @jeandle.vectorized_hashcode
-; CHECK-NOT: poison
+; CHECK-LABEL: @scalar_cost_polynomials(
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.vectorized_hashcode
+; CHECK: mul i32 %v,
 ; CHECK: ret i32
-define i32 @scalar_cost_fallback(i32 %v) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+define i32 @scalar_cost_polynomials(i32 %v) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10004 to ptr), i32 40, i32 176, i32 16, i32 100, i1 false, i1 false) to label %work unwind label %u
 work:

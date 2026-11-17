@@ -2052,7 +2052,8 @@ private:
   bool foldVectorizedHashCode(CallBase *CB);
   std::optional<jeandle::ObjectID> resolveStringArray(Value *V);
   Value *readStringCell(jeandle::ObjectID ID, int64_t Offset, unsigned Bits,
-                        Instruction *InsertContext = nullptr);
+                        Instruction *InsertContext = nullptr,
+                        bool ValidateOnly = false);
   Value *placeStringInstruction(Instruction *I, Instruction *InsertContext);
   // Known non-escaping LLVM intrinsics (assume, lifetime/invariant
   // markers, debug, annotations, branch hints, ...) are no-ops for PEA;
@@ -7629,7 +7630,8 @@ Value *Analyzer::placeStringInstruction(Instruction *I,
 }
 
 Value *Analyzer::readStringCell(jeandle::ObjectID ID, int64_t Offset,
-                                unsigned Bits, Instruction *InsertContext) {
+                                unsigned Bits, Instruction *InsertContext,
+                                bool ValidateOnly) {
   using namespace jeandle;
   const VirtualObject &VO = *Result.VirtualObjects[ID];
   Type *Ty = Type::getIntNTy(F.getContext(), Bits);
@@ -7672,13 +7674,18 @@ Value *Analyzer::readStringCell(jeandle::ObjectID ID, int64_t Offset,
       if (GroupBits != Bits && Part)
         Part = ConstantFoldCastOperand(Instruction::Trunc, Part, Ty, DL);
       if (Part && !isa<UndefValue>(Part)) {
-        observeFieldDefinition(ID, Field.Offset, FieldDefinitions);
+        if (!ValidateOnly)
+          observeFieldDefinition(ID, Field.Offset, FieldDefinitions);
         return Part;
       }
       return nullptr;
     }
-    if (!InsertContext && (V->getType() != Ty || Shift))
+    if (!InsertContext && !ValidateOnly && (V->getType() != Ty || Shift))
       return nullptr;
+    // Validation returns only a readability witness. It neither observes
+    // reaching definitions nor places packed extraction instructions.
+    if (ValidateOnly)
+      return V;
     observeFieldDefinition(ID, Field.Offset, FieldDefinitions);
     if (V->getType() != GroupTy)
       V = placeStringInstruction(new BitCastInst(V, GroupTy, "string.bits"),
@@ -8034,13 +8041,9 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
   return Finish(Return, *Right);
 }
 
-// Fold jeandle.vectorizedHashCode over a virtual array with a constant,
-// in-range length, in the spirit of foldStringIntrinsic: the array stays
-// virtual, all-constant cells fold to a constant result, and scalar cells
-// lower to a placed Horner chain with constant segments combined. Both cell
-// inspection and generated scalar cost are bounded. Anything not provable
-// returns false so the generic escape path materializes the array, like
-// C2's ArgEscape treatment of a retained hash intrinsic.
+// Fold a bounded, in-range virtual array hash without materializing its
+// receiver. Cheap hashes combine constant segments into affine updates;
+// expensive hashes use independent polynomials to bound serial dependency.
 bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
   using namespace jeandle;
   using namespace jeandle::pea;
@@ -8076,8 +8079,8 @@ bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
            VO.ArrayBaseOffset == VMConsts.arrayBaseOffsetFor(Kind);
   };
   // Interpretation→layout table. T_CHAR accepts either a char[] payload or a
-  // byte[] of native-endian utf16 pairs (StringUTF16 usage); the pair path
-  // composes two byte cells and therefore requires constants.
+  // byte[] of native-endian utf16 pairs (StringUTF16 usage). Packed words
+  // are read directly; independent byte cells are composed after validation.
   enum class Layout { Bytes, Shorts, Chars, Utf16Pairs, Ints } Ly;
   unsigned CellBits = 0;
   bool Signed = false;
@@ -8133,39 +8136,75 @@ bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
   if ((*From + *Length) * CellsPerElement > VO.ArrayLength)
     return false;
 
-  // Validate every cell before mutating any abstract state; a failure must
-  // leave the original op untouched for the generic escape path.
-  SmallVector<Value *, 16> Cells;
-  // utf16 pairs advance two byte cells per hashed code unit; every other
-  // layout addresses cells in the array's own element scale.
+  // Validate every read without placing effects or observing definitions.
+  // In particular, a packed extraction in an early element must not survive
+  // when a later element prevents folding the operation.
+  struct CellRead {
+    int64_t Offset;
+    bool BytePair;
+  };
+  SmallVector<CellRead, 16> Reads;
   const int64_t ElementScale = Ly == Layout::Utf16Pairs ? 2 : Scale;
+  auto CanRead = [&](int64_t Offset, unsigned Bits) {
+    return readStringCell(*ID, Offset, Bits, nullptr, /*ValidateOnly=*/true);
+  };
   for (int64_t I = 0; I < *Length; ++I) {
     auto Offset =
         checkedArrayElementOffset(VO.ArrayBaseOffset, *From + I, ElementScale);
     if (!Offset || !isUsableFieldOffset(*Offset))
       return false;
+    bool BytePair = false;
     if (Ly == Layout::Utf16Pairs) {
-      auto Lo = readStringCell(*ID, *Offset, 8);
-      auto Hi = readStringCell(*ID, *Offset + 1, 8);
-      auto *LoC = dyn_cast_or_null<ConstantInt>(Lo);
-      auto *HiC = dyn_cast_or_null<ConstantInt>(Hi);
-      if (!LoC || !HiC)
-        return false;
-      unsigned V = DL.isLittleEndian()
-                       ? LoC->getZExtValue() | (HiC->getZExtValue() << 8)
-                       : (LoC->getZExtValue() << 8) | HiC->getZExtValue();
-      Cells.push_back(ConstantInt::get(Type::getInt32Ty(F.getContext()), V));
-    } else {
-      Value *V = readStringCell(*ID, *Offset, CellBits);
-      if (!V)
-        return false;
-      Cells.push_back(V);
+      if (!CanRead(*Offset, 16)) {
+        if (!CanRead(*Offset, 8) || !CanRead(*Offset + 1, 8))
+          return false;
+        BytePair = true;
+      }
+    } else if (!CanRead(*Offset, CellBits)) {
+      return false;
     }
+    Reads.push_back({*Offset, BytePair});
   }
 
-  // Charge a conservative upper bound before creating any effects. Each
-  // scalar cell needs at most an extension, multiply and add; a constant
-  // segment costs at most one multiply/add pair, regardless of its length.
+  // All reads have succeeded. From here the fold cannot fail, so placing
+  // packed extraction and arithmetic effects is safe.
+  Type *I32 = Type::getInt32Ty(F.getContext());
+  auto Place = [&](Instruction *I) { return placeStringInstruction(I, CB); };
+  auto Binary = [&](Instruction::BinaryOps Opcode, Value *L, Value *R,
+                    const Twine &Name) -> Value * {
+    if (auto *LC = dyn_cast<Constant>(L))
+      if (auto *RC = dyn_cast<Constant>(R))
+        return ConstantFoldBinaryOpOperands(Opcode, LC, RC, DL);
+    return Place(BinaryOperator::Create(Opcode, L, R, Name));
+  };
+  auto Widen = [&](Value *V) -> Value * {
+    if (V->getType() == I32)
+      return V;
+    auto Opcode = Signed ? Instruction::SExt : Instruction::ZExt;
+    if (auto *C = dyn_cast<Constant>(V))
+      return ConstantFoldCastOperand(Opcode, C, I32, DL);
+    return Place(CastInst::Create(Opcode, V, I32, "vhc.widen"));
+  };
+  SmallVector<Value *, 16> Cells;
+  for (const CellRead &Read : Reads) {
+    if (!Read.BytePair) {
+      unsigned Bits = Ly == Layout::Utf16Pairs ? 16 : CellBits;
+      Value *V = readStringCell(*ID, Read.Offset, Bits, CB);
+      assert(V && "prevalidated hash cell must be readable");
+      Cells.push_back(V);
+      continue;
+    }
+    Value *First = readStringCell(*ID, Read.Offset, 8, CB);
+    Value *Second = readStringCell(*ID, Read.Offset + 1, 8, CB);
+    assert(First && Second && "prevalidated UTF16 pair must be readable");
+    Value *Low = Widen(DL.isLittleEndian() ? First : Second);
+    Value *High = Widen(DL.isLittleEndian() ? Second : First);
+    High = Binary(Instruction::Shl, High, ConstantInt::get(I32, 8), "vhc.high");
+    Cells.push_back(Binary(Instruction::Or, Low, High, "vhc.char"));
+  }
+
+  // This threshold selects the compact serial form, rather than rejecting
+  // virtualization. The length bound limits total work in either form.
   unsigned ScalarCost = 0;
   bool ConstantSegment = false;
   for (Value *V : Cells) {
@@ -8181,103 +8220,70 @@ bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
   }
   if (ConstantSegment)
     ScalarCost += 2;
-  if (ScalarCost > HashCodeScalarCostLimit)
-    return false;
 
-  // Widen one cell to i32: constants evaluate immediately, scalars place the
-  // extension instruction before the call.
-  Type *I32 = Type::getInt32Ty(F.getContext());
-  auto Place = [&](Instruction *I) -> Value * {
-    I->setDebugLoc(CB->getDebugLoc());
-    Result.OwnedInsts.emplace_back(I);
-    auto E = std::make_unique<PlaceInstructionEffect>();
-    E->Block = CB->getParent();
-    E->Target = CB;
-    E->InstructionToPlace = I;
-    E->SeqNo = Result.nextSeqNo();
-    Result.addBlockEffect(std::move(E));
-    return I;
-  };
-  auto Widen = [&](Value *V) -> Value * {
-    if (V->getType() == I32)
-      return V;
-    if (auto *C = dyn_cast<ConstantInt>(V)) {
-      uint64_t Raw = C->getZExtValue();
-      if (CellBits == 8 && Signed)
-        return ConstantInt::get(I32, int32_t(int8_t(Raw)));
-      if (CellBits == 16 && Signed)
-        return ConstantInt::get(I32, int32_t(int16_t(Raw)));
-      return ConstantInt::get(I32, Raw);
-    }
-    auto Opcode = Signed ? Instruction::SExt : Instruction::ZExt;
-    return Place(CastInst::Create(Opcode, V, I32, "vhc.widen"));
-  };
-
-  // All-constant fast path: fold the whole chain to one i32 constant.
-  if (auto *InitC = dyn_cast<ConstantInt>(Initial)) {
-    uint32_t H = InitC->getZExtValue();
-    bool AllConstant = true;
-    for (Value *CellV : Cells) {
-      auto *W = dyn_cast<ConstantInt>(CellV);
-      if (!W) {
-        AllConstant = false;
-        break;
+  // A run of constants is an affine update h = Factor*h + Bias. This also
+  // folds all-constant hashes, including those with a dynamic initial value.
+  auto FoldChain = [&](Value *H, unsigned Start, unsigned Stride,
+                       uint32_t Multiplier) {
+    uint32_t Factor = 1;
+    uint32_t Bias = 0;
+    auto ApplyConstants = [&](uint32_t Mul, uint32_t Add) {
+      if (Mul != 1)
+        H = Binary(Instruction::Mul, H, ConstantInt::get(I32, Mul), "vhc.mul");
+      if (Add != 0)
+        H = Binary(Instruction::Add, H, ConstantInt::get(I32, Add), "vhc.add");
+    };
+    for (unsigned I = Start; I < Cells.size(); I += Stride) {
+      Value *W = Widen(Cells[I]);
+      if (auto *C = dyn_cast<ConstantInt>(W)) {
+        Factor *= Multiplier;
+        Bias = Bias * Multiplier + uint32_t(C->getZExtValue());
+        continue;
       }
-      uint32_t Wide;
-      if (Ly == Layout::Utf16Pairs) {
-        Wide = W->getZExtValue();
-      } else if (CellBits == 8) {
-        Wide = Signed ? uint32_t(int32_t(int8_t(W->getZExtValue())))
-                      : uint32_t(W->getZExtValue());
-      } else if (CellBits == 16) {
-        Wide = Signed ? uint32_t(int32_t(int16_t(W->getZExtValue())))
-                      : uint32_t(W->getZExtValue());
-      } else {
-        Wide = W->getZExtValue();
-      }
-      H = 31 * H + Wide;
+      ApplyConstants(Factor * Multiplier, Bias * Multiplier);
+      if (auto *C = dyn_cast<ConstantInt>(H); C && C->isZero())
+        H = W;
+      else
+        H = Binary(Instruction::Add, H, W, "vhc.add");
+      Factor = 1;
+      Bias = 0;
     }
-    if (AllConstant) {
-      observeFieldDefinitions(*ID, FieldDefinitions);
-      emitReplaceCall(CB, ConstantInt::get(I32, H), *ID);
-      return true;
-    }
-  }
-
-  // A run of constants is an affine update h = Factor*h + Bias. Combining
-  // it with the next scalar step avoids rebuilding a long dependent chain
-  // for arrays whose initialized contents are mostly known.
-  Value *H = Initial;
-  uint32_t Factor = 1;
-  uint32_t Bias = 0;
-  auto ApplyConstants = [&](uint32_t Mul, uint32_t Add) {
-    if (auto *C = dyn_cast<ConstantInt>(H)) {
-      H = ConstantInt::get(I32, uint32_t(C->getZExtValue()) * Mul + Add);
-      return;
-    }
-    if (Mul != 1)
-      H = Place(
-          BinaryOperator::CreateMul(H, ConstantInt::get(I32, Mul), "vhc.mul"));
-    if (Add != 0)
-      H = Place(
-          BinaryOperator::CreateAdd(H, ConstantInt::get(I32, Add), "vhc.add"));
+    ApplyConstants(Factor, Bias);
+    return H;
   };
-  for (Value *CellV : Cells) {
-    Value *W = Widen(CellV);
-    if (auto *C = dyn_cast<ConstantInt>(W)) {
-      Factor *= 31;
-      Bias = Bias * 31 + uint32_t(C->getZExtValue());
-      continue;
+  Value *H;
+  if (ScalarCost <= HashCodeScalarChainCostLimit) {
+    H = FoldChain(Initial, 0, 1, 31);
+  } else {
+    // Each lane hashes every fourth cell with 31^4. The last index of a
+    // lane determines its remaining 31^k weight (k is in [0, 3]). Reduce
+    // the weighted lanes as a tree, then add initial*31^length. All math
+    // wraps in i32; no signed or unsigned no-overflow flags are valid.
+    constexpr unsigned Lanes = 4;
+    assert(Cells.size() >= Lanes && "parallel hash needs four populated lanes");
+    constexpr uint32_t LaneMultiplier = 31 * 31 * 31 * 31;
+    Value *Parts[Lanes];
+    for (unsigned Lane = 0; Lane < Lanes; ++Lane) {
+      Value *Part =
+          FoldChain(ConstantInt::get(I32, 0), Lane, Lanes, LaneMultiplier);
+      unsigned Tail = (Cells.size() - 1 - Lane) % Lanes;
+      uint32_t Weight = 1;
+      for (unsigned I = 0; I < Tail; ++I)
+        Weight *= 31;
+      Parts[Lane] = Binary(Instruction::Mul, Part,
+                           ConstantInt::get(I32, Weight), "vhc.weight");
     }
-    ApplyConstants(Factor * 31, Bias * 31);
-    if (auto *C = dyn_cast<ConstantInt>(H); C && C->isZero())
-      H = W;
-    else
-      H = Place(BinaryOperator::CreateAdd(H, W, "vhc.add"));
-    Factor = 1;
-    Bias = 0;
+    Value *Left = Binary(Instruction::Add, Parts[0], Parts[1], "vhc.sum");
+    Value *Right = Binary(Instruction::Add, Parts[2], Parts[3], "vhc.sum");
+    uint32_t InitialWeight = 1;
+    for (unsigned I = 0; I < Cells.size(); ++I)
+      InitialWeight *= 31;
+    Value *Seed = Binary(Instruction::Mul, Initial,
+                         ConstantInt::get(I32, InitialWeight), "vhc.seed");
+    H = Binary(Instruction::Add,
+               Binary(Instruction::Add, Left, Right, "vhc.sum"), Seed,
+               "vhc.add");
   }
-  ApplyConstants(Factor, Bias);
   observeFieldDefinitions(*ID, FieldDefinitions);
   emitReplaceCall(CB, H, *ID);
   return true;
