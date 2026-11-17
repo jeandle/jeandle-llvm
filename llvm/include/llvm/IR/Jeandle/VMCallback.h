@@ -68,6 +68,29 @@ enum class CloneInstanceInfoStatus : int {
   Ready = 4,
 };
 
+/// Libm entry selector for EvaluateLibm: the callee kind plus the selected
+/// runtime entry (the StubRoutines stub the interpreter calls, or the
+/// SharedRuntime fdlibm port). The pass evaluates constant arguments on the
+/// very entry the folded call targets, so the folded value is bit-identical
+/// to interpreted execution by construction. Keep the values stable: they
+/// are recorded in callback logs.
+enum class LibmEntry : int {
+  SinStub = 0,
+  SinShared = 1,
+  CosStub = 2,
+  CosShared = 3,
+  TanStub = 4,
+  TanShared = 5,
+  LogStub = 6,
+  LogShared = 7,
+  Log10Stub = 8,
+  Log10Shared = 9,
+  ExpStub = 10,
+  ExpShared = 11,
+  PowStub = 12,
+  PowShared = 13,
+};
+
 /// Field-state folding uses semantic field loads and ordinary replay stores;
 /// scalar copy expansion additionally needs a bounded, barrier-free raw copy.
 /// Keep these values stable because callback logs record the purpose as an int.
@@ -303,7 +326,11 @@ enum class JeandleInlineReason : int {
   def(GetCloneInstanceInfo, CloneInstanceInfoResult, Tuple,                      \
       (uintptr_t a1, bool a2, CloneInstanceInfoPurpose a3), (a1, a2, a3),       \
       (VMCallbackValueType::Uintptr, VMCallbackValueType::Bool,                  \
-       VMCallbackValueType::Int), 3)
+       VMCallbackValueType::Int), 3)                                            \
+  def(EvaluateLibm, int64_t, Long,                                              \
+      (int a1, int64_t a2, int64_t a3), (a1, a2, a3),                           \
+      (VMCallbackValueType::Int, VMCallbackValueType::Long,                     \
+       VMCallbackValueType::Long), 3)
 // clang-format on
 
 // =============================================================================
