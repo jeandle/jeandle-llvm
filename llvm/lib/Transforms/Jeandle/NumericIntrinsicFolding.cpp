@@ -64,12 +64,17 @@ Value *foldRound(CallInst &Call, AssumptionCache &AC, DominatorTree &DT) {
              : Known.countMaxActiveBits();
   // Known low zero bits do not consume significand precision. The separate
   // signed destination bound excludes saturation, even for aligned inputs.
-  if (MagnitudeBits > Precision + Known.countMinTrailingZeros() ||
-      MagnitudeBits >= ResultWidth)
-    return nullptr;
   IRBuilder<> Builder(&Call);
-  return Signed ? Builder.CreateSExtOrTrunc(Source, Call.getType())
-                : Builder.CreateZExtOrTrunc(Source, Call.getType());
+  if (MagnitudeBits <= Precision + Known.countMinTrailingZeros() &&
+      MagnitudeBits < ResultWidth)
+    return Signed ? Builder.CreateSExtOrTrunc(Source, Call.getType())
+                  : Builder.CreateZExtOrTrunc(Source, Call.getType());
+
+  // A finite integer-to-FP result is integral even when conversion rounds
+  // away low bits. Keep that rounding and signed saturation, including
+  // infinities produced by conversions of wide integers.
+  return Builder.CreateIntrinsic(Intrinsic::fptosi_sat, {Call.getType(), FPTy},
+                                 {Cast});
 }
 
 // Match the value form emitted for Math.signum. A stable input makes all

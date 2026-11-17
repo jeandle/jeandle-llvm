@@ -53,7 +53,9 @@ define i64 @wide_but_exact(i64 %x) {
 
 define i32 @lossy_float(i32 %x) {
 ; CHECK-LABEL: @lossy_float(
-; CHECK: call i32 @jeandle.round.float
+; CHECK: %f = {{[su]}}itofp
+; CHECK-NEXT: [[R:%.*]] = call i32 @llvm.fptosi.sat.i32.f32(float %f)
+; CHECK-NEXT: ret i32 [[R]]
   %f = sitofp i32 %x to float
   %r = call i32 @jeandle.round.float(float %f)
   ret i32 %r
@@ -61,7 +63,9 @@ define i32 @lossy_float(i32 %x) {
 
 define i64 @lossy_double(i64 %x) {
 ; CHECK-LABEL: @lossy_double(
-; CHECK: call i64 @jeandle.round.double
+; CHECK: %f = {{[su]}}itofp
+; CHECK-NEXT: [[R:%.*]] = call i64 @llvm.fptosi.sat.i64.f64(double %f)
+; CHECK-NEXT: ret i64 [[R]]
   %f = sitofp i64 %x to double
   %r = call i64 @jeandle.round.double(double %f)
   ret i64 %r
@@ -69,7 +73,9 @@ define i64 @lossy_double(i64 %x) {
 
 define i32 @unsigned_saturation(i32 %x) {
 ; CHECK-LABEL: @unsigned_saturation(
-; CHECK: call i32 @jeandle.round.float
+; CHECK: %f = {{[su]}}itofp
+; CHECK-NEXT: [[R:%.*]] = call i32 @llvm.fptosi.sat.i32.f32(float %f)
+; CHECK-NEXT: ret i32 [[R]]
   %f = uitofp i32 %x to float
   %r = call i32 @jeandle.round.float(float %f)
   ret i32 %r
@@ -77,7 +83,9 @@ define i32 @unsigned_saturation(i32 %x) {
 
 define i64 @lossy_mask(i64 %x) {
 ; CHECK-LABEL: @lossy_mask(
-; CHECK: call i64 @jeandle.round.double
+; CHECK: %f = {{[su]}}itofp
+; CHECK-NEXT: [[R:%.*]] = call i64 @llvm.fptosi.sat.i64.f64(double %f)
+; CHECK-NEXT: ret i64 [[R]]
   %v = and i64 %x, 18014398509481983
   %f = uitofp i64 %v to double
   %r = call i64 @jeandle.round.double(double %f)
