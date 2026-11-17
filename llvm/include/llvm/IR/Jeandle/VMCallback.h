@@ -265,6 +265,9 @@ enum class JeandleInlineReason : int {
   def(GetMirrorKlass, uintptr_t, Uintptr,                                        \
       (int a1), (a1),                                                            \
       (VMCallbackValueType::Int), 1)                                             \
+  def(GetMirrorArrayKlass, uintptr_t, Uintptr,                                   \
+      (int a1), (a1),                                                            \
+      (VMCallbackValueType::Int), 1)                                             \
   def(GetKlassLayoutHelper, int, Int,                                            \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
@@ -465,6 +468,10 @@ enum class JeandleInlineReason : int {
 ///                         mirror represents a primitive type. Returns
 ///                         MirrorKlassUnavailable for a non-mirror or an
 ///                         unavailable value. Pure (id -> represented klass).
+///   GetMirrorArrayKlass — For a constant Class mirror, resolves its array
+///                         Klass using the compiler interface. Returns 0 for
+///                         void and MirrorKlassUnavailable when unavailable.
+///                         Records the Klass in the compiled method metadata.
 ///   GetKlassLayoutHelper
 ///                       — Returns Klass::layout_helper() for a constant Klass
 ///                         pointer, or 0 if unavailable. Pure (klass ->

@@ -55,6 +55,9 @@ exception:
 ; COMMON-NOT: @jeandle.copy
 
 ; GC-LABEL: define ptr addrspace(1) @small_copyof(
+; GC-NEXT: entry:
+; GC-NEXT: %dest = call ptr addrspace(1) @jeandle.new_array({{.*}}i1 false, i1 false)
+; GC-NOT: @llvm.memset
 ; GC: [[VALUE:%.*]] = load atomic volatile ptr addrspace(3), ptr addrspace(1) {{%.*}} unordered
 ; GC-NEXT: call hotspotcc void @jeandle.pre_barrier(ptr addrspace(1) [[DEST:%.*]])
 ; GC-NEXT: store atomic ptr addrspace(3) [[VALUE]], ptr addrspace(1) [[DEST]] unordered
