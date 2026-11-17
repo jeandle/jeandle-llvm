@@ -8044,6 +8044,8 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
 // Fold a bounded, in-range virtual array hash without materializing its
 // receiver. Cheap hashes combine constant segments into affine updates;
 // expensive hashes use independent polynomials to bound serial dependency.
+// Non-positive counts replace the call with the initial value alone, exactly
+// like the kernel's pre-dispatch exit.
 bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
   using namespace jeandle;
   using namespace jeandle::pea;
@@ -8059,14 +8061,20 @@ bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
       V = Alias;
     return stringConstantInt(V);
   };
-  auto From = N(1);
   auto Length = N(2);
-  if (!From || !Length || *From < 0 || *Length < 0 ||
-      *Length > HashCodeMaxFoldLength)
-    return false;
   Value *Initial = CB->getArgOperand(3);
   while (Value *Alias = Aliases.getScalarAlias(Initial))
     Initial = Alias;
+  // The kernel returns initialValue before dispatching on the basic type
+  // whenever the count is non-positive, so this shortcut reads nothing and
+  // needs no layout match, in-range proof, or constant from index.
+  if (Length && *Length <= 0) {
+    emitReplaceCall(CB, Initial, *ID);
+    return true;
+  }
+  auto From = N(1);
+  if (!From || !Length || *From < 0 || *Length > HashCodeMaxFoldLength)
+    return false;
 
   const VirtualObject &VO = *Result.VirtualObjects[*ID];
   const bool ByteLike =

@@ -172,6 +172,41 @@ u:
   resume i64 %lp
 }
 
+; A negative count exits before the kernel's basic-type dispatch and reads
+; nothing, so the fold needs no layout match or range proof and not even a
+; constant from index.
+; CHECK-LABEL: @negative_length(
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.vectorized_hashcode
+; CHECK: ret i32 %init
+define i32 @negative_length(i32 %from, i32 %init) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+entry:
+  %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10004 to ptr), i32 4, i32 32, i32 16, i32 100, i1 false, i1 false) to label %work unwind label %u
+work:
+  %r = call i32 @jeandle.vectorized_hashcode(ptr addrspace(1) %a, i32 %from, i32 -1, i32 %init, i32 10)
+  ret i32 %r
+u:
+  %lp = landingpad i64 cleanup
+  resume i64 %lp
+}
+
+; The non-positive-count exit also covers a zero length with an out-of-range
+; from index and a mismatched element layout (T_BOOLEAN over an int[]).
+; CHECK-LABEL: @zero_length_out_of_range(
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.vectorized_hashcode
+; CHECK: ret i32 7
+define i32 @zero_length_out_of_range() gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+entry:
+  %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10004 to ptr), i32 4, i32 32, i32 16, i32 100, i1 false, i1 false) to label %work unwind label %u
+work:
+  %r = call i32 @jeandle.vectorized_hashcode(ptr addrspace(1) %a, i32 100, i32 0, i32 7, i32 4)
+  ret i32 %r
+u:
+  %lp = landingpad i64 cleanup
+  resume i64 %lp
+}
+
 ; Scalar cells lower to a placed sign-extension Horner chain; the allocation
 ; and the op both disappear.
 ; CHECK-LABEL: @scalar_chain(
