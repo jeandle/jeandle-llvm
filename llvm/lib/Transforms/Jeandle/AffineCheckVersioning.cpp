@@ -1,4 +1,4 @@
-//===- AffineCheckVersioning.cpp - Affine checks ----------------------------===//
+//===- AffineCheckVersioning.cpp - Affine checks --------------------------===//
 //
 // Copyright (c) 2026, the Jeandle-LLVM Authors. All Rights Reserved.
 //

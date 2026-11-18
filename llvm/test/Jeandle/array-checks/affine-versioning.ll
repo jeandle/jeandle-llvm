@@ -133,7 +133,7 @@ define i32 @mutable_receiver(ptr addrspace(1) noundef nonnull %a, i32 noundef %e
 ; CHECK: %ok = icmp ult
 ; CHECK: br i1 %ok
 entry:
-  
+
   %enter = icmp sgt i32 %end, 0
   br i1 %enter, label %preheader, label %exit
 preheader:

@@ -1,4 +1,4 @@
-//===- AffineCheckVersioning.h - Affine checks -------------------*- C++ -*-===//
+//===- AffineCheckVersioning.h - Affine checks ------------------*- C++ -*-===//
 //
 // Copyright (c) 2026, the Jeandle-LLVM Authors. All Rights Reserved.
 //
