@@ -13,6 +13,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Jeandle/ArrayLengthOptimization.h"
 #include "llvm/Transforms/Jeandle/BitShuffleFolding.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
 #include "llvm/Transforms/Jeandle/CopySignStoreLowering.h"
@@ -206,6 +207,8 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
       createModuleToFunctionPassAdaptor(StringIntrinsicSpecialization()));
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   // ==== PEA segment ====
+  PM.addPass(createModuleToFunctionPassAdaptor(JavaOpLengthFolding()));
+  PM.addPass(createModuleToFunctionPassAdaptor(ArrayLengthOptimization()));
   // Everything below up to InsertGCBarriers exists to serve PEA: the
   // high-tier loop-optimization cluster that exposes virtualization
   // opportunities, the pre-PEA cleanup that PEA's correctness depends on,
@@ -345,6 +348,8 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
 
   const bool StripMiningEnabled = isStripMiningEnabled();
+  PM.addPass(createModuleToFunctionPassAdaptor(JavaOpLengthFolding()));
+  PM.addPass(createModuleToFunctionPassAdaptor(ArrayLengthOptimization()));
   const bool DeferEmptyLoopDeletion = (Level == OptimizationLevel::O3);
 
   // The loop adaptor establishes LoopSimplify + LCSSA form before

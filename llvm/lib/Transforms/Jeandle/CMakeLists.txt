@@ -1,4 +1,5 @@
 add_llvm_component_library(LLVMJeandleTransforms
+  ArrayLengthOptimization.cpp
   BitShuffleFolding.cpp
   CopySignStoreLowering.cpp
   CopySpecialization.cpp

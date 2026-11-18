@@ -267,6 +267,7 @@
 #include "llvm/Transforms/Instrumentation/SanitizerCoverage.h"
 #include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
 #include "llvm/Transforms/Instrumentation/TypeSanitizer.h"
+#include "llvm/Transforms/Jeandle/ArrayLengthOptimization.h"
 #include "llvm/Transforms/Jeandle/BitShuffleFolding.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
 #include "llvm/Transforms/Jeandle/ConstantFieldFolding.h"
