@@ -5,12 +5,12 @@
 ; IsSubtype(5, 4) => true, so the check folds to true.
 
 declare i1 @jeandle.check_instanceof(ptr addrspace(0), ptr addrspace(1) nonnull)
-define ptr addrspace(0) @jeandle.load_klass(ptr addrspace(1) nonnull %oop) #0 {
+define hotspotcc ptr addrspace(0) @jeandle.load_klass(ptr addrspace(1) nonnull %oop) #0 {
   %actual = load atomic ptr addrspace(0), ptr addrspace(1) %oop unordered, align 8
   ret ptr addrspace(0) %actual
 }
 
-define i1 @jeandle.check_exact_klass(ptr addrspace(0) %expected, ptr addrspace(0) %actual) #0 {
+define hotspotcc i1 @jeandle.check_exact_klass(ptr addrspace(0) %expected, ptr addrspace(0) %actual) #0 {
   %matches = icmp eq ptr addrspace(0) %actual, %expected
   ret i1 %matches
 }
@@ -30,9 +30,9 @@ entry:
 ; equal edge, getJavaType should infer exact klass 5 without an oop wrapper.
 define i1 @test_exact_klass_guard(ptr addrspace(1) %obj) gc "hotspotgc" {
 entry:
-  %actual_klass = call ptr addrspace(0) @jeandle.load_klass(
+  %actual_klass = call hotspotcc ptr addrspace(0) @jeandle.load_klass(
       ptr addrspace(1) nonnull %obj)
-  %matches = call i1 @jeandle.check_exact_klass(
+  %matches = call hotspotcc i1 @jeandle.check_exact_klass(
       ptr addrspace(0) inttoptr (i64 5 to ptr addrspace(0)),
       ptr addrspace(0) %actual_klass)
   br i1 %matches, label %hit, label %miss
@@ -51,9 +51,9 @@ miss:
 ; first argument after an IR rewrite. The hit path must still infer klass 5.
 define i1 @test_exact_klass_guard_reversed(ptr addrspace(1) %obj) gc "hotspotgc" {
 entry:
-  %actual_klass = call ptr addrspace(0) @jeandle.load_klass(
+  %actual_klass = call hotspotcc ptr addrspace(0) @jeandle.load_klass(
       ptr addrspace(1) nonnull %obj)
-  %matches = call i1 @jeandle.check_exact_klass(
+  %matches = call hotspotcc i1 @jeandle.check_exact_klass(
       ptr addrspace(0) %actual_klass,
       ptr addrspace(0) inttoptr (i64 5 to ptr addrspace(0)))
   br i1 %matches, label %hit, label %miss
@@ -73,9 +73,9 @@ miss:
 ; sharpen the receiver to klass 5.
 define i1 @test_bimorphic_second_guard(ptr addrspace(1) %obj) gc "hotspotgc" {
 entry:
-  %actual_klass = call ptr addrspace(0) @jeandle.load_klass(
+  %actual_klass = call hotspotcc ptr addrspace(0) @jeandle.load_klass(
       ptr addrspace(1) nonnull %obj)
-  %matches_first = call i1 @jeandle.check_exact_klass(
+  %matches_first = call hotspotcc i1 @jeandle.check_exact_klass(
       ptr addrspace(0) inttoptr (i64 6 to ptr addrspace(0)),
       ptr addrspace(0) %actual_klass)
   br i1 %matches_first, label %first_hit, label %second_check
@@ -84,7 +84,7 @@ first_hit:
   ret i1 false
 
 second_check:
-  %matches_second = call i1 @jeandle.check_exact_klass(
+  %matches_second = call hotspotcc i1 @jeandle.check_exact_klass(
       ptr addrspace(0) inttoptr (i64 5 to ptr addrspace(0)),
       ptr addrspace(0) %actual_klass)
   br i1 %matches_second, label %second_hit, label %miss
@@ -103,9 +103,9 @@ miss:
 define i1 @test_mismatched_guard_subject(ptr addrspace(1) %obj,
                                         ptr addrspace(1) %other) gc "hotspotgc" {
 entry:
-  %actual_klass = call ptr addrspace(0) @jeandle.load_klass(
+  %actual_klass = call hotspotcc ptr addrspace(0) @jeandle.load_klass(
       ptr addrspace(1) nonnull %other)
-  %matches = call i1 @jeandle.check_exact_klass(
+  %matches = call hotspotcc i1 @jeandle.check_exact_klass(
       ptr addrspace(0) inttoptr (i64 5 to ptr addrspace(0)),
       ptr addrspace(0) %actual_klass)
   br i1 %matches, label %hit, label %miss
@@ -127,9 +127,9 @@ miss:
 define i1 @test_same_klass_exact_intersection(
     ptr addrspace(1) "java-klass"="5" %obj) gc "hotspotgc" {
 entry:
-  %actual_klass = call ptr addrspace(0) @jeandle.load_klass(
+  %actual_klass = call hotspotcc ptr addrspace(0) @jeandle.load_klass(
       ptr addrspace(1) nonnull %obj)
-  %matches = call i1 @jeandle.check_exact_klass(
+  %matches = call hotspotcc i1 @jeandle.check_exact_klass(
       ptr addrspace(0) inttoptr (i64 5 to ptr addrspace(0)),
       ptr addrspace(0) %actual_klass)
   br i1 %matches, label %hit, label %miss
@@ -156,9 +156,9 @@ entry:
   br i1 %is_klass_5, label %exact_check, label %miss
 
 exact_check:
-  %actual_klass = call ptr addrspace(0) @jeandle.load_klass(
+  %actual_klass = call hotspotcc ptr addrspace(0) @jeandle.load_klass(
       ptr addrspace(1) nonnull %obj)
-  %matches = call i1 @jeandle.check_exact_klass(
+  %matches = call hotspotcc i1 @jeandle.check_exact_klass(
       ptr addrspace(0) inttoptr (i64 5 to ptr addrspace(0)),
       ptr addrspace(0) %actual_klass)
   br i1 %matches, label %hit, label %miss
@@ -184,8 +184,8 @@ miss:
 ; CHECK-LABEL: hit:
 ; CHECK-NEXT: ret i1 true
 ; CHECK-LABEL: define i1 @test_bimorphic_second_guard
-; CHECK: %actual_klass = call ptr @jeandle.load_klass
-; CHECK-NOT: call ptr @jeandle.load_klass
+; CHECK: %actual_klass = call hotspotcc ptr @jeandle.load_klass
+; CHECK-NOT: call hotspotcc ptr @jeandle.load_klass
 ; CHECK-LABEL: second_hit:
 ; CHECK-NEXT: ret i1 true
 ; CHECK-LABEL: define i1 @test_mismatched_guard_subject

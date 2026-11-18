@@ -166,18 +166,11 @@ bool jeandle::areKlassesIncompatible(uintptr_t Klass, bool KlassExact,
          !CB->IsUnverifiedInterface(OtherKlass);
 }
 
-/// Return true if F is jeandle.check_instanceof.
-static bool isCheckInstanceofFn(const Function *F) {
-  return F && F->getName() == "jeandle.check_instanceof";
-}
-
-/// If CB is a call/invoke to jeandle.check_instanceof, return the super klass
-/// and obj. The name match alone is not an identity: legal IR may declare a
-/// same-named function with a different signature, so the operand accesses
-/// are guarded by an arity check.
+/// If CB is a call/invoke to a non-null subtype check, return the super klass
+/// and obj. Same-named functions with a different ABI are not type checks.
 static bool isCheckInstanceofCall(const CallBase *CB, uintptr_t &Klass,
                                   Value *&Obj) {
-  if (!isCheckInstanceofFn(CB->getCalledFunction()) || CB->arg_size() != 2)
+  if (getJavaTypeCheckKind(CB) != JavaTypeCheckKind::NonNullObject)
     return false;
   Klass = extractKlassConstant(CB->getArgOperand(0));
   Obj = CB->getArgOperand(1);
@@ -524,12 +517,9 @@ getDefinednessInputs(Value *V, SmallVectorImpl<Value *> &Inputs) {
     // The Jeandle check helpers return a concrete boolean for every contract-
     // valid input (their templates compute it from memory reads and
     // comparisons), so their results are defined without a noundef attribute.
-    // This is the same name-based helper contract the tracing relies on.
-    if (const Function *Callee = CB->getCalledFunction())
-      if (Callee->getName() == "jeandle.check_instanceof" ||
-          Callee->getName() == "jeandle.check_exact_klass" ||
-          Callee->getName() == "jeandle.check_klass_subtype")
-        return true;
+    // Apply the same ABI validation as condition tracing.
+    if (getJavaTypeCheckKind(CB))
+      return true;
     return CB->hasRetAttr(llvm::Attribute::NoUndef) ||
            CB->hasRetAttr(llvm::Attribute::Dereferenceable) ||
            CB->hasRetAttr(llvm::Attribute::DereferenceableOrNull);
@@ -1142,8 +1132,8 @@ static Value *stripCastsAndFreeze(Value *V, DefinedMemo &Defined) {
   return V;
 }
 
-/// Match `jeandle.check_exact_klass(ExpectedKlass, ActualKlass)`, where
-/// one argument is loaded directly from `QueryObj` by `jeandle.load_klass`.
+/// Match exact Klass helper calls or pointer comparisons, where one operand
+/// is loaded directly from `QueryObj` by `jeandle.load_klass`.
 /// The intrinsic arguments are treated symmetrically because IR rewrites may
 /// place the loaded Klass in either position. Both sides are canonicalized
 /// with the definedness-aware freeze/identity stripping so wrappers added by
@@ -1152,28 +1142,48 @@ static bool isLoadKlassOf(Value *ValueToCheck, Value *QueryObj,
                           DefinedMemo &Defined) {
   Value *Stripped = stripCastsAndFreeze(ValueToCheck, Defined);
   auto *Load = dyn_cast<CallBase>(Stripped);
-  return Load && Load->getCalledFunction() &&
-         Load->getCalledFunction()->getName() == "jeandle.load_klass" &&
-         Load->arg_size() == 1 &&
+  Function *Callee = Load ? Load->getCalledFunction() : nullptr;
+  return Callee && Callee->getName() == "jeandle.load_klass" &&
+         Load->getFunctionType() == Callee->getFunctionType() &&
+         !Callee->isVarArg() && Load->arg_size() == 1 &&
+         Load->getCallingConv() == Callee->getCallingConv() &&
+         Callee->getCallingConv() == CallingConv::Hotspot_JIT &&
+         Load->getType() == PointerType::get(Load->getContext(), 0) &&
+         isWideOopType(Load->getArgOperand(0)->getType()) &&
+         !Load->hasOperandBundles() &&
          stripCastsAndFreeze(Load->getArgOperand(0), Defined) ==
              stripCastsAndFreeze(QueryObj, Defined);
 }
 
 static uintptr_t traceExactKlassGuard(Value *Cond, Value *QueryObj,
-                                      DefinedMemo &Defined) {
-  auto *CB = dyn_cast<CallBase>(stripCastsAndFreeze(Cond, Defined));
-  Function *Callee = CB ? CB->getCalledFunction() : nullptr;
-  if (!Callee || Callee->getName() != "jeandle.check_exact_klass" ||
-      CB->arg_size() != 2)
-    return 0;
+                                      DefinedMemo &Defined,
+                                      bool &EqualWhenTrue) {
+  Cond = stripCastsAndFreeze(Cond, Defined);
+  Value *Left;
+  Value *Right;
+  if (auto *Cmp = dyn_cast<ICmpInst>(Cond)) {
+    if (!Cmp->isEquality() ||
+        Cmp->getOperand(0)->getType() != PointerType::get(Cmp->getContext(), 0))
+      return 0;
+    EqualWhenTrue = Cmp->getPredicate() == CmpInst::ICMP_EQ;
+    Left = Cmp->getOperand(0);
+    Right = Cmp->getOperand(1);
+  } else {
+    auto *CB = dyn_cast<CallBase>(Cond);
+    if (getJavaTypeCheckKind(CB) != JavaTypeCheckKind::ExactKlass ||
+        CB->getCallingConv() != CallingConv::Hotspot_JIT)
+      return 0;
+    EqualWhenTrue = true;
+    Left = CB->getArgOperand(0);
+    Right = CB->getArgOperand(1);
+  }
 
-  bool FirstIsActual = isLoadKlassOf(CB->getArgOperand(0), QueryObj, Defined);
-  bool SecondIsActual = isLoadKlassOf(CB->getArgOperand(1), QueryObj, Defined);
+  bool FirstIsActual = isLoadKlassOf(Left, QueryObj, Defined);
+  bool SecondIsActual = isLoadKlassOf(Right, QueryObj, Defined);
   if (FirstIsActual == SecondIsActual)
     return 0;
 
-  Value *ExpectedKlass =
-      FirstIsActual ? CB->getArgOperand(1) : CB->getArgOperand(0);
+  Value *ExpectedKlass = FirstIsActual ? Right : Left;
   return extractKlassConstant(ExpectedKlass);
 }
 
@@ -1961,8 +1971,10 @@ static JavaType edgeGuard(BasicBlock *From, BasicBlock *To, Value *V,
     // Exact-klass guard fast path. A failed exact-class guard does not imply
     // that the object is not an instance of the guarded class: it may still be
     // a subclass, so the false side contributes nothing.
-    if (uintptr_t Exact = traceExactKlassGuard(Cond, V, Q.DefinedValues)) {
-      if (TrueIsTo) {
+    bool EqualWhenTrue = true;
+    if (uintptr_t Exact =
+            traceExactKlassGuard(Cond, V, Q.DefinedValues, EqualWhenTrue)) {
+      if (TrueIsTo == EqualWhenTrue) {
         LLVM_DEBUG(dbgs() << "JavaType: edge guard " << From->getName()
                           << " -> " << To->getName() << " proves exact klass "
                           << Exact << " for " << *V << "\n");

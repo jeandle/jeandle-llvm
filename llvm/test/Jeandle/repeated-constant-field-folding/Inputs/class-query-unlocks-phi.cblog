@@ -1,0 +1,3 @@
+GetKlassAccessFlags 123 512 = 0
+GetMirrorKlass 0 = 123
+GetKlassModifierFlags 123 = 17

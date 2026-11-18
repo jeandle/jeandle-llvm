@@ -40,6 +40,7 @@
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
+#include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 #include "llvm/Transforms/Jeandle/ProfileDevirtualization.h"
 #include "llvm/Transforms/Jeandle/RecoverTypeInfo.h"
 #include "llvm/Transforms/Jeandle/RepeatedConstantFolding.h"
@@ -48,6 +49,7 @@
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/InstSimplifyPass.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
+#include "llvm/Transforms/Utils/Local.h"
 
 #include <utility>
 
@@ -70,6 +72,63 @@ static void eraseInlineScopeIDs(Function &RootFunction) {
       continue;
     CB->setMetadata(jeandle::Metadata::InlineScopeID, nullptr);
   }
+}
+
+static bool specializeCallerClass(Function &RootFunction,
+                                  ArrayRef<JeandleInlineScope> InlineScopes) {
+  Module &M = *RootFunction.getParent();
+  const jeandle::VMCallbacks *VC = jeandle::getVMCallbacks();
+  if (!M.getNamedMetadata(jeandle::Metadata::JavaMethodCompilation) || !VC ||
+      !VC->GetCallerClass || !VC->GetOopHandleName)
+    return false;
+
+  SmallVector<CallBase *, 8> Candidates;
+  for (Instruction &I : instructions(RootFunction)) {
+    auto *CB = dyn_cast<CallBase>(&I);
+    if (!CB || !CB->hasFnAttr("jeandle-caller-class") ||
+        !isa<CallInst, InvokeInst>(CB) || !CB->getCalledFunction() ||
+        !CB->arg_empty() || CB->getFunctionType()->isVarArg() ||
+        !jeandle::isWideOopType(CB->getType()) ||
+        CB->getCallingConv() != CallingConv::Hotspot_JIT ||
+        CB->hasOperandBundlesOtherThan({LLVMContext::OB_deopt}))
+      continue;
+    if (auto *CI = dyn_cast<CallInst>(CB); CI && CI->isMustTailCall())
+      continue;
+    Candidates.push_back(CB);
+  }
+
+  bool Changed = false;
+  for (CallBase *CB : Candidates) {
+    int ScopeID = -1;
+    if (MDNode *MD = CB->getMetadata(jeandle::Metadata::InlineScopeID)) {
+      if (MD->getNumOperands() != 1)
+        continue;
+      auto *Scope =
+          mdconst::dyn_extract_or_null<ConstantInt>(MD->getOperand(0));
+      if (!Scope || !Scope->getType()->isIntegerTy(32))
+        continue;
+      ScopeID = static_cast<int>(Scope->getSExtValue());
+      if (ScopeID < -1 ||
+          (ScopeID >= 0 && unsigned(ScopeID) >= InlineScopes.size()))
+        continue;
+    }
+
+    int MirrorID = VC->GetCallerClass(ScopeID);
+    if (MirrorID < 0)
+      continue;
+
+    IRBuilder<> Builder(CB);
+    LoadInst *Mirror = createConstOopLoad(M, Builder, MirrorID);
+    CB->replaceAllUsesWith(Mirror);
+    // The VM proved that this stack query has a constant result and cannot
+    // throw. Convert invokes with LLVM's EH utility so unwind PHIs lose the
+    // removed edge before the now-redundant call is erased.
+    if (auto *II = dyn_cast<InvokeInst>(CB))
+      CB = changeToCall(II);
+    CB->eraseFromParent();
+    Changed = true;
+  }
+  return Changed;
 }
 
 static bool eraseAvailableExternallyJavaMethods(Module &M,
@@ -221,7 +280,24 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
     if (RoundChanged) {
       updateDriverPreservedAnalyses(M, MAM, DriverPA,
                                     std::move(InlineResult.PA));
+    }
 
+    // Only root copies have committed caller scopes. Keep cached inlinee
+    // definitions unchanged so another caller can reuse their stack query.
+    bool SpecializedCaller =
+        RootFunction && specializeCallerClass(*RootFunction, InlineScopes);
+    if (SpecializedCaller) {
+      FunctionAnalysisManager &FAM =
+          MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
+      FAM.invalidate(*RootFunction, PreservedAnalyses::none());
+      PreservedAnalyses CallerPA;
+      CallerPA.preserve<FunctionAnalysisManagerModuleProxy>();
+      CallerPA.preserveSet<AllAnalysesOn<Function>>();
+      updateDriverPreservedAnalyses(M, MAM, DriverPA, std::move(CallerPA));
+      Changed = true;
+    }
+
+    if (RoundChanged || SpecializedCaller) {
       // Lower phase-0 JavaOp call sites exposed by the previous inline round's
       // inlining.
       PreservedAnalyses JavaOpLowerPA = JavaOperationLower(0).run(M, MAM);
@@ -275,12 +351,6 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
                          "inline/devirtualization convergence.\n");
   }
 
-  if (!Changed)
-    return PreservedAnalyses::all();
-
-  FunctionAnalysisManager &FAM =
-      MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
-
   // inline-scope-id is driver-local scheduling state. It is only needed while
   // the driver loop is active so devirtualization rewrites can preserve scope
   // IDs for the next inline round. Drop it before leaving the driver to avoid
@@ -288,6 +358,12 @@ PreservedAnalyses JeandleInlineDriver::run(Module &M,
   // invocation.
   if (RootFunction)
     eraseInlineScopeIDs(*RootFunction);
+
+  if (!Changed)
+    return PreservedAnalyses::all();
+
+  FunctionAnalysisManager &FAM =
+      MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
 
   // Notify the VM before available_externally callee bodies are removed. The
   // JVM uses this point to snapshot a replay side module containing the IR

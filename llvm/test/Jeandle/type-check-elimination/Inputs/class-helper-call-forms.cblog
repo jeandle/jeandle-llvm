@@ -1,0 +1,2 @@
+IsObjectKlass 100 = true
+IsSubtype 200 100 = true
