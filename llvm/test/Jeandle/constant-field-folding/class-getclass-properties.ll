@@ -184,5 +184,152 @@ define ptr addrspace(1) @forwarded_exact_superclass(ptr addrspace(1) nonnull "ja
   %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass(ptr addrspace(1) %m)
   ret ptr addrspace(1) %r
 }
+
+; A non-exact array bound proves Java superclass and hidden status, including
+; primitive/multidimensional arrays. Modifier visibility still depends on the
+; component, so it must not be inferred from array-ness alone.
+; CHECK-LABEL: @array_superclass(
+; CHECK-NOT: call
+; CHECK: [[SUPER:%.*]] = load ptr addrspace(1), ptr @oop_handle_Mirror_8
+; CHECK-NEXT: ret ptr addrspace(1) [[SUPER]]
+define ptr addrspace(1) @array_superclass(ptr addrspace(1) nonnull "java-klass"="300" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass(ptr addrspace(1) %m)
+  ret ptr addrspace(1) %r
+}
+
+; CHECK-LABEL: @primitive_array_superclass(
+; CHECK-NOT: call
+; CHECK: [[SUPER:%.*]] = load ptr addrspace(1), ptr @oop_handle_Mirror_8
+; CHECK-NEXT: ret ptr addrspace(1) [[SUPER]]
+define ptr addrspace(1) @primitive_array_superclass(ptr addrspace(1) nonnull "java-klass"="600" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass(ptr addrspace(1) %m)
+  ret ptr addrspace(1) %r
+}
+
+; CHECK-LABEL: @multi_array_superclass(
+; CHECK-NOT: call
+; CHECK: [[SUPER:%.*]] = load ptr addrspace(1), ptr @oop_handle_Mirror_8
+; CHECK-NEXT: ret ptr addrspace(1) [[SUPER]]
+define ptr addrspace(1) @multi_array_superclass(ptr addrspace(1) nonnull "java-klass"="700" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass(ptr addrspace(1) %m)
+  ret ptr addrspace(1) %r
+}
+
+; CHECK-LABEL: @array_hidden(
+; CHECK-NOT: call
+; CHECK-NEXT: ret i32 0
+define i32 @array_hidden(ptr addrspace(1) nonnull "java-klass"="300" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc i32 @jeandle.class_is_hidden(ptr addrspace(1) %m)
+  ret i32 %r
+}
+
+; CHECK-LABEL: @merged_array_superclass(
+; CHECK-NOT: call
+; CHECK: [[SUPER:%.*]] = load ptr addrspace(1), ptr @oop_handle_Mirror_8
+; CHECK-NEXT: ret ptr addrspace(1) [[SUPER]]
+define ptr addrspace(1) @merged_array_superclass(i1 %c, ptr addrspace(1) nonnull "java-klass"="300" %a, ptr addrspace(1) nonnull "java-klass"="600" %b) {
+  %ma = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %a)
+  %mb = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %b)
+  %m = select i1 %c, ptr addrspace(1) %ma, ptr addrspace(1) %mb
+  %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass(ptr addrspace(1) %m)
+  ret ptr addrspace(1) %r
+}
+
+; Folding a query must not erase the original mirror needed for deoptimization.
+; CHECK-LABEL: @array_superclass_deopt(
+; CHECK: [[M:%.*]] = call hotspotcc ptr addrspace(1) @jeandle.get_class
+; CHECK: [[SUPER:%.*]] = load ptr addrspace(1), ptr @oop_handle_Mirror_8
+; CHECK: call void @observe() [ "deopt"(ptr addrspace(1) [[M]]) ]
+; CHECK-NEXT: ret ptr addrspace(1) [[SUPER]]
+define ptr addrspace(1) @array_superclass_deopt(ptr addrspace(1) nonnull "java-klass"="300" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass(ptr addrspace(1) %m)
+  call void @observe() [ "deopt"(ptr addrspace(1) %m) ]
+  ret ptr addrspace(1) %r
+}
+
+; CHECK-LABEL: @nullable_array_superclass(
+; CHECK: %m = call hotspotcc ptr addrspace(1) @jeandle.get_class
+; CHECK: %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass
+; CHECK-NEXT: ret ptr addrspace(1) %r
+define ptr addrspace(1) @nullable_array_superclass(ptr addrspace(1) "java-klass"="300" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass(ptr addrspace(1) %m)
+  ret ptr addrspace(1) %r
+}
+
+; CHECK-LABEL: @object_superclass(
+; CHECK: call hotspotcc ptr @jeandle.load_klass
+; CHECK: call hotspotcc ptr addrspace(1) @jeandle.klass_get_superclass
+; CHECK: ret ptr addrspace(1)
+define ptr addrspace(1) @object_superclass(ptr addrspace(1) nonnull "java-klass"="100" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass(ptr addrspace(1) %m)
+  ret ptr addrspace(1) %r
+}
+
+; CHECK-LABEL: @interface_superclass(
+; CHECK: call hotspotcc ptr @jeandle.load_klass
+; CHECK: call hotspotcc ptr addrspace(1) @jeandle.klass_get_superclass
+; CHECK: ret ptr addrspace(1)
+define ptr addrspace(1) @interface_superclass(ptr addrspace(1) nonnull "java-klass"="400" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass(ptr addrspace(1) %m)
+  ret ptr addrspace(1) %r
+}
+
+; CHECK-LABEL: @array_modifiers(
+; CHECK: call hotspotcc ptr @jeandle.load_klass
+; CHECK: call hotspotcc i32 @jeandle.klass_modifiers
+; CHECK: ret i32
+define i32 @array_modifiers(ptr addrspace(1) nonnull "java-klass"="300" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc i32 @jeandle.class_get_modifiers(ptr addrspace(1) %m)
+  ret i32 %r
+}
+
+; CHECK-LABEL: @array_access_flags(
+; CHECK: call hotspotcc ptr @jeandle.load_klass
+; CHECK: call hotspotcc i32 @jeandle.klass_access_flags
+; CHECK: ret i32
+define i32 @array_access_flags(ptr addrspace(1) nonnull "java-klass"="300" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc i32 @jeandle.class_get_access_flags(ptr addrspace(1) %m)
+  ret i32 %r
+}
+
+; CHECK-LABEL: @unavailable_array_mirror(
+; CHECK: call hotspotcc ptr @jeandle.load_klass
+; CHECK: call hotspotcc ptr addrspace(1) @jeandle.klass_get_superclass
+; CHECK: ret ptr addrspace(1)
+define ptr addrspace(1) @unavailable_array_mirror(ptr addrspace(1) nonnull "java-klass"="800" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass(ptr addrspace(1) %m)
+  ret ptr addrspace(1) %r
+}
+
+; CHECK-LABEL: @unavailable_array_superclass(
+; CHECK: call hotspotcc ptr @jeandle.load_klass
+; CHECK: call hotspotcc ptr addrspace(1) @jeandle.klass_get_superclass
+; CHECK: ret ptr addrspace(1)
+define ptr addrspace(1) @unavailable_array_superclass(ptr addrspace(1) nonnull "java-klass"="900" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass(ptr addrspace(1) %m)
+  ret ptr addrspace(1) %r
+}
+
+; CHECK-LABEL: @unavailable_superclass_mirror(
+; CHECK: call hotspotcc ptr addrspace(1) @jeandle.{{(class|klass)_get_superclass}}
+; CHECK: ret ptr addrspace(1)
+define ptr addrspace(1) @unavailable_superclass_mirror(ptr addrspace(1) nonnull "java-klass"="1000" %obj) {
+  %m = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %obj)
+  %r = call hotspotcc ptr addrspace(1) @jeandle.class_get_superclass(ptr addrspace(1) %m)
+  ret ptr addrspace(1) %r
+}
+
 !java-method-compilation = !{}
 !0 = !{}

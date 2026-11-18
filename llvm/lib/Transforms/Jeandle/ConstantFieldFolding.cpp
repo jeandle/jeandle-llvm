@@ -553,24 +553,6 @@ bool isGetClassCall(CallInst *CI) {
          !CI->hasOperandBundles() && !CI->isMustTailCall();
 }
 
-bool isKnownNonNullAt(Value *Receiver, Instruction *Query, DominatorTree &DT,
-                      const DataLayout &DL, LazyValueInfo &LVI) {
-  SimplifyQuery SQ(DL, &DT, nullptr, Query);
-  if (isKnownNonZero(Receiver, SQ))
-    return true;
-
-  // ValueTracking bounds its search through uses for a dominating null check.
-  // Query the existing block facts as well, so later frame-state uses cannot
-  // hide the non-null edge that reaches this operation.
-  auto *PtrTy = dyn_cast<PointerType>(Receiver->getType());
-  if (!PtrTy)
-    return false;
-  auto *NonNull = dyn_cast_or_null<ConstantInt>(LVI.getPredicateAt(
-      CmpInst::ICMP_NE, Receiver, ConstantPointerNull::get(PtrTy), Query,
-      /*UseBlockValue=*/true));
-  return NonNull && NonNull->isOne();
-}
-
 // Strip freeze and pointer-cast wrappers that other passes may have added
 // around a well-defined getClass result; comparing the wrapper equals
 // comparing the underlying value.
@@ -1092,7 +1074,9 @@ classQueryForGetClass(CallInst *Origin, ClassQueryKind Kind,
   if (Kind == ClassQueryKind::IsPrimitive ||
       Kind == ClassQueryKind::IsInterface)
     return 0;
-  if (Kind != ClassQueryKind::IsArray || !CB.GetKlassLayoutHelper)
+  if ((Kind != ClassQueryKind::IsArray && Kind != ClassQueryKind::IsHidden &&
+       Kind != ClassQueryKind::GetSuperclass) ||
+      !CB.GetKlassLayoutHelper)
     return std::nullopt;
   Value *Receiver = Origin->getArgOperand(0);
   if (!isKnownNonNullAt(Receiver, Origin, DT, DL, LVI))
@@ -1102,10 +1086,26 @@ classQueryForGetClass(CallInst *Origin, ClassQueryKind Kind,
   if (!Ty.isKnown())
     return std::nullopt;
   int Layout = CB.GetKlassLayoutHelper(Ty.Klass);
-  if (Layout < 0)
-    return 1;
-  if (Layout > 0 && CB.IsInterface && !CB.IsInterface(Ty.Klass) &&
-      CB.IsObjectKlass && !CB.IsObjectKlass(Ty.Klass))
+  if (Layout < 0) {
+    if (Kind == ClassQueryKind::IsArray)
+      return 1;
+    if (Kind == ClassQueryKind::IsHidden)
+      return 0;
+    // Every array reports Object as its Java superclass. Query the bound's
+    // mirror so the callback records the superclass metadata before folding.
+    if (!CB.GetJavaMirror || !CB.GetClassSuperclass)
+      return std::nullopt;
+    int MirrorId = CB.GetJavaMirror(Ty.Klass);
+    if (MirrorId < 0)
+      return std::nullopt;
+    uintptr_t Super = CB.GetClassSuperclass(MirrorId);
+    if (Super == 0 || Super == jeandle::MirrorKlassUnavailable)
+      return std::nullopt;
+    return Super;
+  }
+  if (Kind == ClassQueryKind::IsArray && Layout > 0 && CB.IsInterface &&
+      !CB.IsInterface(Ty.Klass) && CB.IsObjectKlass &&
+      !CB.IsObjectKlass(Ty.Klass))
     return 0;
   return std::nullopt;
 }
@@ -1279,8 +1279,12 @@ bool foldClassQueryCall(CallInst *CI, ClassQueryKind Kind,
   auto Result =
       classQueryForMirror(CI->getArgOperand(0), Kind, CB, VMC, ConstOops,
                           NonNullMirrors, DT, DL, LVI, IsNullEdge);
-  if (!Result)
+  if (!Result) {
+    // TODO: Project integer Class properties through PHIs/selects when every
+    // leaf can be evaluated, preserving definedness and the original mirror
+    // uses needed for deoptimization.
     return rewriteGetClassQuery(CI, Kind, VMC, DT, DL, LVI);
+  }
 
   Value *Replacement = nullptr;
   if (Kind == ClassQueryKind::GetSuperclass) {
