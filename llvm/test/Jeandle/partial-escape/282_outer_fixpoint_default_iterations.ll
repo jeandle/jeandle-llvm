@@ -17,8 +17,8 @@
 ;                      cap at 1 the wrapper still does one
 ;                      analyze+transform+canonicalize round. Its original
 ;                      allocation remains, while current-round
-;                      canonicalization removes the dead sink and leaves the
-;                      constant branch for a later SimplifyCFG round.
+;                      canonicalization removes the dead sink and its constant
+;                      branch before the round boundary.
 ;
 ; If we ever bump the default again, the DEFAULT side of this test moves
 ; with it; the ONE side stays constant.
@@ -61,8 +61,8 @@ u:
 
 ; ONE-LABEL: define i32 @test_default_two_rounds()
 ; ONE: jeandle.new_instance
-; ONE: br i1 false
+; ONE-NOT: br i1
 ; ONE-NOT: call void @sink
-; ONE: ret i32
+; ONE: ret i32 42
 
 !java-method-compilation = !{}
