@@ -88,10 +88,12 @@ bool isJeandleAllocation(const CallBase *CB) {
 }
 
 bool isJeandleNewArrayCall(const CallBase *CB) {
-  // Operands are (klass, length, size, header, limit, uninitialized,
+  // Operands are (klass, length, size, clear-start, limit, uninitialized,
   // deferred-publication): the trailing i1 flags are set by a tightly
   // coupled initializer that overwrites the payload before the array
-  // escapes; plain allocations pass false for both. The shared prefix
+  // escapes. Clear-start is normally the header size; a post-PEA copy may
+  // advance it over its initialized prefix. Plain allocations pass false
+  // for both flags. The shared prefix
   // fixes every consumer's operand index.
   return isJeandleNewArray(CB) && CB->arg_size() == 7;
 }

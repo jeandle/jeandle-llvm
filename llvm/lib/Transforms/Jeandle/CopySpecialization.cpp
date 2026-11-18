@@ -129,6 +129,7 @@ struct CopyFacts {
   jeandle::JBasicType DestElem = jeandle::JBasicType::Count;
   ConstantInt *ArrayCloneLength = nullptr;
   bool ReduceRawArrayCloneZeroing = false;
+  Value *CopiedPrefixBeforeAllocation = nullptr;
   std::optional<jeandle::CloneInstanceInfoResult> CloneInstanceInfo;
 };
 
@@ -281,16 +282,64 @@ bool canReduceRawArrayCloneZeroing(CallBase &CI, const CopyFacts &Facts,
       FAM.getResult<ScalarEvolutionAnalysis>(*CI.getFunction());
   const SCEV *Actual = SE.getSCEV(Count);
   Type *I64 = Count->getType();
-  const SCEV *Scale =
-      SE.getConstant(I64, VMConsts.elementSizeFor(Facts.SrcElem));
-  const SCEV *HeaderAndRounding = SE.getConstant(I64, Base - Offset + 7);
+  const uint64_t ElementSize = VMConsts.elementSizeFor(Facts.SrcElem);
+  const uint64_t HeaderAndRounding = Base - Offset + 7;
+  const SCEV *Scale = SE.getConstant(I64, ElementSize);
   const SCEV *WordSize = SE.getConstant(I64, 8);
   const SCEV *LengthExpr = SE.getSCEV(Length);
+
+  // InstCombine can express rounded word counts as (sext(length) & mask),
+  // optionally followed by an extra header word. On successful allocation
+  // the length is in [0, INT_MAX], so a mask preserving every bit of that
+  // bounded count has no effect. Keep the arithmetic bias outside the mask.
+  Value *MaskedCount = Count;
+  uint64_t CountBias = 0;
+  if (auto *Add = dyn_cast<BinaryOperator>(MaskedCount)) {
+    if (Add->getOpcode() == Instruction::Add) {
+      for (unsigned I : {0u, 1u}) {
+        if (auto *Bias = dyn_cast<ConstantInt>(Add->getOperand(I))) {
+          CountBias = Bias->getZExtValue();
+          MaskedCount = Add->getOperand(1 - I);
+          break;
+        }
+      }
+    }
+  }
+  const SCEV *UnmaskedActual = nullptr;
+  const uint64_t HeaderWords = HeaderAndRounding / 8;
+  if (ElementSize == 8 && CountBias <= HeaderWords) {
+    if (auto *And = dyn_cast<BinaryOperator>(MaskedCount)) {
+      if (And->getOpcode() == Instruction::And) {
+        const uint64_t MaxCount = INT32_MAX + HeaderWords - CountBias;
+        const APInt RequiredBits =
+            APInt::getLowBitsSet(64, Log2_64(MaxCount) + 1);
+        for (unsigned I : {0u, 1u}) {
+          if (auto *Mask = dyn_cast<ConstantInt>(And->getOperand(I))) {
+            if ((Mask->getValue() & RequiredBits) == RequiredBits)
+              UnmaskedActual = SE.getAddExpr(SE.getSCEV(And->getOperand(1 - I)),
+                                             SE.getConstant(I64, CountBias));
+            break;
+          }
+        }
+      }
+    }
+  }
   for (bool Signed : {true, false}) {
     const SCEV *Length64 = Signed ? SE.getSignExtendExpr(LengthExpr, I64)
                                   : SE.getZeroExtendExpr(LengthExpr, I64);
-    const SCEV *RoundedBytes =
-        SE.getAddExpr(SE.getMulExpr(Length64, Scale), HeaderAndRounding);
+    // Successful allocation bounds length to a nonnegative i32. The byte
+    // extent cannot overflow i64, so divide the scale and constant bias
+    // separately for whole-word elements. This also matches InstCombine's
+    // canonical length (or length + header words) without a residual udiv.
+    if (ElementSize >= 8 && ElementSize % 8 == 0) {
+      const SCEV *WholeWords = SE.getAddExpr(
+          SE.getMulExpr(Length64, SE.getConstant(I64, ElementSize / 8)),
+          SE.getConstant(I64, HeaderWords));
+      if (Actual == WholeWords || UnmaskedActual == WholeWords)
+        return true;
+    }
+    const SCEV *RoundedBytes = SE.getAddExpr(
+        SE.getMulExpr(Length64, Scale), SE.getConstant(I64, HeaderAndRounding));
     if (Actual == SE.getUDivExpr(RoundedBytes, WordSize))
       return true;
   }
@@ -1398,11 +1447,27 @@ Function *getTailZeroingHelper(Module &M) {
   return Helper;
 }
 
-// A validated disjoint copy cannot throw or safepoint when its selected leaf
-// stub exists. Transfer element initialization from new_array to that copy,
-// clearing the uncopied tail first. In particular, the zero-length path must
-// leave every destination element initialized before its publication fence.
-bool tryReduceArrayCopyZeroing(CallBase &CI) {
+// Capture availability before any copy expansion invalidates dominance. The
+// frontend often extends an i32 copy length after an allocation invoke; its
+// underlying i32 value can still be available before that allocation.
+Value *getCopiedPrefixBeforeAllocation(CallBase &CI, DominatorTree &DT) {
+  CallBase *Allocation = findTightlyCoupledArrayAllocation(CI);
+  if (!Allocation)
+    return nullptr;
+  Value *Prefix = CI.getArgOperand(4);
+  if (isa<SExtInst, ZExtInst>(Prefix) &&
+      cast<CastInst>(Prefix)->getSrcTy()->isIntegerTy(32))
+    Prefix = cast<CastInst>(Prefix)->getOperand(0);
+  if (auto *I = dyn_cast<Instruction>(Prefix))
+    if (!DT.dominates(I, Allocation))
+      return nullptr;
+  return Prefix;
+}
+
+// A validated disjoint leaf copy initializes its prefix before publication.
+// Keep the remaining clear inside allocation: only its non-ZeroTLAB fast path
+// needs it, while the runtime slow path already initializes every element.
+bool tryReduceArrayCopyZeroing(CallBase &CI, Value *CopiedPrefix) {
   if ((!isCopyOfValidated(CI) && !isCopyOfRangeValidated(CI) &&
        !isReferenceArrayClone(CI)) ||
       !isAllocTightlyCoupled(CI) || !hasNegativeLengthGuard(CI))
@@ -1426,66 +1491,46 @@ bool tryReduceArrayCopyZeroing(CallBase &CI) {
                             /*DestUninitialized=*/true))
     return false;
 
-  if (!sameArrayLength(CI.getArgOperand(4), CI.getArgOperand(8))) {
-    Function *ZeroHelper = getTailZeroingHelper(M);
-    const int64_t Base =
-        VMConsts.arrayBaseOffsetFor(jeandle::JBasicType::Object);
-    const uint64_t ElementSize =
-        VMConsts.elementSizeFor(jeandle::JBasicType::Object);
-    if (!ZeroHelper || Base < 0 || Base > INT32_MAX || Base % 8 ||
-        (ElementSize != 4 && ElementSize != 8) ||
-        !Allocation->getArgOperand(1)->getType()->isIntegerTy(32))
-      return false;
-
-    IRBuilder<> B(&CI);
-    Value *Moved = toI64(B, CI.getArgOperand(4), "arraycopy.zero_tail.moved");
-    Value *Length = toI64(B, CI.getArgOperand(8), "arraycopy.zero_tail.length");
-    Value *Tail = B.CreateSub(Length, Moved, "arraycopy.zero_tail.elements");
-    if (!isa<ConstantInt>(Tail)) {
-      // Exact copies need no clear, including any rounded prefix or padding.
-      Value *Nonempty =
-          B.CreateICmpNE(Tail, B.getInt64(0), "arraycopy.zero_tail.nonempty");
-      Instruction *ThenTerm =
-          SplitBlockAndInsertIfThen(Nonempty, &CI, /*Unreachable=*/false);
-      ThenTerm->getParent()->setName("arraycopy.zero_tail");
-      CI.getParent()->setName("arraycopy.after_zero_tail");
-      B.SetInsertPoint(ThenTerm);
-    }
-
-    // Round only to HeapWords, independently of the VM's larger object
-    // alignment. The start stays after the aligned header; the end fits in
-    // allocation padding. A compressed-oop start can clear one copied-prefix
-    // slot, which the following validated leaf copy overwrites before any
-    // observation or publication. Use Java lengths in i64: a successful slow
-    // allocation may exceed the i32 fast-path byte size.
-    const unsigned Shift = Log2_64(ElementSize);
-    Value *Start = B.CreateShl(Moved, Shift, "arraycopy.zero_tail.start");
-    Value *Offset =
-        B.CreateAdd(Start, B.getInt64(Base), "arraycopy.zero_tail.offset");
-    Value *AlignedStart = B.CreateAnd(Offset, B.getInt64(-8),
-                                      "arraycopy.zero_tail.aligned_start");
-    Value *Size = B.CreateShl(Length, Shift, "arraycopy.zero_tail.size");
-    Value *End =
-        B.CreateAdd(Size, B.getInt64(Base + 7), "arraycopy.zero_tail.end");
-    Value *AlignedEnd =
-        B.CreateAnd(End, B.getInt64(-8), "arraycopy.zero_tail.aligned_end");
-    Value *Bytes =
-        B.CreateSub(AlignedEnd, AlignedStart, "arraycopy.zero_tail.bytes");
-    Value *Words64 = B.CreateLShr(Bytes, 3, "arraycopy.zero_tail.words64");
-    // Nonnegative Java lengths bound wide-oop words by INT_MAX and
-    // compressed-oop words by ceil(INT_MAX / 2).
-    Value *Words =
-        B.CreateTrunc(Words64, B.getInt32Ty(), "arraycopy.zero_tail.words");
-    Value *Address = B.CreateGEP(B.getInt8Ty(), Allocation, AlignedStart,
-                                 "arraycopy.zero_tail.address");
-    CallInst *Clear = B.CreateCall(ZeroHelper, {Address, Words});
-    Clear->setCallingConv(CallingConv::Hotspot_JIT);
-    Clear->addParamAttr(0,
-                        Attribute::getWithAlignment(B.getContext(), Align(8)));
-    Clear->addFnAttr(Attribute::NoUnwind);
-    Clear->addFnAttr(Attribute::get(B.getContext(), "gc-leaf-function"));
+  if (sameArrayLength(CI.getArgOperand(4), CI.getArgOperand(8))) {
+    deferArrayInitialization(*Allocation);
+    return true;
   }
-  deferArrayInitialization(*Allocation);
+
+  const int64_t Base = VMConsts.arrayBaseOffsetFor(jeandle::JBasicType::Object);
+  const uint64_t ElementSize =
+      VMConsts.elementSizeFor(jeandle::JBasicType::Object);
+  auto *ClearStart = dyn_cast<ConstantInt>(Allocation->getArgOperand(3));
+  if (!CopiedPrefix || !getTailZeroingHelper(M) || Base < 0 ||
+      Base > INT32_MAX || Base % 8 || !ClearStart ||
+      ClearStart->getSExtValue() != Base ||
+      (ElementSize != 4 && ElementSize != 8) ||
+      !Allocation->getArgOperand(1)->getType()->isIntegerTy(32) ||
+      !Allocation->getArgOperand(2)->getType()->isIntegerTy(32))
+    return false;
+
+  IRBuilder<> B(Allocation);
+  Value *Moved = toI64(B, CopiedPrefix, "arraycopy.zero_tail.moved");
+  Value *Start =
+      B.CreateShl(Moved, Log2_64(ElementSize), "arraycopy.zero_tail.start");
+  Value *Offset =
+      B.CreateAdd(Start, B.getInt64(Base), "arraycopy.zero_tail.offset");
+  Value *AlignedStart =
+      B.CreateAnd(Offset, B.getInt64(-8), "arraycopy.zero_tail.aligned_start");
+  // The allocation consumes this offset only on its size-bounded fast path.
+  // Slow allocations ignore it, including those whose byte size exceeds i32.
+  Value *FastStart = toI32(B, AlignedStart, "arraycopy.zero_tail.fast_start");
+  Value *Exact =
+      B.CreateICmpEQ(toI32(B, CopiedPrefix, "arraycopy.zero_tail.prefix"),
+                     Allocation->getArgOperand(1), "arraycopy.zero_tail.exact");
+  // An exact copy needs no clear, including the rounded last word. Otherwise
+  // rounding down can clear one compressed-oop prefix slot, which the leaf
+  // copy overwrites before any observation. The allocation size includes all
+  // payload words and optional object-alignment padding.
+  Value *ZeroStart =
+      B.CreateSelect(Exact, Allocation->getArgOperand(2), FastStart,
+                     "arraycopy.zero_tail.clear_start");
+  Allocation->setArgOperand(3, ZeroStart);
+  Allocation->setArgOperand(6, B.getTrue());
   return true;
 }
 
@@ -1995,6 +2040,8 @@ PreservedAnalyses CopySpecialization::run(Function &F,
     Facts.DeadCloneAllocation = findDeadArrayCloneAllocation(*CB, DT);
     if (!Facts.DeadCloneAllocation)
       Facts = analyzeCopy(*CB, DT, IsNullEdge);
+    Facts.CopiedPrefixBeforeAllocation =
+        getCopiedPrefixBeforeAllocation(*CB, DT);
     Facts.ReduceRawArrayCloneZeroing =
         canReduceRawArrayCloneZeroing(*CB, Facts, FAM);
     if (Facts.CloneInstanceInfo.has_value()) {
@@ -2040,7 +2087,8 @@ PreservedAnalyses CopySpecialization::run(Function &F,
       // Scalar reference stores still receive G1 pre-barriers, which read
       // the old destination slots. Only bulk copy helpers with the
       // uninitialized-destination contract may own their initialization.
-      CallChanged = tryReduceArrayCopyZeroing(*CB);
+      CallChanged =
+          tryReduceArrayCopyZeroing(*CB, Facts.CopiedPrefixBeforeAllocation);
       CallChanged |= expandCopyPseudoCall(*CB, Facts, TTI);
     }
 

@@ -18,50 +18,43 @@
 ; RUN: cat %t/common.ll %t/helper.ll | sed 's/@arrayOopDesc.base_offset_in_bytes.object = constant i32 24/@arrayOopDesc.base_offset_in_bytes.object = constant i32 20/' | opt -S -verify-each -passes=copy-specialization | FileCheck %s --check-prefix=KEEP
 ; RUN: cat %t/common.ll %t/helper.ll | sed 's/@arrayOopDesc.element_size.object = constant i32 4/@arrayOopDesc.element_size.object = constant i32 2/' | opt -S -verify-each -passes=copy-specialization | FileCheck %s --check-prefix=KEEP
 
-; Word rounding may clear the immediately preceding compressed oop, which the
-; following validated leaf copy overwrites before any observation. The end is
-; rounded only to 8 bytes, within the allocation for 16/32-byte object alignment.
-; Hand-checked boundaries: compressed [32,56), wide [48,80), header [0,24).
+; Word rounding can clear one preceding compressed oop, which the leaf copy
+; overwrites before observation. The allocation clears through its own size,
+; including any 16/32-byte object-alignment padding, only on the fast path.
 ; GOOD-LABEL: define ptr addrspace(1) @odd_copied_prefix(
-; GOOD: @jeandle.new_array({{.*}}i1 true, i1 true)
-; COMPRESSED: [[START:%.*]] = getelementptr i8, ptr addrspace(1) %dst, i64 32
-; COMPRESSED-NEXT: call hotspotcc void @jeandle.zero_heap_words(ptr addrspace(1) align 8 [[START]], i32 3)
-; WIDE: [[START:%.*]] = getelementptr i8, ptr addrspace(1) %dst, i64 48
-; WIDE-NEXT: call hotspotcc void @jeandle.zero_heap_words(ptr addrspace(1) align 8 [[START]], i32 4)
+; COMPRESSED: @jeandle.new_array({{.*}}i32 32, i32 1000, i1 false, i1 true)
+; WIDE: @jeandle.new_array({{.*}}i32 48, i32 1000, i1 false, i1 true)
+; GOOD-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; GOOD: call void @StubRoutines_arrayof_oop_disjoint_arraycopy_uninit({{.*}}i64 3)
 ; GOOD: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 ; KEEP-LABEL: define ptr addrspace(1) @odd_copied_prefix(
 ; KEEP: @jeandle.new_array({{.*}}i1 false, i1 false)
-; KEEP-NOT: @jeandle.zero_heap_words
-; KEEP-NOT: @llvm.memset
+; KEEP-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; KEEP: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 
-; A successful slow allocation can exceed the i32 fast byte size. With the
-; largest Java length, compressed words are 2^30 and wide words are INT_MAX.
+; Very large arrays must take the runtime path, which ignores clear-start.
+; Neither a full tail nor a short tail is cleared again after allocation.
 ; GOOD-LABEL: define ptr addrspace(1) @largest_zero_copy(
-; GOOD: @jeandle.new_array({{.*}}i1 true, i1 true)
-; GOOD: [[START:%.*]] = getelementptr i8, ptr addrspace(1) %dst, i64 24
-; COMPRESSED-NEXT: call hotspotcc void @jeandle.zero_heap_words(ptr addrspace(1) align 8 [[START]], i32 1073741824)
-; WIDE-NEXT: call hotspotcc void @jeandle.zero_heap_words(ptr addrspace(1) align 8 [[START]], i32 2147483647)
+; GOOD: [[START:%.*]] = select i1 false, i32 %fast_size, i32 24
+; GOOD: @jeandle.new_array({{.*}}i32 [[START]], i32 1000, i1 false, i1 true)
+; GOOD-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; GOOD: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 ; KEEP-LABEL: define ptr addrspace(1) @largest_zero_copy(
 ; KEEP: @jeandle.new_array({{.*}}i1 false, i1 false)
-; KEEP-NOT: @jeandle.zero_heap_words
-; KEEP-NOT: @llvm.memset
+; KEEP-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; KEEP: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 
-; Hand-checked last-word starts avoid signed i32 byte overflow in both layouts.
 ; GOOD-LABEL: define ptr addrspace(1) @largest_short_tail(
-; GOOD: @jeandle.new_array({{.*}}i1 true, i1 true)
-; COMPRESSED: [[START:%.*]] = getelementptr i8, ptr addrspace(1) %dst, i64 8589934608
-; WIDE: [[START:%.*]] = getelementptr i8, ptr addrspace(1) %dst, i64 17179869192
-; GOOD-NEXT: call hotspotcc void @jeandle.zero_heap_words(ptr addrspace(1) align 8 [[START]], i32 1)
+; COMPRESSED: [[TAIL:%.*]] = select i1 false, i32 %fast_size, i32 16
+; COMPRESSED: @jeandle.new_array({{.*}}i32 [[TAIL]], i32 1000, i1 false, i1 true)
+; WIDE: [[TAIL:%.*]] = select i1 false, i32 %fast_size, i32 8
+; WIDE: @jeandle.new_array({{.*}}i32 [[TAIL]], i32 1000, i1 false, i1 true)
+; GOOD-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; GOOD: call void @StubRoutines_arrayof_oop_disjoint_arraycopy_uninit({{.*}}i64 2147483646)
 ; GOOD: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 ; KEEP-LABEL: define ptr addrspace(1) @largest_short_tail(
 ; KEEP: @jeandle.new_array({{.*}}i1 false, i1 false)
-; KEEP-NOT: @jeandle.zero_heap_words
-; KEEP-NOT: @llvm.memset
+; KEEP-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; KEEP: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 
 ;--- common.ll

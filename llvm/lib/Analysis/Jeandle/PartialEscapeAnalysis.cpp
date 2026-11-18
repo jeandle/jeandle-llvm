@@ -5976,6 +5976,18 @@ void Analyzer::processAllocation(CallBase *CB) {
     if (!InitialSlowTest || !InitialSlowTest->getType()->isIntegerTy(1) ||
         !InitialSlowTest->isZero())
       return;
+  } else {
+    if (!jeandle::pea::isJeandleNewArrayCall(CB))
+      return;
+    auto *Uninitialized = dyn_cast<ConstantInt>(CB->getArgOperand(5));
+    auto *Deferred = dyn_cast<ConstantInt>(CB->getArgOperand(6));
+    if (!Uninitialized || !Uninitialized->getType()->isIntegerTy(1) ||
+        !Deferred || !Deferred->getType()->isIntegerTy(1))
+      return;
+    // A fully eliminated Unsafe array may choose Java default values. A
+    // retained OrigAlloc cannot supply them; commit rejects that case after
+    // the final escape classification. The same restriction applies when a
+    // deferred copy owns initialization or publication.
   }
 
   // Refuse to virtualize identity-sensitive allocations.
@@ -11102,6 +11114,26 @@ void Analyzer::commit() {
             ? jeandle::PEAResult::EscapeKind::PartiallyEscapes
             : jeandle::PEAResult::EscapeKind::NeverEscapes;
   }
+
+  // Missing fields model Java defaults. A fully eliminated uninitialized
+  // array can choose those values, including in deopt reconstruction, but a
+  // retained OrigAlloc still contains arbitrary payload. Reanalyze all such
+  // sites as real allocations so dependent folds and CFG proofs are rebuilt
+  // together. This includes ordinary sources kept by a synthetic identity.
+  for (const auto &KV : Result.EscapeClassification) {
+    if (KV.second == jeandle::PEAResult::EscapeKind::NeverEscapes)
+      continue;
+    const jeandle::VirtualObject &VObj = *Result.VirtualObjects[KV.first];
+    if (VObj.IsSynthetic)
+      continue;
+    auto *Allocation = dyn_cast_or_null<CallBase>((Value *)VObj.AllocationCall);
+    if (Allocation && jeandle::pea::isJeandleNewArrayCall(Allocation) &&
+        (cast<ConstantInt>(Allocation->getArgOperand(5))->isOne() ||
+         cast<ConstantInt>(Allocation->getArgOperand(6))->isOne()))
+      collectRetryVirtualizationSites(KV.first);
+  }
+  if (hasPendingRetry())
+    return;
 
   // For every VO that ended up NeverEscapes (alloc will be
   // EliminateAllocation'd and its OrigAlloc users will RAUW to poison in the

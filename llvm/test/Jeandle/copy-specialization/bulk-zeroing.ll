@@ -53,8 +53,8 @@ exception:
 ; NOZERO: @jeandle.new_array({{.*}}i1 true, i1 true)
 ; NOZERO: call void @StubRoutines_arrayof_oop_disjoint_arraycopy_uninit({{.*}}i64 8)
 
-; The i32 allocation size is not a valid byte count on the slow allocation
-; path for very large arrays. Derive the tail from the Java lengths in i64.
+; Slow allocation ignores the fast-path clear start. Derive that start in
+; i64, then narrow it only for the size-bounded fast allocation path.
 define ptr addrspace(1) @dynamic_tail(ptr addrspace(1) %src, i32 %length, i32 %moved, i32 %size) #0 personality ptr @personality {
 entry:
   %dst = invoke ptr addrspace(1) @jeandle.new_array(ptr null, i32 %length, i32 %size, i32 16, i32 1000, i1 false, i1 false) to label %copy unwind label %exception
@@ -70,52 +70,27 @@ exception:
 }
 
 ; COMMON-LABEL: define ptr addrspace(1) @dynamic_tail(
-; REDUCE: @jeandle.new_array({{.*}}i1 true, i1 true)
+; REDUCE: [[START:%.*]] = select i1 {{%.*}}, i32 %size, i32 {{%.*}}
+; REDUCE: @jeandle.new_array({{.*}}i32 [[START]], i32 1000, i1 false, i1 true)
 ; KEEP: @jeandle.new_array({{.*}}i1 false, i1 false)
-; REDUCE: [[TAIL:%.*]] = sub i64 %length64, %moved64
-; REDUCE: [[NONEMPTY:%.*]] = icmp ne i64 [[TAIL]], 0
-; REDUCE-NEXT: br i1 [[NONEMPTY]], label %arraycopy.zero_tail, label %arraycopy.after_zero_tail
-; REDUCE: arraycopy.zero_tail:
-; REDUCE: [[START:%.*]] = shl i64 %moved64, 2
-; REDUCE: [[OFFSET:%.*]] = add i64 [[START]], 16
-; REDUCE: [[ALIGNED_START:%.*]] = and i64 [[OFFSET]], -8
-; REDUCE: [[SIZE:%.*]] = shl i64 %length64, 2
-; REDUCE: [[END:%.*]] = add i64 [[SIZE]], 23
-; REDUCE: [[ALIGNED_END:%.*]] = and i64 [[END]], -8
-; REDUCE: [[BYTES:%.*]] = sub i64 [[ALIGNED_END]], [[ALIGNED_START]]
-; REDUCE: [[WORDS64:%.*]] = lshr i64 [[BYTES]], 3
-; REDUCE: [[WORDS:%.*]] = trunc i64 [[WORDS64]] to i32
-; REDUCE: [[ADDRESS:%.*]] = getelementptr i8, ptr addrspace(1) %dst, i64 [[ALIGNED_START]]
-; REDUCE: call hotspotcc void @jeandle.zero_heap_words(ptr addrspace(1) align 8 [[ADDRESS]], i32 [[WORDS]])
-; REDUCE-NEXT: br label %arraycopy.after_zero_tail
-; REDUCE: arraycopy.after_zero_tail:
-; KEEP-NOT: @llvm.memset
+; COMMON-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; COMMON: arraycopy.result:
 ; COMMON-NEXT: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 ; NOZERO-LABEL: define ptr addrspace(1) @dynamic_tail(
 ; NOZERO: @jeandle.new_array({{.*}}i1 false, i1 false)
 ; NOZERO-NOT: @jeandle.zero_heap_words
-; NOZERO-NOT: @llvm.memset
 ; NOZERO: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 
-; After normal cleanup, exact copies have an explicit edge that bypasses the
-; dynamic clear. Both paths join before the copy and its publication fence.
+; The allocation clears its own tail only on the non-ZeroTLAB fast path.
 ; OPT-LABEL: define ptr addrspace(1) @dynamic_tail(
-; OPT: [[EXACT:%.*]] = icmp eq i32 %length, %moved
-; OPT-NEXT: br i1 [[EXACT]], label %arraycopy.after_zero_tail, label %arraycopy.zero_tail
-; OPT: arraycopy.zero_tail:
-; OPT: call hotspotcc void @jeandle.zero_heap_words(
-; OPT-NEXT: br label %arraycopy.after_zero_tail
-; OPT: arraycopy.after_zero_tail:
-; OPT-NEXT: [[ZERO:%.*]] = icmp eq i32 %moved, 0
-; OPT-NEXT: br i1 [[ZERO]], label %arraycopy.result, label %arraycopy.nonpositive.fast
-; OPT: arraycopy.result:
-; OPT-NEXT: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
-; OPT-NEXT: ret ptr addrspace(1) %dst
-; OPT: arraycopy.nonpositive.fast:
+; OPT: select i1 {{%.*}}, i32 %size, i32 {{%.*}}
+; OPT: @jeandle.new_array({{.*}}i1 false, i1 true)
+; OPT-NOT: call hotspotcc void @jeandle.zero_heap_words
+; OPT: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
+; OPT: ret ptr addrspace(1) %dst
 ; OPT: call void @StubRoutines_arrayof_oop_disjoint_arraycopy_uninit(
-; OPT-NEXT: br label %arraycopy.result
 ; OPT-LABEL: define ptr addrspace(1) @zero_copy(
+
 
 define ptr addrspace(1) @zero_copy(ptr addrspace(1) %src) #0 personality ptr @personality {
 entry:
@@ -129,10 +104,9 @@ exception:
 }
 
 ; COMMON-LABEL: define ptr addrspace(1) @zero_copy(
-; REDUCE: @jeandle.new_array({{.*}}i1 true, i1 true)
+; REDUCE: @jeandle.new_array({{.*}}i32 16, i32 1000, i1 false, i1 true)
 ; KEEP: @jeandle.new_array({{.*}}i1 false, i1 false)
-; REDUCE: [[ZERO_START:%.*]] = getelementptr i8, ptr addrspace(1) %dst, i64 16
-; REDUCE: call hotspotcc void @jeandle.zero_heap_words(ptr addrspace(1) align 8 [[ZERO_START]], i32 4)
+; REDUCE-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; KEEP-NOT: @llvm.memset
 ; COMMON: arraycopy.result:
 ; COMMON-NEXT: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
