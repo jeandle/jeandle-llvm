@@ -16,6 +16,7 @@
 #include "llvm/Transforms/Jeandle/ArrayLengthOptimization.h"
 #include "llvm/Transforms/Jeandle/BitShuffleFolding.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
+#include "llvm/Transforms/Jeandle/CheckOptimization.h"
 #include "llvm/Transforms/Jeandle/CopySignStoreLowering.h"
 #include "llvm/Transforms/Jeandle/CopySpecialization.h"
 #include "llvm/Transforms/Jeandle/ExpandNarrowOopCast.h"
@@ -350,6 +351,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   const bool StripMiningEnabled = isStripMiningEnabled();
   PM.addPass(createModuleToFunctionPassAdaptor(JavaOpLengthFolding()));
   PM.addPass(createModuleToFunctionPassAdaptor(ArrayLengthOptimization()));
+  PM.addPass(createModuleToFunctionPassAdaptor(CheckOptimization()));
   const bool DeferEmptyLoopDeletion = (Level == OptimizationLevel::O3);
 
   // The loop adaptor establishes LoopSimplify + LCSSA form before

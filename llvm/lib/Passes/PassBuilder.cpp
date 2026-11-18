@@ -270,6 +270,7 @@
 #include "llvm/Transforms/Jeandle/ArrayLengthOptimization.h"
 #include "llvm/Transforms/Jeandle/BitShuffleFolding.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
+#include "llvm/Transforms/Jeandle/CheckOptimization.h"
 #include "llvm/Transforms/Jeandle/ConstantFieldFolding.h"
 #include "llvm/Transforms/Jeandle/CopySignStoreLowering.h"
 #include "llvm/Transforms/Jeandle/CopySpecialization.h"
