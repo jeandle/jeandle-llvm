@@ -238,6 +238,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     // estimates body cost; dead bounds-check blocks can otherwise hide a
     // profitable full unroll from the high-tier cluster.
     PrePEAHighTier.addPass(InstCombinePass());
+    PrePEAHighTier.addPass(CheckPreparation());
     PrePEAHighTier.addPass(SimplifyCFGPass());
     // Re-establish the canonical loop form; the inline driver may have
     // introduced loops that are not in simplified form.
@@ -272,6 +273,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
         SimpleLoopUnswitchPass(/*NonTrivial=*/true)));
     PrePEAHighTier.addPass(InstCombinePass());
     PrePEAHighTier.addPass(GVNPass());
+    PrePEAHighTier.addPass(CheckPreparation());
     PrePEAHighTier.addPass(SimplifyCFGPass());
     PM.addPass(createModuleToFunctionPassAdaptor(std::move(PrePEAHighTier)));
     // Pre-PEA cleanup. PEA's correctness depends on the CFG containing no

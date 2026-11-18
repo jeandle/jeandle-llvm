@@ -15,6 +15,11 @@
 
 namespace llvm {
 
+class CheckPreparation : public PassInfoMixin<CheckPreparation> {
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM);
+};
+
 class CheckOptimization : public PassInfoMixin<CheckOptimization> {
 public:
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM);

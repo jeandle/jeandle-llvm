@@ -17,6 +17,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Jeandle/AffineCheckVersioning.h"
 #include "llvm/Transforms/Jeandle/ArrayLengthOptimization.h"
 #include "llvm/Transforms/Scalar/ConstraintElimination.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
@@ -44,6 +45,32 @@ static void addCleanup(FunctionPassManager &PM) {
   PM.addPass(InstCombinePass());
   PM.addPass(ConstraintEliminationPass());
   PM.addPass(SimplifyCFGPass());
+}
+
+// Once the original condition folds to true there is no check left to
+// optimize. Remove the unused widening permission before PEA so its failure
+// state does not make object identity appear observable on a dead path.
+PreservedAnalyses CheckPreparation::run(Function &F,
+                                        FunctionAnalysisManager &FAM) {
+  if (F.isDeclaration() || !F.getParent()->getNamedMetadata(
+                               jeandle::Metadata::JavaMethodCompilation))
+    return PreservedAnalyses::all();
+  bool Changed = false;
+  for (BasicBlock &BB : F) {
+    auto *BI = dyn_cast<BranchInst>(BB.getTerminator());
+    if (!BI || !BI->isConditional() ||
+        !BI->getSuccessor(1)->getTerminatingDeoptimizeCall())
+      continue;
+    auto *WC = dyn_cast<IntrinsicInst>(BI->getCondition());
+    if (!WC ||
+        WC->getIntrinsicID() != Intrinsic::experimental_widenable_condition)
+      continue;
+    BI->setCondition(ConstantInt::getTrue(F.getContext()));
+    if (WC->use_empty())
+      WC->eraseFromParent();
+    Changed = true;
+  }
+  return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
 PreservedAnalyses CheckOptimization::run(Function &F,
@@ -105,7 +132,15 @@ PreservedAnalyses CheckOptimization::run(Function &F,
   PM.addPass(LowerWidenableConditionPass());
   addCleanup(PM);
   if (OptimizeChecks && F.getInstructionCount() <= 10000) {
+    // Lowering and unswitching expose non-null loop entries that were still
+    // guarded when array lengths were prepared above.
+    PM.addPass(ArrayLengthOptimization());
     PM.addPass(IRCEPass());
+    addCleanup(PM);
+    PM.addPass(LoopSimplifyPass());
+    PM.addPass(LCSSAPass());
+    PM.addPass(ArrayLengthOptimization());
+    PM.addPass(AffineCheckVersioning());
     addCleanup(PM);
   }
   PM.addPass(LoopSimplifyPass());
