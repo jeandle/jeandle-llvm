@@ -9,12 +9,18 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/CheckOptimization.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Analysis/GuardUtils.h"
+#include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Jeandle/AffineCheckVersioning.h"
@@ -32,6 +38,7 @@
 #include "llvm/Transforms/Scalar/SimpleLoopUnswitch.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include "llvm/Transforms/Utils/LCSSA.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/LoopSimplify.h"
 
 using namespace llvm;
@@ -47,9 +54,51 @@ static void addCleanup(FunctionPassManager &PM) {
   PM.addPass(SimplifyCFGPass());
 }
 
-// Once the original condition folds to true there is no check left to
-// optimize. Remove the unused widening permission before PEA so its failure
-// state does not make object identity appear observable on a dead path.
+// The object pool represents direct virtual identities, but cannot select a
+// virtual identity conditionally. Do not introduce synthetic failures whose
+// frame state would force such an identity to materialize before PEA.
+static bool hasConditionalAllocation(const Value *V) {
+  V = getUnderlyingObject(V);
+  if (!isa<PHINode, SelectInst>(V))
+    return false;
+  SmallVector<const Value *, 8> Worklist{V};
+  SmallPtrSet<const Value *, 32> Visited;
+  constexpr unsigned Budget = 32;
+  while (!Worklist.empty()) {
+    const Value *Object = getUnderlyingObject(Worklist.pop_back_val());
+    if (!Visited.insert(Object).second)
+      continue;
+    if (Visited.size() > Budget)
+      return true;
+    if (auto *CB = dyn_cast<CallBase>(Object)) {
+      if (jeandle::pea::isJeandleAllocation(CB))
+        return true;
+    } else if (auto *SI = dyn_cast<SelectInst>(Object)) {
+      Worklist.push_back(SI->getTrueValue());
+      Worklist.push_back(SI->getFalseValue());
+    } else if (auto *PN = dyn_cast<PHINode>(Object)) {
+      if (PN->getNumIncomingValues() > Budget)
+        return true;
+      append_range(Worklist, PN->incoming_values());
+    }
+  }
+  return false;
+}
+
+static bool hasConditionalVirtualState(const CallInst &Deopt) {
+  auto Bundle = Deopt.getOperandBundle(LLVMContext::OB_deopt);
+  if (!Bundle)
+    return false;
+  return any_of(Bundle->Inputs, [](const Use &U) {
+    return jeandle::isWideOopType(U->getType()) &&
+           hasConditionalAllocation(U.get());
+  });
+}
+
+// Drop widening permissions that have no useful check left or would prevent
+// conditional virtual state from being represented by PEA. Keep permissions
+// visible until here: adding them after frame-state simplification could
+// invalidate facts used to simplify the original failure state.
 PreservedAnalyses CheckPreparation::run(Function &F,
                                         FunctionAnalysisManager &FAM) {
   if (F.isDeclaration() || !F.getParent()->getNamedMetadata(
@@ -58,16 +107,20 @@ PreservedAnalyses CheckPreparation::run(Function &F,
   bool Changed = false;
   for (BasicBlock &BB : F) {
     auto *BI = dyn_cast<BranchInst>(BB.getTerminator());
-    if (!BI || !BI->isConditional() ||
-        !BI->getSuccessor(1)->getTerminatingDeoptimizeCall())
+    Value *Condition, *WC;
+    BasicBlock *Pass, *Fail;
+    if (!BI || !parseWidenableBranch(BI, Condition, WC, Pass, Fail))
       continue;
-    auto *WC = dyn_cast<IntrinsicInst>(BI->getCondition());
-    if (!WC ||
-        WC->getIntrinsicID() != Intrinsic::experimental_widenable_condition)
+    auto *Deopt = Fail->getTerminatingDeoptimizeCall();
+    if (!Deopt || (Condition != ConstantInt::getTrue(F.getContext()) &&
+                   !hasConditionalVirtualState(*Deopt)))
       continue;
-    BI->setCondition(ConstantInt::getTrue(F.getContext()));
-    if (WC->use_empty())
-      WC->eraseFromParent();
+    Value *OldCondition = BI->getCondition();
+    WeakTrackingVH Widenable(WC);
+    BI->setCondition(Condition);
+    RecursivelyDeleteTriviallyDeadInstructions(OldCondition);
+    if (Widenable && Widenable->use_empty())
+      cast<Instruction>(Widenable)->eraseFromParent();
     Changed = true;
   }
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

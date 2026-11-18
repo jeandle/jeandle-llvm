@@ -38,6 +38,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Jeandle/CheckOptimization.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeTransform.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
@@ -189,6 +190,14 @@ PreservedAnalyses PartialEscapeIterative::run(Function &F,
     AnyCanonMutated |= !runAndInvalidate(Sc).areAllPreserved();
     AnyCanonMutated |= !runAndInvalidate(Ls).areAllPreserved();
     AnyCanonMutated |= !runAndInvalidate(Ic).areAllPreserved();
+    // Scalar replacement can fold a null check and expose a WC-only guard.
+    // Remove its dead failure state before the next PEA analysis.
+    CheckPreparation Checks;
+    if (!runAndInvalidate(Checks).areAllPreserved()) {
+      AnyCanonMutated = true;
+      runAndInvalidate(Sc);
+      runAndInvalidate(Ls);
+    }
     const bool CanonChanged =
         AnyCanonMutated && BeforeCanonicalization != printFunctionIR(F);
     AnyChanged |= CanonChanged;
