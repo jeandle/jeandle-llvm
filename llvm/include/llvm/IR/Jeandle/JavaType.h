@@ -119,6 +119,7 @@ using IsNullEdgeOracle =
 /// - ICmp comparisons of a check_instanceof result against a constant
 /// - Switch case values of a check_instanceof result
 /// - Direct jeandle.check_exact_klass calls
+/// - Equality/inequality of jeandle.load_klass with a constant Klass
 /// - Freeze of a traced condition (with a definedness proof)
 /// - And (i1) of two traced conditions
 /// - Or (i1) of two traced conditions

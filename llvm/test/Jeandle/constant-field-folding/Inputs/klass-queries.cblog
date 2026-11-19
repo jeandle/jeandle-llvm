@@ -1,0 +1,13 @@
+GetKlassModifierFlags 123 = 17
+GetKlassModifierFlags 234 = 0
+GetKlassModifierFlags 345 = -1
+GetKlassAccessFlags 123 32767 = 17
+GetKlassAccessFlags 123 512 = 0
+GetKlassAccessFlags 123 0 = 0
+GetKlassAccessFlags 456 67108864 = 67108864
+GetKlassAccessFlags 345 32767 = -1
+GetSuperKlass 123 = 234
+GetSuperKlass 234 = 0
+GetSuperKlass 345 = 18446744073709551615
+GetJavaMirror 234 = 8
+GetOopHandleName 8 = "oop_handle_Super_8"

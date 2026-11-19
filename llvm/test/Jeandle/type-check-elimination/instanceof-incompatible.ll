@@ -5,8 +5,8 @@
 ; and since String is exact, areKlassesIncompatible => true, so the check folds to false.
 
 declare i1 @jeandle.check_instanceof(ptr addrspace(0), ptr addrspace(1) nonnull)
-declare ptr addrspace(0) @jeandle.load_klass(ptr addrspace(1) nonnull)
-declare i1 @jeandle.check_exact_klass(ptr addrspace(0), ptr addrspace(0))
+declare hotspotcc ptr addrspace(0) @jeandle.load_klass(ptr addrspace(1) nonnull)
+declare hotspotcc i1 @jeandle.check_exact_klass(ptr addrspace(0), ptr addrspace(0))
 
 @glob = external addrspace(1) global ptr addrspace(1)
 
@@ -24,9 +24,9 @@ entry:
 ; incompatible type check to false.
 define i1 @test_exact_klass_guard(ptr addrspace(1) %obj) gc "hotspotgc" {
 entry:
-  %actual_klass = call ptr addrspace(0) @jeandle.load_klass(
+  %actual_klass = call hotspotcc ptr addrspace(0) @jeandle.load_klass(
       ptr addrspace(1) nonnull %obj)
-  %matches = call i1 @jeandle.check_exact_klass(
+  %matches = call hotspotcc i1 @jeandle.check_exact_klass(
       ptr addrspace(0) inttoptr (i64 2 to ptr addrspace(0)),
       ptr addrspace(0) %actual_klass)
   br i1 %matches, label %hit, label %miss
