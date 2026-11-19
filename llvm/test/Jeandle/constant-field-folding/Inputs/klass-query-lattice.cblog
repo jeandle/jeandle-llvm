@@ -1,0 +1,11 @@
+GetMirrorKlass 0 = 123
+GetMirrorKlass 1 = 234
+GetOopKlass 2 = 123
+GetJavaMirror 123 = 0
+GetJavaMirror 234 = 1
+GetOopHandleName 0 = "oop_handle_Class_0"
+GetOopHandleName 1 = "oop_handle_Other_1"
+GetKlassModifierFlags 123 = 17
+GetKlassModifierFlags 234 = 0
+GetKlassAccessFlags 123 512 = 0
+GetSuperKlass 123 = 234

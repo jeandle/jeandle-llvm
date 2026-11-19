@@ -1400,6 +1400,20 @@ void jeandle::ReplaceCallEffect::apply(jeandle::TransformContext &Ctx) {
     IRBuilder<> Builder(Target);
     Repl = createConstOopLoad(*Ctx.F.getParent(), Builder, OopHandleId);
   }
+  if (KlassSubtype != 0) {
+    auto *Check = cast<CallInst>(Target);
+    Function *Subtype =
+        Ctx.F.getParent()->getFunction("jeandle.check_klass_subtype");
+    Type *KlassTy = Check->getArgOperand(0)->getType();
+    const DataLayout &DL = Ctx.F.getDataLayout();
+    Constant *Klass = ConstantExpr::getIntToPtr(
+        ConstantInt::get(DL.getIntPtrType(KlassTy), KlassSubtype), KlassTy);
+    IRBuilder<> Builder(Target);
+    auto *Call = Builder.CreateCall(Subtype, {Klass, Check->getArgOperand(0)},
+                                    "pea.subtype");
+    Call->setCallingConv(Check->getCallingConv());
+    Repl = Call;
+  }
   if (Repl) {
     Target->replaceAllUsesWith(Repl);
   } else if (!Target->use_empty()) {

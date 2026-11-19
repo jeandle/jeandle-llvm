@@ -8,10 +8,9 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This pass eliminates redundant jeandle.check_instanceof calls by using
-// compile-time Java type information. It replaces calls with constant true
-// (when the object's type is provably a subtype) or constant false (when the
-// object's exact type is provably not a subtype).
+// This pass eliminates redundant object and Klass subtype checks by using
+// compile-time Java type information. Object facts also apply to Klass
+// checks whose subtype is loaded directly from a proven non-null object.
 //
 //===----------------------------------------------------------------------===//
 
@@ -22,6 +21,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/JavaType.h"
+#include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Jeandle/VMCallback.h"
 #include "llvm/IR/Module.h"
@@ -33,6 +33,50 @@
 using namespace llvm;
 
 namespace {
+
+/// The caller must establish non-nullness before querying JavaType.
+std::optional<bool> evaluateObjectCheck(Value *Obj, uintptr_t SuperKlass,
+                                        Instruction *Context,
+                                        const jeandle::VMCallbacks &CB,
+                                        DominatorTree &DT,
+                                        jeandle::IsNullEdgeOracle IsNullEdge) {
+  if (CB.IsObjectKlass(SuperKlass))
+    return true;
+
+  jeandle::JavaType ObjType =
+      jeandle::getJavaType(Obj, &DT, Context, IsNullEdge);
+  if ((ObjType.isKnown() && CB.IsSubtype(ObjType.Klass, SuperKlass)) ||
+      ObjType.Interfaces.contains(SuperKlass))
+    return true;
+
+  if (ObjType.isKnown() &&
+      jeandle::areKlassesIncompatible(ObjType.Klass, ObjType.Exact, SuperKlass))
+    return false;
+
+  // Excluding X also excludes every subtype of X.
+  for (uintptr_t Excluded : ObjType.ExcludedKlasses)
+    if (CB.IsSubtype(SuperKlass, Excluded))
+      return false;
+
+  return std::nullopt;
+}
+
+/// Match only the direct JavaOp, without crossing pointer wrappers or freeze.
+CallInst *getObjectKlassLoad(Value *Klass) {
+  auto *Load = dyn_cast<CallInst>(Klass);
+  Function *Callee = Load ? Load->getCalledFunction() : nullptr;
+  if (!Callee || Callee->getName() != "jeandle.load_klass" ||
+      Load->getCallingConv() != CallingConv::Hotspot_JIT ||
+      Callee->getCallingConv() != CallingConv::Hotspot_JIT ||
+      Load->getFunctionType() != Callee->getFunctionType() ||
+      Callee->isVarArg() || Load->arg_size() != 1 ||
+      Load->getType() != PointerType::get(Load->getContext(), 0) ||
+      Load->getArgOperand(0)->getType() !=
+          PointerType::get(Load->getContext(), 1) ||
+      Load->hasOperandBundles() || Load->isMustTailCall())
+    return nullptr;
+  return Load;
+}
 
 /// Replace a type-check call with a constant result and erase it. The check
 /// helpers are only ever emitted as calls (never invokes): an invoke is a
@@ -63,8 +107,12 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
     return PreservedAnalyses::all();
 
   Function *CheckFn = M->getFunction("jeandle.check_instanceof");
+  Function *OffsetCheckFn =
+      M->getFunction("jeandle.checkcast_nonnull_with_offset");
+  Function *OffsetSubtypeFn =
+      M->getFunction("jeandle.check_klass_subtype_with_offset");
   Function *SubtypeFn = M->getFunction("jeandle.check_klass_subtype");
-  if (!CheckFn && !SubtypeFn)
+  if (!CheckFn && !OffsetCheckFn && !SubtypeFn && !OffsetSubtypeFn)
     return PreservedAnalyses::all();
 
   DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
@@ -86,9 +134,10 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
     auto *Check = dyn_cast<CallInst>(&I);
     if (!Check)
       continue;
-    if (CheckFn && Check->getCalledFunction() == CheckFn)
+    auto Kind = jeandle::getJavaTypeCheckKind(Check);
+    if (Kind == jeandle::JavaTypeCheckKind::NonNullObject)
       Checks.push_back(Check);
-    if (SubtypeFn && Check->getCalledFunction() == SubtypeFn)
+    if (Kind == jeandle::JavaTypeCheckKind::KlassSubtype)
       SubtypeChecks.push_back(Check);
   }
 
@@ -103,19 +152,27 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
   };
   SmallVector<FoldDecision, 16> Folds;
 
-  // --- Decide: fold constant check_klass_subtype ---
-  // Both operands constant: a klass constant is an exact type descriptor, and
-  // the runtime template computes exactly IsSubtype over the primary/secondary
-  // supers, so the check is a pure function of the two constants. (Interfaces
-  // included: there is no value-level imprecision for klass-on-klass.)
+  // Klass constants are exact descriptors. A direct object Klass load can
+  // instead use the object's bounds at the consumer, as with an object check.
   for (CallInst *SubCB : SubtypeChecks) {
     uintptr_t Sub = jeandle::extractKlassConstant(SubCB->getArgOperand(0));
     uintptr_t Super = jeandle::extractKlassConstant(SubCB->getArgOperand(1));
-    if (Sub == 0 || Super == 0)
+    if (Super == 0)
       continue;
-    bool Result = CB->IsSubtype(Sub, Super);
-    Folds.push_back(
-        {SubCB, ConstantInt::get(SubCB->getType(), Result ? 1 : 0)});
+    std::optional<bool> Result;
+    if (Sub != 0) {
+      Result = CB->IsSubtype(Sub, Super);
+    } else if (CallInst *Load = getObjectKlassLoad(SubCB->getArgOperand(0))) {
+      Value *Obj = Load->getArgOperand(0);
+      // load_klass does not itself promise non-nullness. Keep getClass's
+      // dominating null guard and query types only after proving its contract.
+      if (DT.dominates(Load, SubCB) &&
+          isKnownNonNullAt(Obj, Load, DT, M->getDataLayout(), LVI))
+        Result = evaluateObjectCheck(Obj, Super, SubCB, *CB, DT, IsNullEdge);
+    }
+    if (Result)
+      Folds.push_back(
+          {SubCB, ConstantInt::get(SubCB->getType(), *Result ? 1 : 0)});
   }
   for (CallInst *CheckCB : Checks) {
     uintptr_t SuperKlass =
@@ -123,54 +180,11 @@ PreservedAnalyses TypeCheckElimination::run(Function &F,
     if (SuperKlass == 0)
       continue;
 
-    // --- Fold to true: instanceof java.lang.Object ---
-    // Every non-null object is an instance of Object, and the
-    // check_instanceof helper's IR contract guarantees non-null.
-    if (CB->IsObjectKlass(SuperKlass)) {
-      Folds.push_back({CheckCB, ConstantInt::getTrue(CheckCB->getType())});
-      continue;
-    }
-
-    Value *Obj = CheckCB->getArgOperand(1);
-    // TCE queries JavaType only at jeandle.check_instanceof call sites. The
-    // helper's IR contract requires this oop operand to be non-null, so
-    // check_instanceof-derived sharpening remains sound even though JavaType
-    // itself does not model nullability.
-    jeandle::JavaType ObjType =
-        jeandle::getJavaType(Obj, &DT, CheckCB, IsNullEdge);
-
-    // --- Fold to true: known subtype ---
-    if ((ObjType.isKnown() && CB->IsSubtype(ObjType.Klass, SuperKlass)) ||
-        ObjType.Interfaces.contains(SuperKlass)) {
-      Folds.push_back({CheckCB, ConstantInt::getTrue(CheckCB->getType())});
-      continue;
-    }
-
-    // --- Fold to false ---
-    bool FoldToFalse = false;
-
-    if (ObjType.isKnown() && jeandle::areKlassesIncompatible(
-                                 ObjType.Klass, ObjType.Exact, SuperKlass)) {
-      LLVM_DEBUG(dbgs() << "TCE: incompatible class types\n");
-      FoldToFalse = true;
-    }
-
-    // Check negative constraints: if SuperKlass is a subtype of any excluded
-    // klass, the object can't be SuperKlass (excluding X implies excluding
-    // all subtypes of X).
-    if (!FoldToFalse && ObjType.hasExclusions()) {
-      for (uintptr_t Excluded : ObjType.ExcludedKlasses) {
-        if (CB->IsSubtype(SuperKlass, Excluded)) {
-          LLVM_DEBUG(dbgs()
-                     << "TCE: denied by excluded klass " << Excluded << "\n");
-          FoldToFalse = true;
-          break;
-        }
-      }
-    }
-
-    if (FoldToFalse)
-      Folds.push_back({CheckCB, ConstantInt::getFalse(CheckCB->getType())});
+    // Object-check helpers require a non-null oop at the call site.
+    if (auto Result = evaluateObjectCheck(CheckCB->getArgOperand(1), SuperKlass,
+                                          CheckCB, *CB, DT, IsNullEdge))
+      Folds.push_back(
+          {CheckCB, ConstantInt::get(CheckCB->getType(), *Result ? 1 : 0)});
   }
 
   // --- Apply all folds ---

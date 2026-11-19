@@ -43,6 +43,7 @@
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
+#include "llvm/Transforms/Scalar/CorrelatedValuePropagation.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Transforms/Scalar/IndVarSimplify.h"
@@ -295,6 +296,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     PM.addPass(createModuleToFunctionPassAdaptor(ADCEPass()));
     PM.addPass(createModuleToFunctionPassAdaptor(SimplifyCFGPass()));
     PM.addPass(createModuleToFunctionPassAdaptor(LoopSimplifyPass()));
+    // Propagate branch facts into nullable selects and their deopt uses before
+    // PEA treats the conditional virtual identity as an observation.
+    PM.addPass(
+        createModuleToFunctionPassAdaptor(CorrelatedValuePropagationPass()));
     PM.addPass(createModuleToFunctionPassAdaptor(InstCombinePass()));
     // Outer fixpoint. PartialEscapeIterative wraps the
     // analyze+transform pair in a bounded loop with InstCombine/SimplifyCFG/

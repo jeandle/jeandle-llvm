@@ -1,0 +1,13 @@
+RequiresStrictLockOrder = 1
+RequiresStrictLockOrder = 1
+HasFinalizer 5 = false
+HasFinalizer 5 = false
+CanVirtualize 5 = true
+CanVirtualize 5 = true
+IsBoxed 5 = 9
+IsBoxed 5 = 9
+HasFinalizer 6 = false
+CanVirtualize 6 = true
+IsBoxed 6 = 9
+IsValueBased 5 = true
+IsValueBased 5 = true

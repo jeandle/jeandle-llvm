@@ -1,0 +1,12 @@
+IsSubtype 100 100 = true
+IsSubtype 100 200 = false
+IsSubtype 200 100 = true
+IsSubtype 200 200 = true
+IsInterface 100 = false
+IsInterface 200 = false
+IsObjectKlass 100 = false
+IsObjectKlass 200 = false
+IsEffectivelyFinal 100 = false
+IsEffectivelyFinal 200 = false
+GetSecondarySupers 100 = []
+GetSecondarySupers 200 = []
