@@ -32,6 +32,11 @@
 
 namespace llvm {
 
+/// Prove non-nullness at a use without inferring it from JavaType, whose
+/// facts are conditional on the queried oop being non-null.
+bool isKnownNonNullAt(Value *Receiver, Instruction *Query, DominatorTree &DT,
+                      const DataLayout &DL, LazyValueInfo &LVI);
+
 /// Append a PEA virtual-object (VO) descriptor for a never-escaping instance
 /// object into \p Args, the operand list of a "deopt" operand bundle. This is
 /// the single emit chokepoint for Jeandle PEA deoptimization support: a VO

@@ -12,6 +12,8 @@
 #include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
 #include "llvm/Analysis/LazyValueInfo.h"
+#include "llvm/Analysis/SimplifyQuery.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Jeandle/Deoptimization.h"
 #include "llvm/IR/Jeandle/GCStrategy.h"
@@ -26,6 +28,24 @@
 #include <string>
 
 namespace llvm {
+
+bool isKnownNonNullAt(Value *Receiver, Instruction *Query, DominatorTree &DT,
+                      const DataLayout &DL, LazyValueInfo &LVI) {
+  SimplifyQuery SQ(DL, &DT, nullptr, Query);
+  if (isKnownNonZero(Receiver, SQ))
+    return true;
+
+  // ValueTracking bounds its search through uses for a dominating null check.
+  // Query the existing block facts as well, so later frame-state uses cannot
+  // hide the non-null edge that reaches this operation.
+  auto *PtrTy = dyn_cast<PointerType>(Receiver->getType());
+  if (!PtrTy)
+    return false;
+  auto *NonNull = dyn_cast_or_null<ConstantInt>(LVI.getPredicateAt(
+      CmpInst::ICMP_NE, Receiver, ConstantPointerNull::get(PtrTy), Query,
+      /*UseBlockValue=*/true));
+  return NonNull && NonNull->isOne();
+}
 
 std::optional<JavaVirtualCallSite> getJavaVirtualCallSite(InvokeInst &CB) {
   if (CB.arg_empty() || !CB.hasDeoptState())

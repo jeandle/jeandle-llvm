@@ -1,0 +1,4 @@
+IsOkToInline -1 4 101 = true
+RecordInlineResult -1 4 101 0 = true
+RecordInliningComplete = true
+GetCallerClass 0 = -1

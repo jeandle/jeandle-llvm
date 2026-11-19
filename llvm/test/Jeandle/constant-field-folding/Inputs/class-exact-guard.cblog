@@ -1,0 +1,9 @@
+GetMirrorKlass 0 = 100
+IsInterface 100 = false
+IsSubtype 100 100 = true
+IsObjectKlass 100 = false
+
+IsEffectivelyFinal 100 = false
+GetSecondarySupers 100 = []
+
+GetKlassModifierFlags 100 = 1

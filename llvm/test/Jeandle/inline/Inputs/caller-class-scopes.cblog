@@ -1,0 +1,15 @@
+IsOkToInline -1 10 101 = true
+IsOkToInline -1 20 102 = true
+IsOkToInline 0 1 103 = true
+IsOkToInline 1 2 103 = true
+RecordInlineResult -1 10 101 0 = true
+RecordInlineResult -1 20 102 0 = true
+RecordInlineResult 0 1 103 0 = true
+RecordInlineResult 1 2 103 0 = true
+GetCallerClass 2 = 501
+GetCallerClass 3 = 502
+RecordInliningComplete = true
+GetOopHandleName 501 = "oop_handle_501"
+GetOopHandleName 502 = "oop_handle_502"
+GetOopKlass 501 = 0
+GetOopKlass 502 = 0

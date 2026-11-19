@@ -115,6 +115,9 @@ using CloneInstanceInfoResult =
 /// known-null Klass field of a primitive Class mirror.
 inline constexpr uintptr_t MirrorKlassUnavailable = ~uintptr_t{0};
 
+/// Class-file access flags and the immutable hidden-class bit.
+inline constexpr uint32_t ClassQueryAccessFlagsMask = 0x04007fff;
+
 /// Result reported for an inline attempt after LLVM starts processing it.
 /// Keep the numeric values stable because the JVM records them.
 enum class JeandleInlineReason : int {
@@ -268,9 +271,30 @@ enum class JeandleInlineReason : int {
   def(GetMirrorArrayKlass, uintptr_t, Uintptr,                                   \
       (int a1), (a1),                                                            \
       (VMCallbackValueType::Int), 1)                                             \
+  def(AreSameClassMirrors, int, Int,                                             \
+      (int a1, int a2), (a1, a2),                                                \
+      (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)                   \
   def(GetKlassLayoutHelper, int, Int,                                            \
       (uintptr_t a1), (a1),                                                      \
       (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetSuperCheckOffset, int, Int,                                             \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetKlassModifierFlags, int, Int,                                           \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetKlassAccessFlags, int64_t, Long,                                        \
+      (uintptr_t a1, int a2), (a1, a2),                                         \
+      (VMCallbackValueType::Uintptr, VMCallbackValueType::Int), 2)               \
+  def(GetSuperKlass, uintptr_t, Uintptr,                                         \
+      (uintptr_t a1), (a1),                                                      \
+      (VMCallbackValueType::Uintptr), 1)                                         \
+  def(GetClassSuperclass, uintptr_t, Uintptr,                                    \
+      (int a1), (a1),                                                            \
+      (VMCallbackValueType::Int), 1)                                             \
+  def(GetCallerClass, int, Int,                                                 \
+      (int a1), (a1),                                                            \
+      (VMCallbackValueType::Int), 1)                                             \
   def(GetKlassConstantField, ConstantFieldResult, Tuple,                          \
       (uintptr_t a1, int a2, int a3), (a1, a2, a3),                              \
       (VMCallbackValueType::Uintptr, VMCallbackValueType::Int,                    \
@@ -472,10 +496,30 @@ enum class JeandleInlineReason : int {
 ///                         Klass using the compiler interface. Returns 0 for
 ///                         void and MirrorKlassUnavailable when unavailable.
 ///                         Records the Klass in the compiled method metadata.
+///   AreSameClassMirrors — Returns 1 when two constant Class mirrors are the
+///                         same object, 0 when they differ, or -1 if either
+///                         oop id is not a known Class mirror.
 ///   GetKlassLayoutHelper
 ///                       — Returns Klass::layout_helper() for a constant Klass
 ///                         pointer, or 0 if unavailable. Pure (klass ->
 ///                         layout helper).
+///   GetSuperCheckOffset — Return the immutable subtype-check offset for a
+///                         known, non-null recorded Klass.
+///   GetKlassModifierFlags
+///                       — Returns immutable Java modifier flags for a known,
+///                         non-null Klass.
+///   GetKlassAccessFlags — Returns the requested immutable access flag bits,
+///                         or -1 if the Klass or mask is unavailable. The mask
+///                         must be a subset of ClassQueryAccessFlagsMask.
+///   GetClassSuperclass  — For a constant Class mirror, returns its Java
+///                         superclass as a recorded Klass, 0 for null, or
+///                         MirrorKlassUnavailable. Arrays return Object;
+///                         primitive and interface mirrors return null.
+///   GetSuperKlass       — Returns the recorded superclass Klass, 0 for a root
+///                         Klass, or MirrorKlassUnavailable if unavailable.
+///   GetCallerClass      — Returns the caller mirror oop id for a committed
+///                         inline scope, or -1 when the stack query must
+///                         remain.
 ///   GetKlassConstantField
 ///                       — Returns (HotSpot BasicType, raw value) for a
 ///                         VM-approved immutable field of a known Klass.

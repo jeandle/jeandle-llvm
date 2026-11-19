@@ -5,6 +5,9 @@
 @oop_handle_Unknown_2 = external global ptr addrspace(1)
 
 declare hotspotcc ptr @jeandle.load_mirror_array_klass(ptr addrspace(1))
+declare hotspotcc ptr @jeandle.load_mirror_klass(ptr addrspace(1))
+declare hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1))
+declare hotspotcc ptr @jeandle.load_klass(ptr addrspace(1))
 declare hotspotcc i32 @jeandle.layout_helper(ptr)
 
 ; The array Klass query must expose a constant layout recipe to allocation.
@@ -41,6 +44,28 @@ define hotspotcc ptr @dynamic_mirror(ptr addrspace(1) %mirror) #0 gc "hotspotgc"
 }
 ; CHECK-LABEL: define hotspotcc ptr @dynamic_mirror(
 ; CHECK: call hotspotcc ptr @jeandle.load_mirror_array_klass
+
+; An object's array Klass differs from the Klass stored in its header.
+define hotspotcc ptr @getclass_array_klass(ptr addrspace(1) %object) #0 gc "hotspotgc" {
+  %mirror = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %object)
+  %klass = call hotspotcc ptr @jeandle.load_mirror_array_klass(ptr addrspace(1) %mirror)
+  ret ptr %klass
+}
+; CHECK-LABEL: define hotspotcc ptr @getclass_array_klass(
+; CHECK-NOT: call hotspotcc ptr @jeandle.load_klass
+; CHECK: [[MIRROR:%.*]] = call hotspotcc ptr addrspace(1) @jeandle.get_class
+; CHECK-NEXT: [[ARRAY:%.*]] = call hotspotcc ptr @jeandle.load_mirror_array_klass(ptr addrspace(1) [[MIRROR]])
+; CHECK-NEXT: ret ptr [[ARRAY]]
+
+; The represented Klass query can still bypass the mirror round trip.
+define hotspotcc ptr @getclass_represented_klass(ptr addrspace(1) %object) #0 gc "hotspotgc" {
+  %mirror = call hotspotcc ptr addrspace(1) @jeandle.get_class(ptr addrspace(1) %object)
+  %klass = call hotspotcc ptr @jeandle.load_mirror_klass(ptr addrspace(1) %mirror)
+  ret ptr %klass
+}
+; CHECK-LABEL: define hotspotcc ptr @getclass_represented_klass(
+; CHECK: [[KLASS:%.*]] = call hotspotcc ptr @jeandle.load_klass(ptr addrspace(1) %object)
+; CHECK-NEXT: ret ptr [[KLASS]]
 
 attributes #0 = { "java-method"="1" }
 !java-method-compilation = !{}
