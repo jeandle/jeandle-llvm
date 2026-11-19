@@ -8267,7 +8267,60 @@ bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
   };
   Value *H;
   if (ScalarCost <= HashCodeScalarChainCostLimit) {
-    H = FoldChain(Initial, 0, 1, 31);
+    if (!F.getParent()->getTargetTriple().isX86()) {
+      H = FoldChain(Initial, 0, 1, 31);
+    } else {
+      // Compress constant runs before pairing adjacent affine updates. For
+      // (F0, B0) followed by (F1, B1), composition gives
+      // (F1*F0, F1*B0+B1), shortening the dependency chain through the hash.
+      struct AffineSegment {
+        uint32_t Factor;
+        Value *Bias;
+      };
+      SmallVector<AffineSegment, 16> Segments;
+      uint32_t Factor = 1;
+      uint32_t Bias = 0;
+      bool HasConstants = false;
+      auto FlushConstants = [&]() {
+        if (HasConstants)
+          Segments.push_back({Factor, ConstantInt::get(I32, Bias)});
+        Factor = 1;
+        Bias = 0;
+        HasConstants = false;
+      };
+      for (Value *Cell : Cells) {
+        Value *W = Widen(Cell);
+        if (auto *C = dyn_cast<ConstantInt>(W)) {
+          Factor *= 31;
+          Bias = Bias * 31 + uint32_t(C->getZExtValue());
+          HasConstants = true;
+        } else {
+          FlushConstants();
+          Segments.push_back({31, W});
+        }
+      }
+      FlushConstants();
+      H = Initial;
+      for (unsigned I = 0; I < Segments.size(); I += 2) {
+        auto [Mul, Add] = Segments[I];
+        if (I + 1 < Segments.size()) {
+          const auto &Next = Segments[I + 1];
+          Mul *= Next.Factor;
+          if (Next.Factor != 1)
+            Add = Binary(Instruction::Mul, Add,
+                         ConstantInt::get(I32, Next.Factor), "vhc.pair.mul");
+          if (auto *C = dyn_cast<ConstantInt>(Next.Bias); !C || !C->isZero())
+            Add = Binary(Instruction::Add, Add, Next.Bias, "vhc.pair.add");
+        }
+        if (Mul != 1)
+          H = Binary(Instruction::Mul, H, ConstantInt::get(I32, Mul),
+                     "vhc.mul");
+        if (auto *C = dyn_cast<ConstantInt>(H); C && C->isZero())
+          H = Add;
+        else if (auto *C = dyn_cast<ConstantInt>(Add); !C || !C->isZero())
+          H = Binary(Instruction::Add, H, Add, "vhc.add");
+      }
+    }
   } else {
     // The bounded, constant length makes every coefficient known. Independent
     // vector products and a balanced sum avoid a loop-carried multiply chain.
