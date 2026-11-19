@@ -1,0 +1,4 @@
+GetMirrorArrayKlass 0 = 123456
+GetMirrorArrayKlass 1 = 0
+GetMirrorArrayKlass 2 = 18446744073709551615
+GetKlassLayoutHelper 123456 = -1072690686

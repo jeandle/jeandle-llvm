@@ -495,6 +495,12 @@ bool isLoadMirrorKlassCall(CallInst *CI) {
          CI->arg_size() == 1;
 }
 
+bool isLoadMirrorArrayKlassCall(CallInst *CI) {
+  Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+  return Callee && Callee->getName() == "jeandle.load_mirror_array_klass" &&
+         CI->arg_size() == 1;
+}
+
 enum class ClassQueryKind {
   IsArray,
   IsInterface,
@@ -800,13 +806,15 @@ bool foldLoadKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
 bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
                              const DenseMap<Value *, int> &ConstOops,
                              DenseSet<uintptr_t> &KnownKlasses) {
-  if (!isLoadMirrorKlassCall(CI) || !CI->getType()->isPointerTy())
+  bool ArrayKlass = isLoadMirrorArrayKlassCall(CI);
+  if ((!isLoadMirrorKlassCall(CI) && !ArrayKlass) ||
+      !CI->getType()->isPointerTy())
     return false;
 
   auto *Origin = dyn_cast<CallInst>(CI->getArgOperand(0));
   Function *LoadKlass = CI->getModule()->getFunction("jeandle.load_klass");
   Function *Callee = CI->getCalledFunction();
-  if (Origin && isGetClassCall(Origin) && LoadKlass &&
+  if (!ArrayKlass && Origin && isGetClassCall(Origin) && LoadKlass &&
       CI->getFunctionType() == Callee->getFunctionType() &&
       CI->getCallingConv() == Callee->getCallingConv() && !Callee->isVarArg() &&
       !CI->hasOperandBundles() && !CI->isMustTailCall() &&
@@ -823,14 +831,15 @@ bool foldLoadMirrorKlassCall(CallInst *CI, const jeandle::VMCallbacks &CB,
     CI->eraseFromParent();
     return true;
   }
-  if (!CB.GetMirrorKlass)
+  auto GetKlass = ArrayKlass ? CB.GetMirrorArrayKlass : CB.GetMirrorKlass;
+  if (!GetKlass)
     return false;
 
   std::optional<int> OopId = lookupConstOop(CI->getArgOperand(0), ConstOops);
   if (!OopId)
     return false;
 
-  uintptr_t Klass = CB.GetMirrorKlass(*OopId);
+  uintptr_t Klass = GetKlass(*OopId);
   if (Klass == jeandle::MirrorKlassUnavailable)
     return false;
 
@@ -1463,17 +1472,38 @@ bool foldKlassQueryCall(CallInst *CI, KlassQueryKind Kind,
   return true;
 }
 
-bool foldLayoutHelperCall(CallInst *CI, const jeandle::VMCallbacks &CB) {
+bool foldLayoutHelperCall(CallInst *CI, const jeandle::VMCallbacks &CB,
+                          DominatorTree &DT, const DataLayout &DL,
+                          jeandle::IsNullEdgeOracle IsNullEdge,
+                          LazyValueInfo &LVI) {
   if (!isLayoutHelperCall(CI) || !CI->getType()->isIntegerTy(32) ||
       !CB.GetKlassLayoutHelper)
     return false;
 
   uintptr_t Klass = jeandle::extractKlassConstant(CI->getArgOperand(0));
-  if (Klass == 0)
-    return false;
+  bool FromReceiverType = Klass == 0;
+  if (FromReceiverType) {
+    auto *LoadKlass = dyn_cast<CallInst>(CI->getArgOperand(0));
+    if (!isLoadKlassCall(LoadKlass) || !CB.GetKlassConstant)
+      return false;
+    Value *Receiver = LoadKlass->getArgOperand(0);
+    if (!isKnownNonNullAt(Receiver, CI, DT, DL, LVI))
+      return false;
+    jeandle::JavaType ReceiverType =
+        jeandle::getJavaType(Receiver, &DT, CI, IsNullEdge);
+    if (!ReceiverType.isKnown())
+      return false;
+    Klass = CB.GetKlassConstant(ReceiverType.Klass);
+    if (Klass == 0)
+      return false;
+  }
 
   int LayoutHelper = CB.GetKlassLayoutHelper(Klass);
-  if (LayoutHelper == 0)
+  // Covariant reference-array subtypes share their header and element layout;
+  // primitive arrays have no subtypes. A non-exact instance type, however,
+  // cannot determine its subtype's object size. Array layout helpers are
+  // negative, while instance and interface helpers are nonnegative.
+  if (LayoutHelper == 0 || (FromReceiverType && LayoutHelper >= 0))
     return false;
 
   CI->replaceAllUsesWith(ConstantInt::get(CI->getType(), LayoutHelper));
@@ -1818,7 +1848,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
               Callee && (Callee->getName() == "jeandle.check_instanceof" ||
                          Callee->getName() == "jeandle.check_klass_subtype"))
             ClassInstanceChecks.push_back(CI);
-          if (isLoadMirrorKlassCall(CI))
+          if (isLoadMirrorKlassCall(CI) || isLoadMirrorArrayKlassCall(CI))
             LoadMirrorKlassCalls.push_back(CI);
           if (auto Kind = classQueryKind(CI))
             ClassQueryCalls.emplace_back(CI, *Kind);
@@ -1930,7 +1960,7 @@ PreservedAnalyses ConstantFieldFolding::run(Function &F,
     for (CallInst *CI : LayoutHelperCalls) {
       if (CI->getParent() == nullptr)
         continue;
-      if (foldLayoutHelperCall(CI, *CB)) {
+      if (foldLayoutHelperCall(CI, *CB, DT, DL, IsNullEdge, LVI)) {
         ++NumKlassLayoutHelpersFolded;
         RoundChanged = true;
         Changed = true;

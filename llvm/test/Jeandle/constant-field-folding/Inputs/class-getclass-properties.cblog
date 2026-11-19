@@ -1,4 +1,5 @@
 GetKlassLayoutHelper 100 = 16
+GetKlassConstant 100 = 100
 IsInterface 100 = false
 IsObjectKlass 100 = true
 GetSecondarySupers 100 = []
@@ -11,6 +12,7 @@ IsInterface 300 = false
 IsObjectKlass 300 = false
 GetSecondarySupers 300 = []
 GetKlassLayoutHelper 400 = 16
+GetKlassConstant 400 = 400
 IsInterface 400 = true
 IsObjectKlass 400 = false
 GetSecondarySupers 400 = []
