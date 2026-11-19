@@ -22,6 +22,7 @@
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/PatternMatch.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Transforms/Jeandle/SafepointUtils.h"
@@ -31,6 +32,7 @@
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 
 using namespace llvm;
+using namespace llvm::PatternMatch;
 
 static cl::opt<bool> EnableAffineVersioning(
     "jeandle-affine-check-versioning", cl::init(true), cl::Hidden,
@@ -45,11 +47,16 @@ namespace {
 constexpr const char *VersionedMD = "llvm.loop.jeandle.check.versioned";
 
 struct RangeCheck {
-  BranchInst *Branch;
+  ICmpInst *Condition;
   const SCEV *Start;
-  APInt Step;
+  const SCEV *Step;
   Value *Length;
   bool SuccessOnTrue;
+};
+
+struct CheckCondition {
+  BranchInst *Branch;
+  SmallVector<Instruction *, 8> Nodes;
 };
 
 struct ExitIncoming {
@@ -65,6 +72,7 @@ struct VersionPlan {
   APInt Step;
   ICmpInst::Predicate Predicate;
   SmallVector<RangeCheck, 4> Checks;
+  SmallVector<CheckCondition, 4> Conditions;
   SmallVector<ExitIncoming, 8> Exits;
 };
 
@@ -141,6 +149,84 @@ Value *getLength(Value *V, Loop *L, DominatorTree &DT, AssumptionCache &AC,
   return V;
 }
 
+void collectRangeCheck(ICmpInst *Cmp, bool Success, Loop *L,
+                       ScalarEvolution &SE, DominatorTree &DT,
+                       AssumptionCache &AC, SCEVExpander &Expander,
+                       SmallVectorImpl<RangeCheck> &Checks) {
+  if (!Cmp->getOperand(0)->getType()->isIntegerTy() ||
+      Cmp->getOperand(0)->getType()->getIntegerBitWidth() > 64)
+    return;
+  Instruction *At = L->getLoopPreheader()->getTerminator();
+  Value *Index = Cmp->getOperand(0);
+  Value *Length = getLength(Cmp->getOperand(1), L, DT, AC, At);
+  auto Pred = Cmp->getPredicate();
+  if (!Length) {
+    Index = Cmp->getOperand(1);
+    Length = getLength(Cmp->getOperand(0), L, DT, AC, At);
+    Pred = ICmpInst::getSwappedPredicate(Pred);
+  }
+  if (!Success)
+    Pred = ICmpInst::getInversePredicate(Pred);
+  if (!Length || (Pred != ICmpInst::ICMP_ULT && Pred != ICmpInst::ICMP_SLT))
+    return;
+
+  // InstCombine folds (x < 2^k) && (y < 2^k) into (x | y) < 2^k.
+  // Every operand must satisfy the endpoint proof before replacing this leaf.
+  auto *Bound = dyn_cast<ConstantInt>(Length);
+  bool SplitOr = Bound && Bound->getValue().isPowerOf2();
+  SmallVector<Value *, 8> Indices{Index};
+  SmallVector<RangeCheck, 4> Ranges;
+  unsigned Nodes = 0;
+  while (!Indices.empty()) {
+    Value *V = Indices.pop_back_val();
+    if (++Nodes > 16)
+      return;
+    Value *X, *Y;
+    if (SplitOr && match(V, m_Or(m_Value(X), m_Value(Y)))) {
+      Indices.push_back(X);
+      Indices.push_back(Y);
+      continue;
+    }
+    const auto *AR = dyn_cast<SCEVAddRecExpr>(SE.getSCEV(V));
+    if (!AR || AR->getLoop() != L || !AR->isAffine())
+      return;
+    const SCEV *Step = AR->getStepRecurrence(SE);
+    if (!isDefinedStart(AR->getStart(), L, At, AC, DT) ||
+        !isDefinedStart(Step, L, At, AC, DT) ||
+        !Expander.isSafeToExpandAt(AR->getStart(), At) ||
+        !Expander.isSafeToExpandAt(Step, At))
+      return;
+    Ranges.push_back({Cmp, AR->getStart(), Step, Length, Success});
+  }
+  // Bound both entry work and the number of conditions removed per version.
+  if (Checks.size() + Ranges.size() <= 8)
+    append_range(Checks, Ranges);
+}
+
+void collectCondition(Value *V, bool Success, Loop *L, ScalarEvolution &SE,
+                      DominatorTree &DT, AssumptionCache &AC,
+                      SCEVExpander &Expander, VersionPlan &Plan,
+                      CheckCondition &Condition,
+                      SmallPtrSetImpl<Value *> &Seen) {
+  if (Seen.size() == 64 || !Seen.insert(V).second)
+    return;
+  Value *X, *Y;
+  if ((Success && match(V, m_LogicalAnd(m_Value(X), m_Value(Y)))) ||
+      (!Success && match(V, m_LogicalOr(m_Value(X), m_Value(Y))))) {
+    collectCondition(X, Success, L, SE, DT, AC, Expander, Plan, Condition,
+                     Seen);
+    collectCondition(Y, Success, L, SE, DT, AC, Expander, Plan, Condition,
+                     Seen);
+    Condition.Nodes.push_back(cast<Instruction>(V));
+  } else if (match(V, m_Not(m_Value(X)))) {
+    collectCondition(X, !Success, L, SE, DT, AC, Expander, Plan, Condition,
+                     Seen);
+    Condition.Nodes.push_back(cast<Instruction>(V));
+  } else if (auto *Cmp = dyn_cast<ICmpInst>(V)) {
+    collectRangeCheck(Cmp, Success, L, SE, DT, AC, Expander, Plan.Checks);
+  }
+}
+
 std::optional<VersionPlan> planVersion(Loop *L, ScalarEvolution &SE,
                                        DominatorTree &DT, AssumptionCache &AC) {
   if (!L->isInnermost() || !L->isLoopSimplifyForm() || !L->isLCSSAForm(DT) ||
@@ -211,44 +297,25 @@ std::optional<VersionPlan> planVersion(Loop *L, ScalarEvolution &SE,
       !L->isLoopInvariant(Limit) || Init->getType() != Limit->getType() ||
       !isDefinedAt(Init, At, AC, DT) || !isDefinedAt(Limit, At, AC, DT))
     return std::nullopt;
-  VersionPlan Plan{L, Init, Limit, *Step, Pred, {}, {}};
+  VersionPlan Plan{L, Init, Limit, *Step, Pred, {}, {}, {}};
   SCEVExpander Expander(SE, "affine");
   for (BasicBlock *BB : L->blocks()) {
     auto *Check = dyn_cast<BranchInst>(BB->getTerminator());
     if (!Check || !Check->isConditional() || Check == Br)
       continue;
-    auto *RC = dyn_cast<ICmpInst>(Check->getCondition());
-    if (!RC || !RC->getOperand(0)->getType()->isIntegerTy())
-      continue;
     bool Success = L->contains(Check->getSuccessor(0));
-    if (Success == L->contains(Check->getSuccessor(1)) ||
-        !Check->getSuccessor(Success ? 1 : 0)->getTerminatingDeoptimizeCall())
+    if (Success == L->contains(Check->getSuccessor(1)))
       continue;
-    Value *Index = RC->getOperand(0);
-    Value *Length = getLength(RC->getOperand(1), L, DT, AC, At);
-    auto RangePred = RC->getPredicate();
-    if (!Length) {
-      Index = RC->getOperand(1);
-      Length = getLength(RC->getOperand(0), L, DT, AC, At);
-      RangePred = ICmpInst::getSwappedPredicate(RangePred);
-    }
-    if (!Success)
-      RangePred = ICmpInst::getInversePredicate(RangePred);
-    if (!Length || RangePred != ICmpInst::ICMP_ULT ||
-        Index->getType()->getIntegerBitWidth() > 64)
+    BasicBlock *Exit = Check->getSuccessor(Success ? 1 : 0);
+    if (Exit->isEHPad() || Exit->hasAddressTaken())
       continue;
-    const auto *AR = dyn_cast<SCEVAddRecExpr>(SE.getSCEV(Index));
-    if (!AR || AR->getLoop() != L || !AR->isAffine())
-      continue;
-    auto *IndexStep = dyn_cast<SCEVConstant>(AR->getStepRecurrence(SE));
-    if (!IndexStep || IndexStep->getAPInt().isZero() ||
-        !isDefinedStart(AR->getStart(), L, At, AC, DT) ||
-        !Expander.isSafeToExpandAt(AR->getStart(), At))
-      continue;
-    if (Plan.Checks.size() == 8)
-      return std::nullopt;
-    Plan.Checks.push_back(
-        {Check, AR->getStart(), IndexStep->getAPInt(), Length, Success});
+    CheckCondition Condition{Check, {}};
+    SmallPtrSet<Value *, 32> Seen;
+    size_t Before = Plan.Checks.size();
+    collectCondition(Check->getCondition(), Success, L, SE, DT, AC, Expander,
+                     Plan, Condition, Seen);
+    if (Plan.Checks.size() != Before)
+      Plan.Conditions.push_back(std::move(Condition));
   }
   if (Plan.Checks.empty())
     return std::nullopt;
@@ -271,7 +338,7 @@ void applyVersion(VersionPlan &Plan, ScalarEvolution &SE, DominatorTree &DT,
   Instruction *At = CheckBB->getTerminator();
   unsigned Bits = Plan.Step.getBitWidth();
   for (const RangeCheck &Check : Plan.Checks)
-    Bits = std::max(Bits, Check.Step.getBitWidth());
+    Bits = std::max(Bits, Check.Step->getType()->getIntegerBitWidth());
   IntegerType *Wide = IntegerType::get(At->getContext(), Bits * 2);
   IRBuilder<> B(At);
   bool Signed = !ICmpInst::isUnsigned(Plan.Predicate);
@@ -330,12 +397,14 @@ void applyVersion(VersionPlan &Plan, ScalarEvolution &SE, DominatorTree &DT,
     Value *First =
         Expander.expandCodeFor(Check.Start, Check.Start->getType(), At);
     First = B.CreateSExt(First, Wide, "affine.first");
-    APInt IndexStep = Check.Step.sext(Wide->getBitWidth());
-    Value *Last = B.CreateAdd(
-        First, B.CreateMul(LastIteration, ConstantInt::get(Wide, IndexStep)),
-        "affine.last");
-    Value *Low = IndexStep.isNegative() ? Last : First;
-    Value *High = IndexStep.isNegative() ? First : Last;
+    Value *IndexStep =
+        Expander.expandCodeFor(Check.Step, Check.Step->getType(), At);
+    IndexStep = B.CreateSExt(IndexStep, Wide, "affine.step");
+    Value *Last = B.CreateAdd(First, B.CreateMul(LastIteration, IndexStep),
+                              "affine.last");
+    Value *Negative = B.CreateICmpSLT(IndexStep, ConstantInt::get(Wide, 0));
+    Value *Low = B.CreateSelect(Negative, Last, First, "affine.low");
+    Value *High = B.CreateSelect(Negative, First, Last, "affine.high");
     Value *Length = B.CreateZExt(Check.Length, Wide, "affine.length");
     Value *Safe = B.CreateAnd(B.CreateICmpSGE(Low, ConstantInt::get(Wide, 0)),
                               B.CreateICmpULT(High, Length), "affine.range");
@@ -364,9 +433,29 @@ void applyVersion(VersionPlan &Plan, ScalarEvolution &SE, DominatorTree &DT,
   IRBuilder<> Entry(OldTerm);
   Entry.CreateCondBr(Guard, FastPH, Slow->getLoopPreheader());
   OldTerm->eraseFromParent();
-  for (const RangeCheck &Check : Plan.Checks)
-    Check.Branch->setCondition(
-        ConstantInt::getBool(At->getContext(), Check.SuccessOnTrue));
+  for (const CheckCondition &Condition : Plan.Conditions) {
+    DenseMap<Value *, Value *> Replacements;
+    for (const RangeCheck &Check : Plan.Checks)
+      Replacements[Check.Condition] =
+          ConstantInt::getBool(At->getContext(), Check.SuccessOnTrue);
+    // Rebuild only the branch's boolean expression. Other uses, including
+    // shared conditions and deopt operands, keep their original values.
+    for (Instruction *I : Condition.Nodes) {
+      if (none_of(I->operands(),
+                  [&](Value *V) { return Replacements.contains(V); }))
+        continue;
+      Instruction *Copy = I->clone();
+      Copy->setName(I->getName() + ".affine");
+      for (Use &U : Copy->operands())
+        if (auto It = Replacements.find(U.get()); It != Replacements.end())
+          U.set(It->second);
+      Copy->insertBefore(Condition.Branch->getIterator());
+      Replacements[I] = Copy;
+    }
+    if (auto It = Replacements.find(Condition.Branch->getCondition());
+        It != Replacements.end())
+      Condition.Branch->setCondition(It->second);
+  }
   addStringMetadataToLoop(L, VersionedMD, 1);
   addStringMetadataToLoop(Slow, VersionedMD, 1);
   DT.recalculate(*L->getHeader()->getParent());

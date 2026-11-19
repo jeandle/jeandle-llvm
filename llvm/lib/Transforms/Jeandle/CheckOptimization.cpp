@@ -217,10 +217,12 @@ PreservedAnalyses CheckOptimization::run(Function &F,
         !isa<ConstantPointerNull>(Cmp->getOperand(1)))
       continue;
     unsigned NullSucc = Cmp->getPredicate() == ICmpInst::ICMP_EQ ? 0 : 1;
-    // Existing eligibility can name a hot throwing handler as well as deopt.
-    // The machine pass checks whether a faulting access can implement it.
+    // Rebuilding a null branch must not grant a permission withheld by the
+    // producer. The deopt carries positive permission across guard widening;
+    // hot handlers and failures without feedback retain explicit branches.
+    auto *Deopt = BI->getSuccessor(NullSucc)->getTerminatingDeoptimizeCall();
     if (WasImplicit ||
-        BI->getSuccessor(NullSucc)->getTerminatingDeoptimizeCall())
+        (Deopt && Deopt->hasFnAttr(jeandle::Metadata::ImplicitNullCheck)))
       BI->setMetadata(LLVMContext::MD_make_implicit,
                       MDNode::get(F.getContext(), {}));
   }

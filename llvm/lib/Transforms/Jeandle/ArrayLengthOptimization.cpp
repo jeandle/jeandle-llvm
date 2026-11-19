@@ -13,6 +13,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopedHashTable.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/MustExecute.h"
@@ -24,6 +25,7 @@
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 
 using namespace llvm;
@@ -69,41 +71,84 @@ class LengthCSE {
   LoopInfo &LI;
   unsigned MergeAttempts = 0;
 
-  // Certify full availability before asking SSAUpdater to insert any PHIs.
-  // Missing paths and cycles fail without inserting speculative header reads
-  // or undef values. Keep all sources in the same loop to preserve LCSSA.
-  bool collectAvailable(BasicBlock *BB, BasicBlock *UseBB, Value *Array,
-                        SSAUpdater &SSA, DenseMap<BasicBlock *, bool> &Seen,
-                        unsigned &Budget) {
-    if (BB == UseBB || !DT.isReachableFromEntry(BB) || BB->isEHPad() ||
-        LI.getLoopFor(BB) != LI.getLoopFor(UseBB) || Seen.size() >= 64)
-      return false;
-    auto [It, Inserted] = Seen.try_emplace(BB, false);
-    if (!Inserted)
-      return It->second;
-    for (Instruction &I : reverse(*BB)) {
-      if (!Budget)
+  Value *translateArray(Value *Array, BasicBlock *BB, BasicBlock *Pred) {
+    auto *PN = dyn_cast<PHINode>(Array);
+    if (!PN || PN->getParent() != BB)
+      return Array;
+    // A loop-header receiver needs a per-iteration identity proof. Exit PHIs
+    // can still be translated when they carry a receiver out of a loop.
+    if (LI.isLoopHeader(BB))
+      return nullptr;
+    return getArrayIdentity(PN->getIncomingValueForBlock(Pred));
+  }
+
+  // Certify the complete backward slice before SSAUpdater can insert PHIs.
+  // Each block represents one receiver; conflicting translations fail rather
+  // than conflating lengths of different arrays in the same SSA variable.
+  bool
+  collectAvailable(BasicBlock *UseBB, Value *Array,
+                   SmallVectorImpl<std::pair<BasicBlock *, Value *>> &Sources) {
+    DenseMap<BasicBlock *, Value *> Arrays;
+    SmallVector<BasicBlock *, 16> Worklist;
+    unsigned Budget = 512;
+    auto AddPredecessors = [&](BasicBlock *BB, Value *Receiver) {
+      if (pred_empty(BB))
         return false;
-      --Budget;
-      CallInst *CI = getArrayLength(I);
-      if (!CI)
-        continue;
-      Value *Operand = CI->getArgOperand(0);
-      if ((CI->paramHasAttr(0, Attribute::NoUndef) ||
-           jeandle::isProvenDefined(Operand)) &&
-          getArrayIdentity(Operand) == Array) {
-        SSA.AddAvailableValue(BB, CI);
-        Seen[BB] = true;
-        return true;
+      for (BasicBlock *Pred : predecessors(BB)) {
+        if (!Budget)
+          return false;
+        --Budget;
+        Value *Incoming = translateArray(Receiver, BB, Pred);
+        if (!Incoming || Pred == UseBB || Pred->isEHPad() ||
+            !DT.isReachableFromEntry(Pred))
+          return false;
+        if (auto *I = dyn_cast<Instruction>(Incoming))
+          if (!DT.dominates(I, Pred->getTerminator()))
+            return false;
+        auto It = Arrays.find(Pred);
+        if (It != Arrays.end()) {
+          if (It->second != Incoming)
+            return false;
+          continue;
+        }
+        if (Arrays.size() >= 64)
+          return false;
+        Arrays[Pred] = Incoming;
+        Worklist.push_back(Pred);
+      }
+      return true;
+    };
+    if (!AddPredecessors(UseBB, Array))
+      return false;
+    for (unsigned Idx = 0; Idx != Worklist.size(); ++Idx) {
+      BasicBlock *BB = Worklist[Idx];
+      Value *Receiver = Arrays.lookup(BB);
+      Value *Length = nullptr;
+      for (Instruction &I : reverse(*BB)) {
+        if (!Budget)
+          return false;
+        --Budget;
+        CallInst *CI = getArrayLength(I);
+        if (!CI)
+          continue;
+        Value *Operand = CI->getArgOperand(0);
+        if ((CI->paramHasAttr(0, Attribute::NoUndef) ||
+             jeandle::isProvenDefined(Operand)) &&
+            getArrayIdentity(Operand) == Receiver) {
+          Length = CI;
+          break;
+        }
+      }
+      if (Length) {
+        Sources.emplace_back(BB, Length);
+      } else if (!AddPredecessors(BB, Receiver)) {
+        return false;
       }
     }
-    if (pred_empty(BB))
-      return false;
-    for (BasicBlock *Pred : predecessors(BB))
-      if (!collectAvailable(Pred, UseBB, Array, SSA, Seen, Budget))
-        return false;
-    Seen[BB] = true;
-    return true;
+    // Cycles are allowed only after all their incoming paths are certified.
+    // Every visited block is reachable from entry, and an entry without a
+    // source fails above, so a cycle cannot support its own initial value.
+    return !Sources.empty();
   }
 
   Value *mergeAvailable(CallInst *CI, Value *Array) {
@@ -112,13 +157,13 @@ class LengthCSE {
     BasicBlock *BB = CI->getParent();
     if (BB->isEHPad() || pred_empty(BB))
       return nullptr;
+    SmallVector<std::pair<BasicBlock *, Value *>, 8> Sources;
+    if (!collectAvailable(BB, Array, Sources))
+      return nullptr;
     SSAUpdater SSA;
     SSA.Initialize(CI->getType(), "array.length");
-    DenseMap<BasicBlock *, bool> Seen;
-    unsigned Budget = 512;
-    for (BasicBlock *Pred : predecessors(BB))
-      if (!collectAvailable(Pred, BB, Array, SSA, Seen, Budget))
-        return nullptr;
+    for (auto [SourceBB, Length] : Sources)
+      SSA.AddAvailableValue(SourceBB, Length);
     return SSA.GetValueInMiddleOfBlock(BB);
   }
 
@@ -202,6 +247,10 @@ PreservedAnalyses ArrayLengthOptimization::run(Function &F,
   Changed |= LengthCSE(DT, LI).visit(DT.getRootNode());
   if (!Changed)
     return PreservedAnalyses::all();
+  // Reusing a length can introduce uses across loop boundaries, including
+  // through several nested loops. CFG and dominance remain unchanged.
+  for (Loop *L : LI)
+    formLCSSARecursively(*L, DT, &LI, nullptr);
   PreservedAnalyses PA;
   PA.preserveSet<CFGAnalyses>();
   return PA;

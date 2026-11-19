@@ -34,6 +34,11 @@ public:
 
   static constexpr const char *InlineScopeID = "inline-scope-id";
 
+  // Positive permission for a cold null failure with recompilation feedback.
+  // The deopt call retains it when the guarding branch is widened or rebuilt.
+  static constexpr const char *ImplicitNullCheck =
+      "jeandle-implicit-null-check";
+
   // Set by inclusive loop versioning on the latch of the slow-path clone so the
   // later strip-mining pass skips it instead of trying to version it again.
   static constexpr const char *InclusiveSlowPath = "jeandle.inclusive.slow";
