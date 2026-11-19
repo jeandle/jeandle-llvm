@@ -10,6 +10,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/ArrayLengthOptimization.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopedHashTable.h"
 #include "llvm/Analysis/AssumptionCache.h"
@@ -17,11 +18,13 @@
 #include "llvm/Analysis/MustExecute.h"
 #include "llvm/Analysis/SimplifyQuery.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Transforms/Utils/SSAUpdater.h"
 
 using namespace llvm;
 
@@ -61,13 +64,71 @@ static Value *getArrayIdentity(Value *V) {
 // Keeping this fact at the JavaOp level avoids overstating the lifetime of
 // raw header memory with invariant.load metadata.
 class LengthCSE {
-  ScopedHashTable<Value *, CallInst *> Available;
+  ScopedHashTable<Value *, Value *> Available;
+  DominatorTree &DT;
+  LoopInfo &LI;
+  unsigned MergeAttempts = 0;
+
+  // Certify full availability before asking SSAUpdater to insert any PHIs.
+  // Missing paths and cycles fail without inserting speculative header reads
+  // or undef values. Keep all sources in the same loop to preserve LCSSA.
+  bool collectAvailable(BasicBlock *BB, BasicBlock *UseBB, Value *Array,
+                        SSAUpdater &SSA, DenseMap<BasicBlock *, bool> &Seen,
+                        unsigned &Budget) {
+    if (BB == UseBB || !DT.isReachableFromEntry(BB) || BB->isEHPad() ||
+        LI.getLoopFor(BB) != LI.getLoopFor(UseBB) || Seen.size() >= 64)
+      return false;
+    auto [It, Inserted] = Seen.try_emplace(BB, false);
+    if (!Inserted)
+      return It->second;
+    for (Instruction &I : reverse(*BB)) {
+      if (!Budget)
+        return false;
+      --Budget;
+      CallInst *CI = getArrayLength(I);
+      if (!CI)
+        continue;
+      Value *Operand = CI->getArgOperand(0);
+      if ((CI->paramHasAttr(0, Attribute::NoUndef) ||
+           jeandle::isProvenDefined(Operand)) &&
+          getArrayIdentity(Operand) == Array) {
+        SSA.AddAvailableValue(BB, CI);
+        Seen[BB] = true;
+        return true;
+      }
+    }
+    if (pred_empty(BB))
+      return false;
+    for (BasicBlock *Pred : predecessors(BB))
+      if (!collectAvailable(Pred, UseBB, Array, SSA, Seen, Budget))
+        return false;
+    Seen[BB] = true;
+    return true;
+  }
+
+  Value *mergeAvailable(CallInst *CI, Value *Array) {
+    if (MergeAttempts++ >= 128)
+      return nullptr;
+    BasicBlock *BB = CI->getParent();
+    if (BB->isEHPad() || pred_empty(BB))
+      return nullptr;
+    SSAUpdater SSA;
+    SSA.Initialize(CI->getType(), "array.length");
+    DenseMap<BasicBlock *, bool> Seen;
+    unsigned Budget = 512;
+    for (BasicBlock *Pred : predecessors(BB))
+      if (!collectAvailable(Pred, BB, Array, SSA, Seen, Budget))
+        return nullptr;
+    return SSA.GetValueInMiddleOfBlock(BB);
+  }
 
 public:
+  LengthCSE(DominatorTree &DT, LoopInfo &LI) : DT(DT), LI(LI) {}
+
   bool visit(DomTreeNode *Node, unsigned Depth = 0) {
     if (Depth == 256)
       return false;
-    ScopedHashTableScope<Value *, CallInst *> Scope(Available);
+    ScopedHashTableScope<Value *, Value *> Scope(Available);
     bool Changed = false;
     for (Instruction &I : make_early_inc_range(*Node->getBlock())) {
       CallInst *CI = getArrayLength(I);
@@ -79,7 +140,11 @@ public:
           !jeandle::isProvenDefined(Operand))
         continue;
       Value *Array = getArrayIdentity(Operand);
-      if (CallInst *Earlier = Available.lookup(Array)) {
+      Value *Earlier = Available.lookup(Array);
+      if (!Earlier)
+        Earlier = mergeAvailable(CI, Array);
+      if (Earlier) {
+        Available.insert(Array, Earlier);
         CI->replaceAllUsesWith(Earlier);
         CI->eraseFromParent();
         Changed = true;
@@ -134,7 +199,7 @@ PreservedAnalyses ArrayLengthOptimization::run(Function &F,
       }
     }
   }
-  Changed |= LengthCSE().visit(DT.getRootNode());
+  Changed |= LengthCSE(DT, LI).visit(DT.getRootNode());
   if (!Changed)
     return PreservedAnalyses::all();
   PreservedAnalyses PA;

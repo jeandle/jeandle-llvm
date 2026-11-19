@@ -14,6 +14,7 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Analysis/SimplifyQuery.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Dominators.h"
@@ -22,6 +23,7 @@
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/KnownBits.h"
 #include "llvm/Transforms/Jeandle/SafepointUtils.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -33,6 +35,10 @@ using namespace llvm;
 static cl::opt<bool> EnableAffineVersioning(
     "jeandle-affine-check-versioning", cl::init(true), cl::Hidden,
     cl::desc("Version affine array checks left by standard loop transforms"));
+
+static cl::opt<unsigned> MinVersionedTripCount(
+    "jeandle-affine-min-trip-count", cl::init(10), cl::Hidden,
+    cl::desc("Minimum estimated loop trips for affine check versioning"));
 
 namespace {
 
@@ -72,8 +78,11 @@ bool isDefinedAt(Value *V, Instruction *At, AssumptionCache &AC,
   // ValueTracking conservatively rejects nneg extensions as poison producers.
   // A dominating Java loop-entry test can establish their non-negative input.
   auto *Ext = dyn_cast<ZExtInst>(V);
-  return Ext && Ext->hasNonNeg() &&
-         isGuaranteedNotToBeUndefOrPoison(Ext->getOperand(0), &AC, At, &DT) &&
+  if (!Ext || !Ext->hasNonNeg() ||
+      !isGuaranteedNotToBeUndefOrPoison(Ext->getOperand(0), &AC, At, &DT))
+    return false;
+  SimplifyQuery Q(At->getModule()->getDataLayout(), &DT, &AC, Ext);
+  return isKnownNonNegative(Ext->getOperand(0), Q) ||
          isImpliedByDomCondition(ICmpInst::ICMP_SGE, Ext->getOperand(0),
                                  ConstantInt::get(Ext->getSrcTy(), 0), Ext,
                                  At->getModule()->getDataLayout()) == true;
@@ -106,18 +115,28 @@ bool isDefinedStart(const SCEV *S, Loop *L, Instruction *At,
   return true;
 }
 
-Value *getLength(Value *V, Loop *L, DominatorTree &DT, Instruction *At) {
-  if (auto *Cast = dyn_cast<CastInst>(V)) {
-    if (Cast->getOpcode() != Instruction::ZExt &&
-        Cast->getOpcode() != Instruction::SExt)
+Value *getLength(Value *V, Loop *L, DominatorTree &DT, AssumptionCache &AC,
+                 Instruction *At) {
+  // Widened compares can keep their extension inside the loop even when the
+  // Java length itself is invariant. A nonnegative source has the same value
+  // under either extension, including nneg zext.
+  if (auto *Ext = dyn_cast<CastInst>(V))
+    if (Ext->getOpcode() == Instruction::ZExt ||
+        Ext->getOpcode() == Instruction::SExt)
+      V = Ext->getOperand(0);
+  if (!V->getType()->isIntegerTy() || V->getType()->getIntegerBitWidth() > 64 ||
+      !L->isLoopInvariant(V) || !isDefinedAt(V, At, AC, DT))
+    return nullptr;
+  if (auto *I = dyn_cast<Instruction>(V))
+    if (!DT.dominates(I, At))
       return nullptr;
-    V = Cast->getOperand(0);
-  }
-  auto *CI = dyn_cast<CallInst>(V);
-  if (!CI || !CI->getType()->isIntegerTy(32) || CI->arg_size() != 1 ||
-      CI->hasOperandBundles() || !CI->getCalledFunction() ||
-      CI->getCalledFunction()->getName() != "jeandle.arraylength" ||
-      L->contains(CI) || !DT.dominates(CI, At))
+  SimplifyQuery Q(At->getModule()->getDataLayout(), &DT, &AC, At);
+  if (!isKnownNonNegative(V, Q))
+    return nullptr;
+  // Java array lengths fit in a nonnegative int. This also keeps the
+  // mathematical index endpoints within the signed range of their IR type.
+  if (V->getType()->getIntegerBitWidth() > 32 &&
+      computeKnownBits(V, Q).countMaxActiveBits() > 31)
     return nullptr;
   return V;
 }
@@ -127,6 +146,17 @@ std::optional<VersionPlan> planVersion(Loop *L, ScalarEvolution &SE,
   if (!L->isInnermost() || !L->isLoopSimplifyForm() || !L->isLCSSAForm(DT) ||
       findOptionMDForLoop(L, VersionedMD))
     return std::nullopt;
+  // LoopConstrainer marks its checked pre/post clones on the latch. Leave
+  // those deliberately small residual ranges alone; other loops may still
+  // need versioning even when their index and controller have equal steps.
+  if (L->getLoopLatch()->getTerminator()->getMetadata(
+          "loop_constrainer.loop.clone"))
+    return std::nullopt;
+  // Like IRCE, avoid paying for entry predicates and a cloned fallback when
+  // profile already predicts too few iterations to amortize that work.
+  if (auto Trips = getLoopEstimatedTripCount(L))
+    if (*Trips < MinVersionedTripCount)
+      return std::nullopt;
   unsigned Size = 0;
   for (BasicBlock *BB : L->blocks()) {
     if (BB->isEHPad() || BB->hasAddressTaken())
@@ -195,11 +225,11 @@ std::optional<VersionPlan> planVersion(Loop *L, ScalarEvolution &SE,
         !Check->getSuccessor(Success ? 1 : 0)->getTerminatingDeoptimizeCall())
       continue;
     Value *Index = RC->getOperand(0);
-    Value *Length = getLength(RC->getOperand(1), L, DT, At);
+    Value *Length = getLength(RC->getOperand(1), L, DT, AC, At);
     auto RangePred = RC->getPredicate();
     if (!Length) {
       Index = RC->getOperand(1);
-      Length = getLength(RC->getOperand(0), L, DT, At);
+      Length = getLength(RC->getOperand(0), L, DT, AC, At);
       RangePred = ICmpInst::getSwappedPredicate(RangePred);
     }
     if (!Success)
@@ -215,10 +245,6 @@ std::optional<VersionPlan> planVersion(Loop *L, ScalarEvolution &SE,
         !isDefinedStart(AR->getStart(), L, At, AC, DT) ||
         !Expander.isSafeToExpandAt(AR->getStart(), At))
       continue;
-    // IRCE handles the same-step case. Complement it without multiplying
-    // versions of loops it has already constrained.
-    if (IndexStep->getAPInt().sextOrTrunc(128) == Step->sextOrTrunc(128))
-      continue;
     if (Plan.Checks.size() == 8)
       return std::nullopt;
     Plan.Checks.push_back(
@@ -227,7 +253,7 @@ std::optional<VersionPlan> planVersion(Loop *L, ScalarEvolution &SE,
   if (Plan.Checks.empty())
     return std::nullopt;
   SmallVector<BasicBlock *, 8> Exits;
-  L->getExitBlocks(Exits);
+  L->getUniqueExitBlocks(Exits);
   for (BasicBlock *Exit : Exits)
     for (PHINode &Phi : Exit->phis())
       for (unsigned I = 0; I < Phi.getNumIncomingValues(); ++I)

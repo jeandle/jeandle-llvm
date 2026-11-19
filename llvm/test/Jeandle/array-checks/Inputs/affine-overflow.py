@@ -5,6 +5,8 @@ out = Path(sys.argv[3])
 out.mkdir(parents=True, exist_ok=True)
 # Small controller/index widths expose wrap boundaries in short executions.
 preds = [('slt',1),('sle',3),('sgt',-1),('sge',-3),('ne',2),('ult',1),('ule',3),('ugt',-1),('uge',-3)]
+# Include folded bounds and the negative same-step recurrences left by IRCE.
+preds += [('sgt', -2), ('sgt', -3), ('slt', 1), ('sle', 3)]
 header = '''@effects = global i32 0
 @len = global i32 32
 @fmt = private constant [7 x i8] c"%d:%d\\0A\\00"
@@ -17,6 +19,8 @@ declare i32 @llvm.experimental.deoptimize.i32(...)
 '''
 functions=[]
 for n,(pred,step) in enumerate(preds):
+ index_step = step if n in (9, 10) else 3
+ length = '32' if n >= 11 else '%length'
  functions.append(f'''define i32 @loop{n}(i8 noundef %start, i8 noundef %limit, i32 noundef %offset) {{
 entry:
  %length = call i32 @jeandle.arraylength(ptr addrspace(1) null)
@@ -27,10 +31,10 @@ loop:
  %old = load i32, ptr @effects
  %new = add i32 %old, 1
  store i32 %new, ptr @effects
- %ok = icmp ult i32 %x, %length
+ %ok = icmp ult i32 %x, {length}
  br i1 %ok, label %body, label %fail
 body:
- %xnext = add i32 %x, 3
+ %xnext = add i32 %x, {index_step}
  %next = add i8 %i, {step}
  %again = icmp {pred} i8 %next, %limit
  br i1 %again, label %loop, label %exit

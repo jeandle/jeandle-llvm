@@ -203,9 +203,12 @@ PreservedAnalyses CheckOptimization::run(Function &F,
 
   for (BasicBlock &BB : F) {
     auto *BI = dyn_cast<BranchInst>(BB.getTerminator());
-    if (!BI || !BI->isConditional())
+    if (!BI)
       continue;
+    bool WasImplicit = BI->getMetadata(LLVMContext::MD_make_implicit);
     BI->setMetadata(LLVMContext::MD_make_implicit, nullptr);
+    if (!BI->isConditional())
+      continue;
     auto *Cmp = dyn_cast<ICmpInst>(BI->getCondition());
     if (!Cmp || !Cmp->isEquality() ||
         !Cmp->getOperand(0)->getType()->isPointerTy())
@@ -214,7 +217,10 @@ PreservedAnalyses CheckOptimization::run(Function &F,
         !isa<ConstantPointerNull>(Cmp->getOperand(1)))
       continue;
     unsigned NullSucc = Cmp->getPredicate() == ICmpInst::ICMP_EQ ? 0 : 1;
-    if (BI->getSuccessor(NullSucc)->getTerminatingDeoptimizeCall())
+    // Existing eligibility can name a hot throwing handler as well as deopt.
+    // The machine pass checks whether a faulting access can implement it.
+    if (WasImplicit ||
+        BI->getSuccessor(NullSucc)->getTerminatingDeoptimizeCall())
       BI->setMetadata(LLVMContext::MD_make_implicit,
                       MDNode::get(F.getContext(), {}));
   }
