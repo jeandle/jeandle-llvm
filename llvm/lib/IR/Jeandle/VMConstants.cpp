@@ -157,6 +157,8 @@ VMConstants VMConstants::fromModule(const Module &M) {
     C.ReduceBulkZeroing = *V;
   if (auto V = readGlobalBool(M, "VMOptions.ReduceInitialCardMarks"))
     C.ReduceInitialCardMarks = *V;
+  if (auto V = readGlobalBool(M, "Jeandle.FreshArrayCopyRequiresGCBarriers"))
+    C.FreshArrayCopyRequiresGCBarriers = *V;
   if (auto V = readGlobalInt(M, "VMOptions.ArrayOperationPartialInlineSize"))
     C.ArrayOperationPartialInlineSize = *V;
   if (auto V = readGlobalInt(M, "VMOptions.ArrayCopyLoadStoreMaxElem"))

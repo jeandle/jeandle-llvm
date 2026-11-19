@@ -128,6 +128,8 @@ struct CopyFacts {
   jeandle::JBasicType SrcElem = jeandle::JBasicType::Count;
   jeandle::JBasicType DestElem = jeandle::JBasicType::Count;
   ConstantInt *ArrayCloneLength = nullptr;
+  bool ScalarizeRawArrayClone = false;
+  bool CanElideFreshCopyBarriers = false;
   bool ReduceRawArrayCloneZeroing = false;
   Value *CopiedPrefixBeforeAllocation = nullptr;
   std::optional<jeandle::CloneInstanceInfoResult> CloneInstanceInfo;
@@ -244,21 +246,14 @@ void deferArrayInitialization(CallBase &Allocation) {
   Allocation.setArgOperand(6, True);
 }
 
-bool canReduceRawArrayCloneZeroing(CallBase &CI, const CopyFacts &Facts,
-                                   FunctionAnalysisManager &FAM) {
+bool hasCompleteRawArrayCloneExtent(CallBase &CI, const CopyFacts &Facts,
+                                    FunctionAnalysisManager &FAM) {
   if (!isArrayClone(CI) || !isAllocTightlyCoupled(CI) ||
       Facts.SrcElem == jeandle::JBasicType::Count)
     return false;
-  Module &M = *CI.getModule();
-  const auto VMConsts = jeandle::VMConstants::fromModule(M);
-  if (!VMConsts.reduceBulkZeroing())
-    return false;
-  Function *Helper = M.getFunction("jeandle.clone_payload");
-  if (!Helper || Helper->isDeclaration() || !Helper->doesNotThrow() ||
-      !Helper->hasFnAttribute("gc-leaf-function"))
-    return false;
+  const auto VMConsts = jeandle::VMConstants::fromModule(*CI.getModule());
   CallBase *Allocation = findTightlyCoupledArrayAllocation(CI);
-  if (!Allocation || !canDeferArrayInitialization(*Allocation, CI))
+  if (!Allocation)
     return false;
 
   auto *SrcOffset = dyn_cast<ConstantInt>(CI.getArgOperand(1));
@@ -286,7 +281,9 @@ bool canReduceRawArrayCloneZeroing(CallBase &CI, const CopyFacts &Facts,
   const uint64_t HeaderAndRounding = Base - Offset + 7;
   const SCEV *Scale = SE.getConstant(I64, ElementSize);
   const SCEV *WordSize = SE.getConstant(I64, 8);
-  const SCEV *LengthExpr = SE.getSCEV(Length);
+  SmallVector<const SCEV *, 2> LengthExprs{SE.getSCEV(Length)};
+  if (Facts.ArrayCloneLength)
+    LengthExprs.push_back(SE.getSCEV(Facts.ArrayCloneLength));
 
   // InstCombine can express rounded word counts as (sext(length) & mask),
   // optionally followed by an extra header word. On successful allocation
@@ -324,26 +321,60 @@ bool canReduceRawArrayCloneZeroing(CallBase &CI, const CopyFacts &Facts,
       }
     }
   }
-  for (bool Signed : {true, false}) {
-    const SCEV *Length64 = Signed ? SE.getSignExtendExpr(LengthExpr, I64)
-                                  : SE.getZeroExtendExpr(LengthExpr, I64);
-    // Successful allocation bounds length to a nonnegative i32. The byte
-    // extent cannot overflow i64, so divide the scale and constant bias
-    // separately for whole-word elements. This also matches InstCombine's
-    // canonical length (or length + header words) without a residual udiv.
-    if (ElementSize >= 8 && ElementSize % 8 == 0) {
-      const SCEV *WholeWords = SE.getAddExpr(
-          SE.getMulExpr(Length64, SE.getConstant(I64, ElementSize / 8)),
-          SE.getConstant(I64, HeaderWords));
-      if (Actual == WholeWords || UnmaskedActual == WholeWords)
+  for (const SCEV *LengthExpr : LengthExprs) {
+    for (bool Signed : {true, false}) {
+      const SCEV *Length64 = Signed ? SE.getSignExtendExpr(LengthExpr, I64)
+                                    : SE.getZeroExtendExpr(LengthExpr, I64);
+      // Successful allocation bounds length to a nonnegative i32. The byte
+      // extent cannot overflow i64, so divide the scale and constant bias
+      // separately for whole-word elements. This also matches InstCombine's
+      // canonical length (or length + header words) without a residual udiv.
+      if (ElementSize >= 8 && ElementSize % 8 == 0) {
+        const SCEV *WholeWords = SE.getAddExpr(
+            SE.getMulExpr(Length64, SE.getConstant(I64, ElementSize / 8)),
+            SE.getConstant(I64, HeaderWords));
+        if (Actual == WholeWords || UnmaskedActual == WholeWords)
+          return true;
+      }
+      const SCEV *RoundedBytes =
+          SE.getAddExpr(SE.getMulExpr(Length64, Scale),
+                        SE.getConstant(I64, HeaderAndRounding));
+      if (Actual == SE.getUDivExpr(RoundedBytes, WordSize))
         return true;
     }
-    const SCEV *RoundedBytes = SE.getAddExpr(
-        SE.getMulExpr(Length64, Scale), SE.getConstant(I64, HeaderAndRounding));
-    if (Actual == SE.getUDivExpr(RoundedBytes, WordSize))
-      return true;
   }
   return false;
+}
+
+bool canScalarizeRawArrayClone(CallBase &CI, const CopyFacts &Facts) {
+  const auto VMConsts = jeandle::VMConstants::fromModule(*CI.getModule());
+  const int64_t Offset = cast<ConstantInt>(CI.getArgOperand(3))->getSExtValue();
+  if (Offset == VMConsts.arrayBaseOffsetFor(Facts.SrcElem))
+    return true;
+
+  // Element stores preserve the initialized length header. A raw payload
+  // that includes that header is equivalent only when the lengths agree.
+  CallBase *Allocation = findTightlyCoupledArrayAllocation(CI);
+  Value *Length = jeandle::pea::getJeandleNewArrayLength(Allocation);
+  Value *Source = CI.getArgOperand(0)->stripPointerCasts();
+  if (auto *LengthCall = dyn_cast<CallBase>(Length)) {
+    if (jeandle::pea::isJeandleArrayLength(LengthCall) &&
+        LengthCall->getArgOperand(0)->stripPointerCasts() == Source)
+      return true;
+  }
+  auto *SourceAllocation = dyn_cast<CallBase>(Source);
+  Value *SourceLength =
+      jeandle::pea::getJeandleNewArrayLength(SourceAllocation);
+  return SourceLength && sameArrayLength(Length, SourceLength);
+}
+
+bool canReduceRawArrayCloneZeroing(CallBase &CI) {
+  const auto VMConsts = jeandle::VMConstants::fromModule(*CI.getModule());
+  Function *Helper = CI.getModule()->getFunction("jeandle.clone_payload");
+  CallBase *Allocation = findTightlyCoupledArrayAllocation(CI);
+  return VMConsts.reduceBulkZeroing() && Helper && !Helper->isDeclaration() &&
+         Helper->doesNotThrow() && Helper->hasFnAttribute("gc-leaf-function") &&
+         Allocation && canDeferArrayInitialization(*Allocation, CI);
 }
 
 bool needsCopyPublicationBarrier(CallBase &CI) {
@@ -846,7 +877,7 @@ bool tryScalarizeCopy(CallBase &CI, const CopyFacts &Facts) {
 
   if (PrimitiveArrayClone) {
     CallBase *Allocation = findTightlyCoupledArrayAllocation(CI);
-    if (!Allocation)
+    if (!Allocation || !Facts.ScalarizeRawArrayClone)
       return false;
     const bool DeferInitialization =
         VMConsts.reduceBulkZeroing() &&
@@ -1595,7 +1626,8 @@ bool generateArrayCopy(CallBase &CI, CallBase *Allocation,
                        Value *SrcPos, Value *Dest, Value *DestPos,
                        Value *CopyLength, bool DisjointBases,
                        bool LengthNeverNegative, BasicBlock *SlowRegion,
-                       TargetTransformInfo &TTI) {
+                       TargetTransformInfo &TTI,
+                       bool CanElideFreshCopyBarriers = false) {
 
   Module *M = CI.getModule();
   LLVMContext &Ctx = CI.getContext();
@@ -1727,16 +1759,30 @@ bool generateArrayCopy(CallBase &CI, CallBase *Allocation,
       CheckedControl = CheckcastControl;
     }
 
-    // TODO: Model BarrierSetC2::array_copy_requires_gc_barriers(). Jeandle does
-    // not yet track the allocation/barrier facts needed to rewrite object
-    // copies to primitive copies, so keep them on oop-aware paths.
+    // The subtype-success edge needs no per-element checks. For an
+    // uninterrupted fresh initialization the collector may also waive both
+    // GC barriers, with slow allocations supplying compensating card marks.
+    if (CanElideFreshCopyBarriers) {
+      const uint64_t OopSize =
+          VMConsts.elementSizeFor(jeandle::JBasicType::Object);
+      const auto PrimitiveType =
+          OopSize == 8 ? jeandle::JBasicType::Long : jeandle::JBasicType::Int;
+      StringRef PrimitiveStubName;
+      if ((OopSize == 4 || OopSize == 8) &&
+          VMConsts.arrayBaseOffsetFor(PrimitiveType) ==
+              VMConsts.arrayBaseOffsetFor(jeandle::JBasicType::Object) &&
+          basicTypeToArrayCopy(*M, PrimitiveType, SrcPos, DestPos,
+                               DisjointBases, PrimitiveStubName,
+                               AcopyToUninitialized))
+        CopyType = PrimitiveType;
+    }
   }
 
   if (ControlBB != nullptr) {
     // LLVM memory state is represented by load/store/call memory effects rather
     // than an explicit C2 MergeMemNode clone.
     const bool FastPathGenerated = generateUncheckedArrayCopy(
-        ControlBB, BasicElemType, DisjointBases, Src, SrcPos, Dest, DestPos,
+        ControlBB, CopyType, DisjointBases, Src, SrcPos, Dest, DestPos,
         CopyLength, AcopyToUninitialized, TTI);
 
     // C2 records this edge in result_region. LLVM needs an explicit branch.
@@ -1891,7 +1937,8 @@ bool expandCopyPseudoCall(CallBase &CI, const CopyFacts &Facts,
     return generateArrayCopy(CI, Allocation, ControlBB,
                              jeandle::JBasicType::Object, Src, SrcPos, Dest,
                              DestPos, Length, /*DisjointBases=*/true,
-                             hasNegativeLengthGuard(CI), nullptr, TTI);
+                             hasNegativeLengthGuard(CI), nullptr, TTI,
+                             Facts.CanElideFreshCopyBarriers);
   }
 
   CallBase *Allocation = isAllocTightlyCoupled(CI)
@@ -2042,8 +2089,19 @@ PreservedAnalyses CopySpecialization::run(Function &F,
       Facts = analyzeCopy(*CB, DT, IsNullEdge);
     Facts.CopiedPrefixBeforeAllocation =
         getCopiedPrefixBeforeAllocation(*CB, DT);
-    Facts.ReduceRawArrayCloneZeroing =
-        canReduceRawArrayCloneZeroing(*CB, Facts, FAM);
+    if ((isCopyOf(*CB) || isCopyOfRange(*CB) || isReferenceArrayClone(*CB)) &&
+        isAllocTightlyCoupled(*CB)) {
+      const auto VMConsts = jeandle::VMConstants::fromModule(*CB->getModule());
+      CallBase *Allocation = findTightlyCoupledArrayAllocation(*CB);
+      Facts.CanElideFreshCopyBarriers =
+          VMConsts.reduceBulkZeroing() &&
+          !VMConsts.freshArrayCopyRequiresGCBarriers() && Allocation &&
+          hasUnobservedAllocationInterval(*Allocation, *CB);
+    }
+    if (hasCompleteRawArrayCloneExtent(*CB, Facts, FAM)) {
+      Facts.ScalarizeRawArrayClone = canScalarizeRawArrayClone(*CB, Facts);
+      Facts.ReduceRawArrayCloneZeroing = canReduceRawArrayCloneZeroing(*CB);
+    }
     if (Facts.CloneInstanceInfo.has_value()) {
       const auto &[Status, Count, Fields] = *Facts.CloneInstanceInfo;
       if (Status == static_cast<int>(jeandle::CloneInstanceInfoStatus::Ready) &&
