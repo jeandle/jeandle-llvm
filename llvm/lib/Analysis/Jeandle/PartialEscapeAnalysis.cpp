@@ -70,6 +70,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Jeandle/CharacterIntrinsics.h"
 #include "llvm/IR/Jeandle/HashCodeIntrinsics.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
@@ -2053,6 +2054,15 @@ private:
   // takes the generic escape path.
   bool processJavaOp(CallBase *CB);
   bool foldStringIntrinsic(CallBase *CB);
+  bool foldCharacterIntrinsic(CallBase *CB);
+  bool stringArrayRange(jeandle::ObjectID ID, int64_t Start, int64_t Count,
+                        bool UTF16, bool CharArray);
+  Value *readStringElement(jeandle::ObjectID ID, int64_t Index, bool UTF16,
+                           bool CharArray = false);
+  bool foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
+                           jeandle::ObjectID Right, bool SrcUTF16, bool SrcChar,
+                           bool DstUTF16, bool DstChar,
+                           std::optional<unsigned> MaxChar, bool PrefixResult);
   bool foldStringGetChar(CallBase *CB);
   bool foldVectorizedHashCode(CallBase *CB);
   std::optional<jeandle::ObjectID> resolveStringArray(Value *V);
@@ -7796,6 +7806,40 @@ bool Analyzer::foldStringGetChar(CallBase *CB) {
   return true;
 }
 
+bool Analyzer::stringArrayRange(jeandle::ObjectID ID, int64_t Start,
+                                int64_t Count, bool UTF16, bool CharArray) {
+  using namespace jeandle;
+  const VirtualObject &VO = *Result.VirtualObjects[ID];
+  unsigned CellBits = CharArray ? 16 : 8;
+  unsigned Cells = UTF16 && !CharArray ? 2 : 1;
+  return VO.ArrayElementType && VO.ArrayElementType->isIntegerTy(CellBits) &&
+         VO.ArrayIndexScale == CellBits / 8 &&
+         VO.ArrayBaseOffset ==
+             VMConsts.arrayBaseOffsetFor(CharArray ? JBasicType::Char
+                                                   : JBasicType::Byte) &&
+         Start >= 0 && Count >= 0 && Start <= VO.ArrayLength / Cells &&
+         Count <= VO.ArrayLength / Cells - Start;
+}
+
+Value *Analyzer::readStringElement(jeandle::ObjectID ID, int64_t Index,
+                                   bool UTF16, bool CharArray) {
+  using namespace jeandle;
+  const VirtualObject &VO = *Result.VirtualObjects[ID];
+  int64_t Offset = VO.ArrayBaseOffset + Index * (UTF16 ? 2 : 1);
+  Value *Lo = readStringCell(ID, Offset, CharArray ? 16 : 8);
+  if (!Lo || !UTF16 || CharArray)
+    return Lo;
+  Value *Hi = readStringCell(ID, Offset + 1, 8);
+  auto *L = dyn_cast_or_null<ConstantInt>(Lo);
+  auto *H = dyn_cast_or_null<ConstantInt>(Hi);
+  if (!L || !H)
+    return nullptr;
+  unsigned V = DL.isLittleEndian()
+                   ? L->getZExtValue() | (H->getZExtValue() << 8)
+                   : (L->getZExtValue() << 8) | H->getZExtValue();
+  return ConstantInt::get(Type::getInt16Ty(F.getContext()), V);
+}
+
 bool Analyzer::foldStringIntrinsic(CallBase *CB) {
   using namespace jeandle;
   using namespace jeandle::pea;
@@ -7818,36 +7862,6 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
   if (!Left || !Right)
     return false;
 
-  auto Range = [&](ObjectID ID, int64_t Start, int64_t Count, bool UTF16,
-                   bool CharArray) {
-    const VirtualObject &VO = *Result.VirtualObjects[ID];
-    unsigned CellBits = CharArray ? 16 : 8;
-    unsigned Cells = UTF16 && !CharArray ? 2 : 1;
-    return VO.ArrayElementType && VO.ArrayElementType->isIntegerTy(CellBits) &&
-           VO.ArrayIndexScale == CellBits / 8 &&
-           VO.ArrayBaseOffset ==
-               VMConsts.arrayBaseOffsetFor(CharArray ? JBasicType::Char
-                                                     : JBasicType::Byte) &&
-           Start >= 0 && Count >= 0 && Start <= VO.ArrayLength / Cells &&
-           Count <= VO.ArrayLength / Cells - Start;
-  };
-  auto Read = [&](ObjectID ID, int64_t Index, bool UTF16,
-                  bool CharArray = false) -> Value * {
-    const VirtualObject &VO = *Result.VirtualObjects[ID];
-    int64_t Offset = VO.ArrayBaseOffset + Index * (UTF16 ? 2 : 1);
-    Value *Lo = readStringCell(ID, Offset, CharArray ? 16 : 8);
-    if (!Lo || !UTF16 || CharArray)
-      return Lo;
-    Value *Hi = readStringCell(ID, Offset + 1, 8);
-    auto *L = dyn_cast_or_null<ConstantInt>(Lo);
-    auto *H = dyn_cast_or_null<ConstantInt>(Hi);
-    if (!L || !H)
-      return nullptr;
-    unsigned V = DL.isLittleEndian()
-                     ? L->getZExtValue() | (H->getZExtValue() << 8)
-                     : (L->getZExtValue() << 8) | H->getZExtValue();
-    return ConstantInt::get(Type::getInt16Ty(F.getContext()), V);
-  };
   auto Difference = [](Value *L, Value *R) -> std::optional<int32_t> {
     if (!L || !R)
       return std::nullopt;
@@ -7878,7 +7892,8 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
       return false;
     int64_t LC = *N(Eq ? 2 : 1), RC = Eq ? LC : *N(3);
     bool LU = !Eq && Op->leftUTF16(), RU = !Eq && Op->rightUTF16();
-    if (!Range(*Left, 0, LC, LU, false) || !Range(*Right, 0, RC, RU, false))
+    if (!stringArrayRange(*Left, 0, LC, LU, false) ||
+        !stringArrayRange(*Right, 0, RC, RU, false))
       return false;
     int64_t Count = std::min(LC, RC);
     if (*Left == *Right && LU == RU)
@@ -7886,7 +7901,8 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
     if (Count > StringScalarLimit)
       return false;
     for (int64_t I = 0; I < Count; ++I) {
-      auto D = Difference(Read(*Left, I, LU), Read(*Right, I, RU));
+      auto D = Difference(readStringElement(*Left, I, LU),
+                          readStringElement(*Right, I, RU));
       if (!D)
         return false;
       if (*D)
@@ -7897,10 +7913,11 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
   if (Char) {
     if (!N(1) || !N(2) || !N(3) || *N(3) < *N(2) ||
         *N(3) - *N(2) > StringScalarLimit ||
-        !Range(*Left, *N(2), *N(3) - *N(2), Op->leftUTF16(), false))
+        !stringArrayRange(*Left, *N(2), *N(3) - *N(2), Op->leftUTF16(), false))
       return false;
     for (int64_t I = *N(2); I < *N(3); ++I) {
-      auto *C = dyn_cast_or_null<ConstantInt>(Read(*Left, I, Op->leftUTF16()));
+      auto *C = dyn_cast_or_null<ConstantInt>(
+          readStringElement(*Left, I, Op->leftUTF16()));
       if (!C)
         return false;
       if (C->getZExtValue() ==
@@ -7912,16 +7929,16 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
   if (Op->Kind == StringIntrinsicKind::IndexOf) {
     if (!N(1) || !N(3) || !N(4) || *N(3) <= 0 || *N(4) < 0 || *N(4) > *N(1) ||
         *N(1) > StringScalarLimit || *N(3) > StringScalarLimit ||
-        !Range(*Left, 0, *N(1), Op->leftUTF16(), false) ||
-        !Range(*Right, 0, *N(3), Op->rightUTF16(), false) ||
+        !stringArrayRange(*Left, 0, *N(1), Op->leftUTF16(), false) ||
+        !stringArrayRange(*Right, 0, *N(3), Op->rightUTF16(), false) ||
         std::max<int64_t>(0, *N(1) - *N(4) - *N(3) + 1) * *N(3) >
             StringSearchComparisonLimit)
       return false;
     for (int64_t I = *N(4); I <= *N(1) - *N(3); ++I) {
       bool Same = true;
       for (int64_t J = 0; J < *N(3); ++J) {
-        auto D = Difference(Read(*Left, I + J, Op->leftUTF16()),
-                            Read(*Right, J, Op->rightUTF16()));
+        auto D = Difference(readStringElement(*Left, I + J, Op->leftUTF16()),
+                            readStringElement(*Right, J, Op->rightUTF16()));
         if (!D)
           return false;
         if (*D) {
@@ -7937,11 +7954,39 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
 
   bool Inflate = Op->Kind == StringIntrinsicKind::Inflate;
   bool Compress = Op->Kind == StringIntrinsicKind::Compress;
-  bool SrcChar = !Inflate && !Op->Layout;
-  bool DstChar = !Compress && (Inflate ? !Op->Layout : Op->Layout);
+  return foldArrayConversion(
+      CB, *Left, *Right, !Inflate, !Inflate && !Op->Layout, !Compress,
+      !Compress && (Inflate ? !Op->Layout : Op->Layout),
+      Compress ? std::optional<unsigned>(255) : std::nullopt, false);
+}
+
+bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
+                                   jeandle::ObjectID Right, bool SrcUTF16,
+                                   bool SrcChar, bool DstUTF16, bool DstChar,
+                                   std::optional<unsigned> MaxChar,
+                                   bool PrefixResult) {
+  using namespace jeandle;
+  using namespace jeandle::pea;
+  auto N = [&](unsigned I) {
+    Value *V = CB->getArgOperand(I);
+    while (Value *Alias = Aliases.getScalarAlias(V))
+      V = Alias;
+    return stringConstantInt(V);
+  };
+  auto Finish = [&](int32_t V, ObjectID Owner) {
+    observeFieldDefinitions(Left, FieldDefinitions);
+    observeFieldDefinitions(Right, FieldDefinitions);
+    emitReplaceCall(CB,
+                    CB->getType()->isVoidTy()
+                        ? nullptr
+                        : ConstantInt::getSigned(CB->getType(), V),
+                    Owner);
+    return true;
+  };
   if (!N(1) || !N(3) || !N(4) || *N(4) > StringScalarLimit ||
-      !Range(*Left, *N(1), *N(4), !Inflate, SrcChar) ||
-      !Range(*Right, *N(3), *N(4), !Compress, DstChar) || *Left == *Right)
+      !stringArrayRange(Left, *N(1), *N(4), SrcUTF16, SrcChar) ||
+      !stringArrayRange(Right, *N(3), *N(4), DstUTF16, DstChar) ||
+      Left == Right)
     return false;
   struct Write {
     int64_t Offset;
@@ -7953,20 +7998,20 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
         {Offset, ConstantInt::get(Type::getIntNTy(F.getContext(), Bits), V)});
   };
   int32_t Return = *N(4);
-  const VirtualObject &Dst = *Result.VirtualObjects[*Right];
+  const VirtualObject &Dst = *Result.VirtualObjects[Right];
   for (int64_t I = 0; I < *N(4); ++I) {
     auto *C = dyn_cast_or_null<ConstantInt>(
-        Read(*Left, *N(1) + I, !Inflate, SrcChar));
+        readStringElement(Left, *N(1) + I, SrcUTF16, SrcChar));
     if (!C)
       return false;
     unsigned V = C->getZExtValue();
-    if (Compress && V > 255) {
-      Return = 0;
+    if (MaxChar && V > *MaxChar) {
+      Return = PrefixResult ? I : 0;
       break;
     }
-    int64_t Offset = Dst.ArrayBaseOffset + (*N(3) + I) * (Compress ? 1 : 2);
-    if (Compress || DstChar)
-      AddWrite(Offset, Compress ? 8 : 16, V);
+    int64_t Offset = Dst.ArrayBaseOffset + (*N(3) + I) * (DstUTF16 ? 2 : 1);
+    if (!DstUTF16 || DstChar)
+      AddWrite(Offset, DstUTF16 ? 16 : 8, V);
     else {
       AddWrite(Offset, 8, DL.isLittleEndian() ? V & 255 : V >> 8);
       AddWrite(Offset + 1, 8, DL.isLittleEndian() ? V >> 8 : V & 255);
@@ -7984,7 +8029,7 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
   };
   SmallVector<GroupWrite, 32> Groups;
   DenseMap<int64_t, unsigned> GroupIndices;
-  auto Fields = activeFields(Dst, FieldStates[*Right], DL);
+  auto Fields = activeFields(Dst, FieldStates[Right], DL);
   unsigned CellBits = Dst.ArrayIndexScale * 8;
   if (!CellBits || !hasPrimitiveArrayGroups(Dst))
     return false;
@@ -8006,7 +8051,7 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
         if (Field.Offset > Offset ||
             Field.Offset + Field.ByteSize < Offset + Dst.ArrayIndexScale)
           return false;
-        const FieldValue &FV = FieldStates[*Right].find(Field.Offset)->second;
+        const FieldValue &FV = FieldStates[Right].find(Field.Offset)->second;
         if (!FV.isScalar())
           return false;
         OldValue = FV.getScalar();
@@ -8044,8 +8089,8 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
     if (!G.Mask.isAllOnes() && isa_and_nonnull<UndefValue>(G.OldValue))
       return false;
 
-  observeFieldDefinitions(*Left, FieldDefinitions);
-  observeFieldDefinitions(*Right, FieldDefinitions);
+  observeFieldDefinitions(Left, FieldDefinitions);
+  observeFieldDefinitions(Right, FieldDefinitions);
   for (const GroupWrite &G : Groups) {
     Type *Ty = Type::getIntNTy(F.getContext(), G.Mask.getBitWidth());
     Value *V = ConstantInt::get(Ty, G.Bits);
@@ -8070,12 +8115,52 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
             BinaryOperator::CreateOr(Old, V, "string.write"), CB);
       }
     }
-    FieldStates[*Right][G.Offset] = FieldValue::scalar(V);
+    FieldStates[Right][G.Offset] = FieldValue::scalar(V);
     // Retaining the JavaOp also retains its reaching destination stores;
     // together they supply the updated group if virtualization is cancelled.
-    FieldDefinitions[*Right][G.Offset].clear();
+    FieldDefinitions[Right][G.Offset].clear();
   }
-  return Finish(Return, *Right);
+  return Finish(Return, Right);
+}
+
+bool Analyzer::foldCharacterIntrinsic(CallBase *CB) {
+  using namespace jeandle;
+  auto Op = decodeCharacterIntrinsic(*CB);
+  if (!Op || CB->hasOperandBundles())
+    return false;
+  auto Left = resolveStringArray(CB->getArgOperand(0));
+  if (!Left)
+    return false;
+  if (!Op->Scan) {
+    auto Right = resolveStringArray(CB->getArgOperand(2));
+    if (!Right)
+      return false;
+    return foldArrayConversion(CB, *Left, *Right, true, !Op->SourceBytes, false,
+                               false, Op->ASCII ? 127u : 255u, true);
+  }
+  auto N = [&](unsigned I) {
+    Value *V = CB->getArgOperand(I);
+    while (Value *Alias = Aliases.getScalarAlias(V))
+      V = Alias;
+    return stringConstantInt(V);
+  };
+  auto Offset = N(1);
+  auto Count = N(2);
+  if (!Offset || !Count || *Count > CharacterScalarLimit ||
+      !stringArrayRange(*Left, *Offset, *Count, false, false))
+    return false;
+  int32_t Prefix = 0;
+  for (; Prefix < *Count; ++Prefix) {
+    auto *C = dyn_cast_or_null<ConstantInt>(
+        readStringElement(*Left, *Offset + Prefix, false));
+    if (!C)
+      return false;
+    if (C->isNegative())
+      break;
+  }
+  observeFieldDefinitions(*Left, FieldDefinitions);
+  emitReplaceCall(CB, ConstantInt::get(CB->getType(), Prefix), *Left);
+  return true;
 }
 
 // Fold a bounded, in-range virtual array hash without materializing its
@@ -8473,6 +8558,8 @@ bool Analyzer::processJavaOp(CallBase *CB) {
     return foldStringGetChar(CB);
   if (jeandle::decodeStringIntrinsic(*CB))
     return foldStringIntrinsic(CB);
+  if (jeandle::decodeCharacterIntrinsic(*CB))
+    return foldCharacterIntrinsic(CB);
   if (jeandle::decodeVectorizedHashCode(*CB))
     return foldVectorizedHashCode(CB);
   using namespace jeandle::pea;

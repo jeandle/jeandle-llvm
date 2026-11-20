@@ -32,6 +32,15 @@
 
 namespace llvm {
 
+class LoopInfo;
+class BatchAAResults;
+
+/// Profitability query for bounded element expansion. Local allocations and
+/// oop-handle loads can expose scalar replacement or stable-content folding;
+/// this query itself proves neither identity nor stable contents.
+bool hasScalarArrayOpportunity(Value *Array, const LoopInfo &LI,
+                               BatchAAResults &AA);
+
 /// Prove non-nullness at a use without inferring it from JavaType, whose
 /// facts are conditional on the queried oop being non-null.
 bool isKnownNonNullAt(Value *Receiver, Instruction *Query, DominatorTree &DT,

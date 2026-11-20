@@ -269,6 +269,7 @@
 #include "llvm/Transforms/Instrumentation/TypeSanitizer.h"
 #include "llvm/Transforms/Jeandle/BitShuffleFolding.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
+#include "llvm/Transforms/Jeandle/CharacterIntrinsicSpecialization.h"
 #include "llvm/Transforms/Jeandle/ConstantFieldFolding.h"
 #include "llvm/Transforms/Jeandle/CopySignStoreLowering.h"
 #include "llvm/Transforms/Jeandle/CopySpecialization.h"
