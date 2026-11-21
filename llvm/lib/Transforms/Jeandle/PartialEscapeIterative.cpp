@@ -7,14 +7,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 // Outer fixpoint. Re-runs PartialEscapeAnalysis + PartialEscapeTransform,
-// running the standard canonicalization passes (ADCE + SimplifyCFG +
-// LoopSimplify + InstCombine) in every round, until the transform and
-// canonicalized IR both reach a bounded fixpoint.
-// Each MaterializeEffect reuses the allocation call at its original site and
-// emits field/lock replay along the paths that require a materialized value; it
-// never creates or relocates an allocation. PEA can delete fully non-escaping
-// allocations. A deopt-bundle rewrite may replace an allocation call in place,
-// without adding an allocation or changing its site.
+// running scalar and CFG canonicalization in every round, until the transform
+// and canonicalized IR both reach a bounded fixpoint. Each MaterializeEffect
+// reuses the allocation call at its original site and emits field/lock replay
+// along the paths that require a materialized value; it never creates or
+// relocates an allocation. PEA can delete fully non-escaping allocations. A
+// deopt-bundle rewrite may replace an allocation call in place, without adding
+// an allocation or changing its site.
 //
 // Convergence (see `run()`): a round is a fixpoint only when the PEA transform
 // is idle and the complete current canonicalization sequence leaves the exact
@@ -38,6 +37,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Jeandle/CheckOptimization.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeTransform.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
@@ -171,7 +171,8 @@ PreservedAnalyses PartialEscapeIterative::run(Function &F,
 
     // Canonicalization is part of every executed round, including the last
     // round allowed by the cap. Order: ADCE → SimplifyCFG → LoopSimplify →
-    // InstCombine. Compare the complete sequence's deterministic printed IR;
+    // InstCombine, followed by guard/CFG cleanup when scalar folding changes
+    // the IR. Compare the complete sequence's deterministic printed IR;
     // individual passes may conservatively invalidate analyses, and adjacent
     // passes may make offsetting structural changes.
     const std::string BeforeCanonicalization = printFunctionIR(F);
@@ -188,7 +189,18 @@ PreservedAnalyses PartialEscapeIterative::run(Function &F,
     AnyCanonMutated |= !runAndInvalidate(Dc).areAllPreserved();
     AnyCanonMutated |= !runAndInvalidate(Sc).areAllPreserved();
     AnyCanonMutated |= !runAndInvalidate(Ls).areAllPreserved();
-    AnyCanonMutated |= !runAndInvalidate(Ic).areAllPreserved();
+    bool NeedsCFGCleanup = !runAndInvalidate(Ic).areAllPreserved();
+    // Scalar replacement can fold a null check and expose a WC-only guard.
+    // Remove its dead failure state before the next PEA analysis.
+    CheckPreparation Checks;
+    NeedsCFGCleanup |= !runAndInvalidate(Checks).areAllPreserved();
+    // InstCombine also folds ordinary branch conditions. The next PEA round
+    // must not see statically unreachable edges or their dead frame states.
+    if (NeedsCFGCleanup) {
+      AnyCanonMutated = true;
+      runAndInvalidate(Sc);
+      runAndInvalidate(Ls);
+    }
     const bool CanonChanged =
         AnyCanonMutated && BeforeCanonicalization != printFunctionIR(F);
     AnyChanged |= CanonChanged;

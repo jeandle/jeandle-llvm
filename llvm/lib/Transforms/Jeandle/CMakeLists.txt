@@ -1,4 +1,7 @@
 add_llvm_component_library(LLVMJeandleTransforms
+  AffineCheckVersioning.cpp
+  ArrayLengthOptimization.cpp
+  CheckOptimization.cpp
   BitShuffleFolding.cpp
   CopySignStoreLowering.cpp
   CopySpecialization.cpp

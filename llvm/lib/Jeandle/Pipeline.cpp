@@ -13,8 +13,10 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Jeandle/ArrayLengthOptimization.h"
 #include "llvm/Transforms/Jeandle/BitShuffleFolding.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
+#include "llvm/Transforms/Jeandle/CheckOptimization.h"
 #include "llvm/Transforms/Jeandle/CopySignStoreLowering.h"
 #include "llvm/Transforms/Jeandle/CopySpecialization.h"
 #include "llvm/Transforms/Jeandle/ExpandNarrowOopCast.h"
@@ -41,6 +43,7 @@
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
+#include "llvm/Transforms/Scalar/CorrelatedValuePropagation.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Transforms/Scalar/IndVarSimplify.h"
@@ -206,6 +209,8 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
       createModuleToFunctionPassAdaptor(StringIntrinsicSpecialization()));
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   // ==== PEA segment ====
+  PM.addPass(createModuleToFunctionPassAdaptor(JavaOpLengthFolding()));
+  PM.addPass(createModuleToFunctionPassAdaptor(ArrayLengthOptimization()));
   // Everything below up to InsertGCBarriers exists to serve PEA: the
   // high-tier loop-optimization cluster that exposes virtualization
   // opportunities, the pre-PEA cleanup that PEA's correctness depends on,
@@ -234,6 +239,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     // estimates body cost; dead bounds-check blocks can otherwise hide a
     // profitable full unroll from the high-tier cluster.
     PrePEAHighTier.addPass(InstCombinePass());
+    PrePEAHighTier.addPass(CheckPreparation());
     PrePEAHighTier.addPass(SimplifyCFGPass());
     // Re-establish the canonical loop form; the inline driver may have
     // introduced loops that are not in simplified form.
@@ -268,6 +274,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
         SimpleLoopUnswitchPass(/*NonTrivial=*/true)));
     PrePEAHighTier.addPass(InstCombinePass());
     PrePEAHighTier.addPass(GVNPass());
+    PrePEAHighTier.addPass(CheckPreparation());
     PrePEAHighTier.addPass(SimplifyCFGPass());
     PM.addPass(createModuleToFunctionPassAdaptor(std::move(PrePEAHighTier)));
     // Pre-PEA cleanup. PEA's correctness depends on the CFG containing no
@@ -289,6 +296,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     PM.addPass(createModuleToFunctionPassAdaptor(ADCEPass()));
     PM.addPass(createModuleToFunctionPassAdaptor(SimplifyCFGPass()));
     PM.addPass(createModuleToFunctionPassAdaptor(LoopSimplifyPass()));
+    // Propagate branch facts into nullable selects and their deopt uses before
+    // PEA treats the conditional virtual identity as an observation.
+    PM.addPass(
+        createModuleToFunctionPassAdaptor(CorrelatedValuePropagationPass()));
     PM.addPass(createModuleToFunctionPassAdaptor(InstCombinePass()));
     // Outer fixpoint. PartialEscapeIterative wraps the
     // analyze+transform pair in a bounded loop with InstCombine/SimplifyCFG/
@@ -345,6 +356,9 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
 
   const bool StripMiningEnabled = isStripMiningEnabled();
+  PM.addPass(createModuleToFunctionPassAdaptor(JavaOpLengthFolding()));
+  PM.addPass(createModuleToFunctionPassAdaptor(ArrayLengthOptimization()));
+  PM.addPass(createModuleToFunctionPassAdaptor(CheckOptimization()));
   const bool DeferEmptyLoopDeletion = (Level == OptimizationLevel::O3);
 
   // The loop adaptor establishes LoopSimplify + LCSSA form before
