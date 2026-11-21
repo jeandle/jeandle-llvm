@@ -892,14 +892,30 @@ bool tryScalarizeCopy(CallBase &CI, const CopyFacts &Facts) {
         arrayElementAddress(B, Allocation, B.getInt64(0), Facts.SrcElem);
     // Insert directly before the pseudo call so call-form clones need no
     // CFG split and the original exception state survives until erasure.
-    Type *ElementType = copyStorageType(*M, Facts.SrcElem);
-    for (int Index = 0; Index < Count; ++Index) {
+    const unsigned ElementBytes = arrayElementSizeInBytes(*M, Facts.SrcElem);
+    const uint64_t Base = arrayBaseOffsetInBytes(*M, Facts.SrcElem);
+    const unsigned PayloadBytes = Count * ElementBytes;
+    // HotSpot heap objects are at least HeapWord-aligned. Choose aligned
+    // integer units without touching padding or splitting a Java element.
+    // Volatile unordered loads preserve control dependence and non-tearing
+    // accesses even when the source is concurrently modified.
+    for (unsigned Offset = 0; Offset < PayloadBytes;) {
+      unsigned Width = 8;
+      while (Width > ElementBytes &&
+             (Width > PayloadBytes - Offset || (Base + Offset) % Width))
+        Width /= 2;
+      Type *StorageType = B.getIntNTy(Width * 8);
       Value *SrcElement =
-          B.CreateInBoundsGEP(ElementType, Src, B.getInt64(Index));
+          B.CreateInBoundsGEP(B.getInt8Ty(), Src, B.getInt64(Offset));
       Value *DestElement =
-          B.CreateInBoundsGEP(ElementType, Dest, B.getInt64(Index));
-      Value *Element = load(B, SrcElement, Facts.SrcElem, "clone.array.load");
-      store(B, DestElement, Element, Facts.SrcElem);
+          B.CreateInBoundsGEP(B.getInt8Ty(), Dest, B.getInt64(Offset));
+      LoadInst *Element = B.CreateAlignedLoad(
+          StorageType, SrcElement, Align(Width), true, "clone.array.load");
+      Element->setAtomic(AtomicOrdering::Unordered);
+      StoreInst *Store =
+          B.CreateAlignedStore(Element, DestElement, Align(Width));
+      Store->setAtomic(AtomicOrdering::Unordered);
+      Offset += Width;
     }
     if (DeferInitialization)
       deferArrayInitialization(*Allocation);
@@ -1539,6 +1555,12 @@ bool tryReduceArrayCopyZeroing(CallBase &CI, Value *CopiedPrefix) {
       !Allocation->getArgOperand(2)->getType()->isIntegerTy(32))
     return false;
 
+  // A rounded prefix smaller than one HeapWord saves no clearing. Keep the
+  // ordinary initialized allocation in that case, including an empty source.
+  if (auto *Prefix = dyn_cast<ConstantInt>(CopiedPrefix))
+    if (Prefix->getZExtValue() < 8 / ElementSize)
+      return false;
+
   IRBuilder<> B(Allocation);
   Value *Moved = toI64(B, CopiedPrefix, "arraycopy.zero_tail.moved");
   Value *Start =
@@ -1557,10 +1579,8 @@ bool tryReduceArrayCopyZeroing(CallBase &CI, Value *CopiedPrefix) {
   // rounding down can clear one compressed-oop prefix slot, which the leaf
   // copy overwrites before any observation. The allocation size includes all
   // payload words and optional object-alignment padding.
-  Value *ZeroStart =
-      B.CreateSelect(Exact, Allocation->getArgOperand(2), FastStart,
-                     "arraycopy.zero_tail.clear_start");
-  Allocation->setArgOperand(3, ZeroStart);
+  Allocation->setArgOperand(3, FastStart);
+  Allocation->setArgOperand(5, Exact);
   Allocation->setArgOperand(6, B.getTrue());
   return true;
 }

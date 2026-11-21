@@ -38,8 +38,8 @@ exception:
 
 ; CHECK-LABEL: define ptr addrspace(1) @dynamic_tail(
 ; CHECK: [[EXACT:%.*]] = icmp eq i32 %moved, %length
-; CHECK: [[START:%.*]] = select i1 [[EXACT]], i32 %size, i32 {{%.*}}
-; CHECK: @jeandle.new_array(ptr null, i32 %length, i32 %size, i32 [[START]], i32 1000, i1 false, i1 true)
+; CHECK-NOT: select i1 [[EXACT]]
+; CHECK: @jeandle.new_array(ptr null, i32 %length, i32 %size, i32 %arraycopy.zero_tail.fast_start, i32 1000, i1 [[EXACT]], i1 true)
 ; CHECK-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; CHECK: call hotspotcc void @jeandle.membar_allocation_init
 define ptr addrspace(1) @dynamic_tail(ptr addrspace(1) %src, i32 %length, i32 %moved, i32 %size, ptr %prefix) #0 personality ptr @personality {
@@ -97,7 +97,7 @@ exception:
 }
 
 ; CHECK-LABEL: define ptr addrspace(1) @zero_prefix(
-; CHECK: @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 true)
+; CHECK: @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 false)
 ; CHECK-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; CHECK: call hotspotcc void @jeandle.membar_allocation_init
 define ptr addrspace(1) @zero_prefix(ptr addrspace(1) %src, i32 %length, i32 %moved, i32 %size, ptr %prefix) #0 personality ptr @personality {
@@ -105,6 +105,22 @@ entry:
   %dst = invoke ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 false) to label %copy unwind label %exception
 copy:
   invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dst, i64 0, i64 0, ptr null, ptr null, i64 0, i64 8) #2 [ "deopt"(i32 0) ] to label %done unwind label %exception
+done:
+  ret ptr addrspace(1) %dst
+exception:
+  %lp = landingpad i64 cleanup
+  resume i64 %lp
+}
+
+; CHECK-LABEL: define ptr addrspace(1) @one_prefix(
+; CHECK: @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 false)
+; CHECK-NOT: call hotspotcc void @jeandle.zero_heap_words
+; CHECK: call hotspotcc void @jeandle.membar_allocation_init
+define ptr addrspace(1) @one_prefix(ptr addrspace(1) %src, i32 %length, i32 %moved, i32 %size, ptr %prefix) #0 personality ptr @personality {
+entry:
+  %dst = invoke ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 48, i32 16, i32 1000, i1 false, i1 false) to label %copy unwind label %exception
+copy:
+  invoke void @jeandle.copy(ptr addrspace(1) %src, i64 0, ptr addrspace(1) %dst, i64 0, i64 1, ptr null, ptr null, i64 1, i64 8) #2 [ "deopt"(i32 0) ] to label %done unwind label %exception
 done:
   ret ptr addrspace(1) %dst
 exception:

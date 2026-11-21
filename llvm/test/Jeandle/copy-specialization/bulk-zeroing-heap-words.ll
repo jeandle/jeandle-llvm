@@ -35,8 +35,7 @@
 ; Very large arrays must take the runtime path, which ignores clear-start.
 ; Neither a full tail nor a short tail is cleared again after allocation.
 ; GOOD-LABEL: define ptr addrspace(1) @largest_zero_copy(
-; GOOD: [[START:%.*]] = select i1 false, i32 %fast_size, i32 24
-; GOOD: @jeandle.new_array({{.*}}i32 [[START]], i32 1000, i1 false, i1 true)
+; GOOD: @jeandle.new_array({{.*}}i32 24, i32 1000, i1 false, i1 false)
 ; GOOD-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; GOOD: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 ; KEEP-LABEL: define ptr addrspace(1) @largest_zero_copy(
@@ -45,10 +44,8 @@
 ; KEEP: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 
 ; GOOD-LABEL: define ptr addrspace(1) @largest_short_tail(
-; COMPRESSED: [[TAIL:%.*]] = select i1 false, i32 %fast_size, i32 16
-; COMPRESSED: @jeandle.new_array({{.*}}i32 [[TAIL]], i32 1000, i1 false, i1 true)
-; WIDE: [[TAIL:%.*]] = select i1 false, i32 %fast_size, i32 8
-; WIDE: @jeandle.new_array({{.*}}i32 [[TAIL]], i32 1000, i1 false, i1 true)
+; COMPRESSED: @jeandle.new_array({{.*}}i32 16, i32 1000, i1 false, i1 true)
+; WIDE: @jeandle.new_array({{.*}}i32 8, i32 1000, i1 false, i1 true)
 ; GOOD-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; GOOD: call void @StubRoutines_arrayof_oop_disjoint_arraycopy_uninit({{.*}}i64 2147483646)
 ; GOOD: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)

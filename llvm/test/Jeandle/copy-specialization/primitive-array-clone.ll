@@ -37,7 +37,7 @@ define ptr addrspace(1) @three_longs(ptr addrspace(1) "java-klass"="101" %src) #
 ; COMMON: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 ; COMMON-NEXT: ret ptr addrspace(1) %dst
 
-; A padded char array needs three i16 accesses, not two payload-long accesses.
+; Copy only the six payload bytes, leaving the last padding bytes untouched.
 define ptr addrspace(1) @three_chars(ptr addrspace(1) "java-klass"="102" %src) #0 {
   %dst = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 3, i32 24, i32 16, i32 1000, i1 false, i1 false)
   call void @jeandle.copy(ptr addrspace(1) %src, i64 16, ptr addrspace(1) %dst, i64 16, i64 1, ptr null, ptr null, i64 22, i64 22) #1
@@ -47,12 +47,10 @@ define ptr addrspace(1) @three_chars(ptr addrspace(1) "java-klass"="102" %src) #
 ; COMMON-LABEL: define ptr addrspace(1) @three_chars(
 ; REDUCE: @jeandle.new_array({{.*}}i1 true, i1 true)
 ; KEEP: @jeandle.new_array({{.*}}i1 false, i1 false)
-; COMMON: load atomic volatile i16, {{.*}} unordered
-; COMMON: store atomic i16 {{.*}} unordered
-; COMMON: load atomic volatile i16, {{.*}} unordered
-; COMMON: store atomic i16 {{.*}} unordered
-; COMMON: load atomic volatile i16, {{.*}} unordered
-; COMMON: store atomic i16 {{.*}} unordered
+; COMMON: load atomic volatile i32, {{.*}} unordered, align 4
+; COMMON: store atomic i32 {{.*}} unordered, align 4
+; COMMON: load atomic volatile i16, {{.*}} unordered, align 2
+; COMMON: store atomic i16 {{.*}} unordered, align 2
 ; COMMON-NOT: load atomic
 ; COMMON: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 
@@ -67,14 +65,10 @@ define ptr addrspace(1) @three_ints(ptr addrspace(1) "java-klass"="103" %src) #0
 ; KEEP: @jeandle.new_array({{.*}}i1 false, i1 false)
 ; COMMON: getelementptr i8, ptr addrspace(1) %src, i64 16
 ; COMMON: getelementptr i8, ptr addrspace(1) %dst, i64 16
-; COMMON: load atomic volatile i32, {{.*}} unordered
-; COMMON: store atomic i32 {{.*}} unordered
-; COMMON: getelementptr inbounds i32, {{.*}} i64 1
-; COMMON: load atomic volatile i32, {{.*}} unordered
-; COMMON: store atomic i32 {{.*}} unordered
-; COMMON: getelementptr inbounds i32, {{.*}} i64 2
-; COMMON: load atomic volatile i32, {{.*}} unordered
-; COMMON: store atomic i32 {{.*}} unordered
+; COMMON: load atomic volatile i64, {{.*}} unordered, align 8
+; COMMON: store atomic i64 {{.*}} unordered, align 8
+; COMMON: load atomic volatile i32, {{.*}} unordered, align 4
+; COMMON: store atomic i32 {{.*}} unordered, align 4
 ; COMMON-NOT: load atomic
 ; COMMON: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 
@@ -109,12 +103,10 @@ define ptr addrspace(1) @local_source_length() #0 {
 ; COMMON: %length = call i32 @jeandle.arraylength(ptr addrspace(1) %src)
 ; REDUCE: %dst = call {{.*}}@jeandle.new_array({{.*}}i1 true, i1 true)
 ; KEEP: %dst = call {{.*}}@jeandle.new_array({{.*}}i1 false, i1 false)
-; COMMON: load atomic volatile i32
-; COMMON: store atomic i32
-; COMMON: load atomic volatile i32
-; COMMON: store atomic i32
-; COMMON: load atomic volatile i32
-; COMMON: store atomic i32
+; COMMON: load atomic volatile i64, {{.*}} unordered, align 8
+; COMMON: store atomic i64 {{.*}} unordered, align 8
+; COMMON: load atomic volatile i32, {{.*}} unordered, align 4
+; COMMON: store atomic i32 {{.*}} unordered, align 4
 ; COMMON-NOT: load atomic
 ; COMMON: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 
@@ -135,12 +127,10 @@ define ptr addrspace(1) @local_source_dynamic_count() #0 {
 ; COMMON: %length = call i32 @jeandle.arraylength(ptr addrspace(1) %src)
 ; REDUCE: %dst = call {{.*}}@jeandle.new_array({{.*}}i1 true, i1 true)
 ; KEEP: %dst = call {{.*}}@jeandle.new_array({{.*}}i1 false, i1 false)
-; COMMON: load atomic volatile i32
-; COMMON: store atomic i32
-; COMMON: load atomic volatile i32
-; COMMON: store atomic i32
-; COMMON: load atomic volatile i32
-; COMMON: store atomic i32
+; COMMON: load atomic volatile i64, {{.*}} unordered, align 8
+; COMMON: store atomic i64 {{.*}} unordered, align 8
+; COMMON: load atomic volatile i32, {{.*}} unordered, align 4
+; COMMON: store atomic i32 {{.*}} unordered, align 4
 ; COMMON-NOT: load atomic
 ; COMMON: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 
@@ -255,6 +245,19 @@ define ptr addrspace(1) @klass_in_payload(ptr addrspace(1) "java-klass"="103" %s
 ; COMMON: @jeandle.new_array({{.*}}i1 false, i1 false)
 ; COMMON-NOT: load atomic
 ; COMMON: call hotspotcc void @jeandle.clone_payload({{.*}}i64 3, i1 false)
+
+define ptr addrspace(1) @eight_bytes(ptr addrspace(1) "java-klass"="104" %src) #0 {
+  %dst = call ptr addrspace(1) @jeandle.new_array(ptr null, i32 8, i32 24, i32 16, i32 1000, i1 false, i1 false)
+  call void @jeandle.copy(ptr addrspace(1) %src, i64 16, ptr addrspace(1) %dst, i64 16, i64 1, ptr null, ptr null, i64 24, i64 24) #1
+  ret ptr addrspace(1) %dst
+}
+; COMMON-LABEL: define ptr addrspace(1) @eight_bytes(
+; COMMON: load atomic volatile i64, {{.*}} unordered, align 8
+; COMMON: store atomic i64 {{.*}} unordered, align 8
+; COMMON-NOT: load atomic
+; COMMON-NOT: @jeandle.clone_payload
+; COMMON: call hotspotcc void @jeandle.membar_allocation_init
+
 
 attributes #0 = { "java-method"="0" }
 attributes #1 = { "jeandle.copy.kind"="clone-array" "jeandle.copy.tightly-coupled-allocation" }

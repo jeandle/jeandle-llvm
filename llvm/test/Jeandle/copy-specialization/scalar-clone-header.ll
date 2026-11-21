@@ -23,12 +23,11 @@ define ptr addrspace(1) @same_length() #0 {
 }
 ; CHECK-LABEL: define ptr addrspace(1) @same_length(
 ; CHECK: getelementptr i8, ptr addrspace(1) %src, i64 24
-; CHECK: load atomic volatile i32
-; CHECK: store atomic i32
-; CHECK: load atomic volatile i32
-; CHECK: store atomic i32
-; CHECK: load atomic volatile i32
-; CHECK: store atomic i32
+; CHECK: load atomic volatile i64, {{.*}} unordered, align 8
+; CHECK: store atomic i64 {{.*}} unordered, align 8
+; CHECK: load atomic volatile i32, {{.*}} unordered, align 4
+; CHECK: store atomic i32 {{.*}} unordered, align 4
+; CHECK-NOT: load atomic
 ; CHECK-NOT: @jeandle.clone_payload
 ; CHECK: ret ptr addrspace(1) %dst
 

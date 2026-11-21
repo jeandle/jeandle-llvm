@@ -70,8 +70,9 @@ exception:
 }
 
 ; COMMON-LABEL: define ptr addrspace(1) @dynamic_tail(
-; REDUCE: [[START:%.*]] = select i1 {{%.*}}, i32 %size, i32 {{%.*}}
-; REDUCE: @jeandle.new_array({{.*}}i32 [[START]], i32 1000, i1 false, i1 true)
+; REDUCE: [[EXACT:%.*]] = icmp eq i32 %moved, %length
+; REDUCE-NOT: select i1
+; REDUCE: @jeandle.new_array({{.*}}i32 %arraycopy.zero_tail.fast_start, i32 1000, i1 [[EXACT]], i1 true)
 ; KEEP: @jeandle.new_array({{.*}}i1 false, i1 false)
 ; COMMON-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; COMMON: arraycopy.result:
@@ -83,8 +84,8 @@ exception:
 
 ; The allocation clears its own tail only on the non-ZeroTLAB fast path.
 ; OPT-LABEL: define ptr addrspace(1) @dynamic_tail(
-; OPT: select i1 {{%.*}}, i32 %size, i32 {{%.*}}
-; OPT: @jeandle.new_array({{.*}}i1 false, i1 true)
+; OPT: [[EXACT:%.*]] = icmp eq i32 %moved, %length
+; OPT: @jeandle.new_array({{.*}}i1 [[EXACT]], i1 true)
 ; OPT-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; OPT: call hotspotcc void @jeandle.membar_allocation_init(ptr addrspace(1) %dst)
 ; OPT: ret ptr addrspace(1) %dst
@@ -104,7 +105,7 @@ exception:
 }
 
 ; COMMON-LABEL: define ptr addrspace(1) @zero_copy(
-; REDUCE: @jeandle.new_array({{.*}}i32 16, i32 1000, i1 false, i1 true)
+; REDUCE: @jeandle.new_array({{.*}}i32 16, i32 1000, i1 false, i1 false)
 ; KEEP: @jeandle.new_array({{.*}}i1 false, i1 false)
 ; REDUCE-NOT: call hotspotcc void @jeandle.zero_heap_words
 ; KEEP-NOT: @llvm.memset
