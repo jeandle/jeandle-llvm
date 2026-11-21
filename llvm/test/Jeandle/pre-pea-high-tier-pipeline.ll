@@ -8,7 +8,7 @@
 ; target-specific passes can be inserted between the semantic stages.
 ; PEA-ON: {{.*jeandle-inline-driver,}}
 ; PEA-ON: function(safepoint-poll-normalization,simplifycfg
-; PEA-ON: function(java-op-length-folding,string-intrinsic-specialization,instcombine
+; PEA-ON: function(java-op-length-folding,string-intrinsic-specialization,character-intrinsic-specialization,instcombine
 ; PEA-ON: simplifycfg
 ; PEA-ON: loop-simplify,break-crit-edges,
 ; PEA-ON: {{.*loop\(loop-rotate.*indvars,loop-deletion\),}}

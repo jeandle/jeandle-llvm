@@ -3,6 +3,7 @@ add_llvm_component_library(LLVMJeandleTransforms
   CopySignStoreLowering.cpp
   CopySpecialization.cpp
   StringIntrinsicSpecialization.cpp
+  CharacterIntrinsicSpecialization.cpp
   CHADevirtualization.cpp
   ConstantFieldFolding.cpp
   ExpandNarrowOopCast.cpp

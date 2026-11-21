@@ -9,9 +9,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
 #include "llvm/Analysis/LazyValueInfo.h"
+#include "llvm/Analysis/Loads.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/SimplifyQuery.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -28,6 +32,46 @@
 #include <string>
 
 namespace llvm {
+
+// This is a profitability query, not an identity or stable-content proof.
+// The existing PEA and VM callback consumers still authorize those folds.
+bool hasScalarArrayOpportunity(Value *Array, const LoopInfo &LI,
+                               BatchAAResults &AA) {
+  SmallVector<const Value *, 8> Pending{Array};
+  SmallPtrSet<const Value *, 8> Visited;
+  while (!Pending.empty()) {
+    const Value *V = Pending.pop_back_val();
+    if (!Visited.insert(V).second)
+      continue;
+    SmallVector<const Value *, 4> Objects;
+    getUnderlyingObjects(V, Objects, &LI);
+    for (const Value *Object : Objects) {
+      if (auto *CB = dyn_cast<CallBase>(Object)) {
+        if (jeandle::pea::isJeandleAllocation(CB))
+          return true;
+      }
+      if (auto *Load = dyn_cast<LoadInst>(Object)) {
+        auto *MutableLoad = const_cast<LoadInst *>(Load);
+        if (getOopHandleLoadId(MutableLoad))
+          return true;
+        if (jeandle::isJavaOopType(Load->getType())) {
+          if (Value *Available =
+                  FindAvailableLoadedValue(MutableLoad, AA, nullptr)) {
+            Pending.push_back(Available);
+          } else {
+            // PEA may resolve an array-valued field of a local holder to a
+            // symbolic array. Preserve that related opportunity, without
+            // using the holder as proof of the loaded array's identity.
+            Pending.push_back(Load->getPointerOperand());
+          }
+        }
+      }
+      if (auto *Freeze = dyn_cast<FreezeInst>(Object))
+        Pending.push_back(Freeze->getOperand(0));
+    }
+  }
+  return false;
+}
 
 bool isKnownNonNullAt(Value *Receiver, Instruction *Query, DominatorTree &DT,
                       const DataLayout &DL, LazyValueInfo &LVI) {
