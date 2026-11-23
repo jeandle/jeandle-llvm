@@ -12,6 +12,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/GuardUtils.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
@@ -52,6 +53,48 @@ static void addCleanup(FunctionPassManager &PM) {
   PM.addPass(InstCombinePass());
   PM.addPass(ConstraintEliminationPass());
   PM.addPass(SimplifyCFGPass());
+}
+
+static bool hasLoopCheck(Function &F, LoopInfo &LI) {
+  SmallPtrSet<Loop *, 8> HasExit, HasMultipleExits;
+  for (BasicBlock &BB : F) {
+    Loop *L = LI.getLoopFor(&BB);
+    auto *BI = dyn_cast<BranchInst>(BB.getTerminator());
+    if (L && BI && BI->isConditional() &&
+        L->contains(BI->getSuccessor(0)) != L->contains(BI->getSuccessor(1)) &&
+        !HasExit.insert(L).second)
+      HasMultipleExits.insert(L);
+  }
+  // A lone exiting comparison controls the loop; it is not an additional
+  // range check. Leave such loops to the normal loop pipeline.
+  for (BasicBlock &BB : F) {
+    Loop *L = LI.getLoopFor(&BB);
+    auto *BI = dyn_cast<BranchInst>(BB.getTerminator());
+    if (!HasMultipleExits.contains(L) || &BB == L->getLoopLatch() || !BI ||
+        !BI->isConditional() ||
+        L->contains(BI->getSuccessor(0)) == L->contains(BI->getSuccessor(1)))
+      continue;
+    SmallVector<Value *, 8> Worklist{BI->getCondition()};
+    SmallPtrSet<Value *, 32> Seen;
+    while (!Worklist.empty()) {
+      Value *V = Worklist.pop_back_val();
+      if (!Seen.insert(V).second)
+        continue;
+      // An exhausted discovery budget is a candidate, not proof that the
+      // expression contains no check. The transforms have their own budgets.
+      if (Seen.size() > 32)
+        return true;
+      if (auto *Cmp = dyn_cast<ICmpInst>(V)) {
+        if (Cmp->getOperand(0)->getType()->isIntegerTy())
+          return true;
+      } else if (auto *I = dyn_cast<Instruction>(V)) {
+        if (I->getType()->isIntegerTy(1) &&
+            (isa<BinaryOperator, SelectInst, PHINode>(I)))
+          append_range(Worklist, I->operands());
+      }
+    }
+  }
+  return false;
 }
 
 // The object pool represents direct virtual identities, but cannot select a
@@ -133,18 +176,28 @@ PreservedAnalyses CheckOptimization::run(Function &F,
     return PreservedAnalyses::all();
   unsigned Guards = 0;
   bool HasCheck = false;
+  bool HasArrayLength = false;
+  bool HasIntegerCompare = false;
   for (BasicBlock &BB : F) {
     HasCheck |= BB.getTerminatingDeoptimizeCall() != nullptr;
     for (Instruction &I : BB) {
+      if (auto *Cmp = dyn_cast<ICmpInst>(&I))
+        HasIntegerCompare |= Cmp->getOperand(0)->getType()->isIntegerTy();
       if (auto *II = dyn_cast<IntrinsicInst>(&I))
         Guards +=
             II->getIntrinsicID() == Intrinsic::experimental_widenable_condition;
       if (auto *CB = dyn_cast<CallBase>(&I))
         if (Function *Callee = CB->getCalledFunction())
-          HasCheck |= Callee->getName() == "jeandle.arraylength";
+          HasArrayLength |= Callee->getName() == "jeandle.arraylength";
     }
   }
-  if (!HasCheck && !Guards)
+  if (!HasCheck && !HasArrayLength && !Guards &&
+      (!OptimizeChecks || !HasIntegerCompare))
+    return PreservedAnalyses::all();
+  auto &LI = FAM.getResult<LoopAnalysis>(F);
+  bool HasLoops = !LI.empty();
+  if (!HasCheck && !HasArrayLength && !Guards &&
+      (!OptimizeChecks || !HasLoops || !hasLoopCheck(F, LI)))
     return PreservedAnalyses::all();
 
   FunctionPassManager PM;
@@ -161,43 +214,58 @@ PreservedAnalyses CheckOptimization::run(Function &F,
                 "exceeded";
     });
   }
-  if (OptimizeChecks && WithinBudget) {
-    LoopPassManager Prepare;
-    LICMOptions ConservativeLICM;
-    ConservativeLICM.AllowSpeculation = false;
-    Prepare.addPass(LICMPass(ConservativeLICM));
-    Prepare.addPass(LoopRotatePass(true, false));
-    Prepare.addPass(IndVarSimplifyPass());
-    Prepare.addPass(SimpleLoopUnswitchPass(true));
-    PM.addPass(createFunctionToLoopPassAdaptor(std::move(Prepare), true));
-    PM.addPass(ArrayLengthOptimization());
+  if (OptimizeChecks && WithinBudget &&
+      (HasLoops || HasArrayLength || Guards)) {
+    if (HasLoops) {
+      LoopPassManager Prepare;
+      LICMOptions ConservativeLICM;
+      ConservativeLICM.AllowSpeculation = false;
+      Prepare.addPass(LICMPass(ConservativeLICM));
+      Prepare.addPass(LoopRotatePass(true, false));
+      Prepare.addPass(IndVarSimplifyPass());
+      Prepare.addPass(SimpleLoopUnswitchPass(true));
+      PM.addPass(createFunctionToLoopPassAdaptor(std::move(Prepare), true));
+    }
+    if (HasArrayLength)
+      PM.addPass(ArrayLengthOptimization());
     addCleanup(PM);
-    PM.addPass(GuardWideningPass());
-    LoopPassManager Predication;
-    Predication.addPass(LoopPredicationPass());
-    Predication.addPass(LICMPass(LICMOptions()));
-    Predication.addPass(SimpleLoopUnswitchPass(true));
-    PM.addPass(createFunctionToLoopPassAdaptor(std::move(Predication), true));
-    PM.addPass(GuardWideningPass());
+    if (Guards)
+      PM.addPass(GuardWideningPass());
+    if (HasLoops) {
+      LoopPassManager Predication;
+      if (Guards)
+        Predication.addPass(LoopPredicationPass());
+      Predication.addPass(LICMPass(LICMOptions()));
+      Predication.addPass(SimpleLoopUnswitchPass(true));
+      PM.addPass(createFunctionToLoopPassAdaptor(std::move(Predication), true));
+    }
+    if (Guards)
+      PM.addPass(GuardWideningPass());
   }
   // Widenable conditions are temporary optimization permissions, never part
   // of the final loop checks or implicit-null-check recognition.
-  PM.addPass(LowerWidenableConditionPass());
-  addCleanup(PM);
-  if (OptimizeChecks && F.getInstructionCount() <= 10000) {
+  if (Guards) {
+    PM.addPass(LowerWidenableConditionPass());
+    addCleanup(PM);
+  }
+  if (OptimizeChecks && HasLoops && F.getInstructionCount() <= 10000) {
     // Lowering and unswitching expose non-null loop entries that were still
     // guarded when array lengths were prepared above.
-    PM.addPass(ArrayLengthOptimization());
+    if (HasArrayLength)
+      PM.addPass(ArrayLengthOptimization());
     PM.addPass(IRCEPass());
     addCleanup(PM);
     PM.addPass(LoopSimplifyPass());
     PM.addPass(LCSSAPass());
-    PM.addPass(ArrayLengthOptimization());
+    if (HasArrayLength)
+      PM.addPass(ArrayLengthOptimization());
     PM.addPass(AffineCheckVersioning());
     addCleanup(PM);
   }
-  PM.addPass(LoopSimplifyPass());
-  PM.addPass(LCSSAPass());
+  if (HasLoops) {
+    PM.addPass(LoopSimplifyPass());
+    PM.addPass(LCSSAPass());
+  }
   // A nested pass manager invalidates each child's analyses immediately.
   PreservedAnalyses PA = PM.run(F, FAM);
 

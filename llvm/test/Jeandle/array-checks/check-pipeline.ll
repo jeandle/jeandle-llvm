@@ -1,4 +1,8 @@
 ; RUN: opt -passes='jeandle-check-optimization' -verify-each -S %s | FileCheck %s
+; RUN: opt -passes='jeandle-check-optimization' -debug-pass-manager -disable-output %s 2>&1 | FileCheck %s --check-prefix=ACYCLIC
+; ACYCLIC-NOT: Running pass: LoopSimplifyPass
+; ACYCLIC-NOT: Running pass: LCSSAPass
+; ACYCLIC: Running pass: {{.*}}VerifierPass
 
 declare i1 @llvm.experimental.widenable.condition()
 declare i32 @llvm.experimental.deoptimize.i32(...)

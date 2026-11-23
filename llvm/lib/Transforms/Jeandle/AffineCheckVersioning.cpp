@@ -17,6 +17,7 @@
 #include "llvm/Analysis/SimplifyQuery.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/ConstantRange.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Jeandle/JavaType.h"
@@ -75,6 +76,121 @@ struct VersionPlan {
   SmallVector<CheckCondition, 4> Conditions;
   SmallVector<ExitIncoming, 8> Exits;
 };
+
+struct ExpandedRange {
+  const RangeCheck *Check;
+  Value *First;
+  Value *Step;
+};
+
+bool isInclusive(ICmpInst::Predicate Pred) {
+  return Pred == ICmpInst::ICMP_SLE || Pred == ICmpInst::ICMP_SGE ||
+         Pred == ICmpInst::ICMP_ULE || Pred == ICmpInst::ICMP_UGE;
+}
+
+// All inputs have at most 64 bits. A trip count has at most 65 bits, and
+// (trips - 1) * index step + first fits in a signed 128-bit mathematical
+// domain. Use independent preheader facts to select a cheaper exact domain;
+// ranges inferred from the checked loop must not justify its entry guard.
+struct MathRange {
+  APInt Min;
+  APInt Max;
+
+  static MathRange get(Value *V, bool Signed, const SimplifyQuery &Q) {
+    ConstantRange R = computeConstantRangeIncludingKnownBits(V, Signed, Q);
+    if (!Signed)
+      return {R.getUnsignedMin().zext(128), R.getUnsignedMax().zext(128)};
+    // KnownBits cannot express correlations between unknown sign bits, such
+    // as the upper bits of a sign extension. Include sign-bit replication.
+    unsigned Significant =
+        ComputeMaxSignificantBits(V, Q.DL, Q.AC, Q.CxtI, Q.DT);
+    return {APIntOps::smax(R.getSignedMin().sext(128),
+                           APInt::getSignedMinValue(Significant).sext(128)),
+            APIntOps::smin(R.getSignedMax().sext(128),
+                           APInt::getSignedMaxValue(Significant).sext(128))};
+  }
+
+  MathRange operator+(const MathRange &Other) const {
+    return {Min + Other.Min, Max + Other.Max};
+  }
+
+  MathRange operator*(const MathRange &Other) const {
+    APInt Products[] = {Min * Other.Min, Min * Other.Max, Max * Other.Min,
+                        Max * Other.Max};
+    auto Less = [](const APInt &A, const APInt &B) { return A.slt(B); };
+    return {*llvm::min_element(Products, Less),
+            *llvm::max_element(Products, Less)};
+  }
+};
+
+unsigned getGuardWidth(const VersionPlan &Plan, ArrayRef<ExpandedRange> Ranges,
+                       const SimplifyQuery &Q, bool &CheckMin, bool &CheckMax) {
+  unsigned Bits = Plan.Step.getBitWidth();
+  auto Include = [&](const APInt &V) {
+    Bits = std::max(Bits, V.getSignificantBits());
+  };
+  auto IncludeRange = [&](const MathRange &R) {
+    Include(R.Min);
+    Include(R.Max);
+  };
+  bool Signed = !ICmpInst::isUnsigned(Plan.Predicate);
+  MathRange Init = MathRange::get(Plan.Init, Signed, Q);
+  MathRange Limit = MathRange::get(Plan.Limit, Signed, Q);
+  IncludeRange(Init);
+  IncludeRange(Limit);
+  APInt Step = Plan.Step.sext(128);
+  bool Increasing = !Step.isNegative();
+  APInt AbsStep = Increasing ? Step : -Step;
+  Include(Step);
+  Include(AbsStep);
+  MathRange Distance =
+      Increasing ? MathRange{Limit.Min - Init.Max, Limit.Max - Init.Min}
+                 : MathRange{Init.Min - Limit.Max, Init.Max - Limit.Min};
+  IncludeRange(Distance);
+  APInt Zero(128, 0), One(128, 1);
+  APInt NumeratorMax = APIntOps::smax(Distance.Max, Zero);
+  if (Plan.Predicate != ICmpInst::ICMP_NE && !isInclusive(Plan.Predicate))
+    NumeratorMax += AbsStep - One;
+  Include(NumeratorMax);
+  APInt TripsMax = NumeratorMax.udiv(AbsStep);
+  if (isInclusive(Plan.Predicate))
+    ++TripsMax;
+  bool IsNE = Plan.Predicate == ICmpInst::ICMP_NE;
+  if (!IsNE)
+    TripsMax = APIntOps::umax(TripsMax, One);
+  Include(TripsMax);
+  // Even a false guard is evaluated eagerly. Include the zero-trip NE case,
+  // whose last-iteration value is -1, in the arithmetic proof.
+  MathRange Trips{IsNE ? Zero : One, TripsMax};
+  MathRange Advance = Trips * MathRange{Step, Step};
+  MathRange Next = Init + Advance;
+  IncludeRange(Advance);
+  IncludeRange(Next);
+  unsigned IVBits = Plan.Step.getBitWidth();
+  APInt Min = Signed ? APInt::getSignedMinValue(IVBits).sext(128) : Zero;
+  APInt Max = Signed ? APInt::getSignedMaxValue(IVBits).sext(128)
+                     : APInt::getMaxValue(IVBits).zext(128);
+  CheckMin = Next.Min.slt(Min);
+  CheckMax = Next.Max.sgt(Max);
+  if (CheckMin)
+    Include(Min);
+  if (CheckMax)
+    Include(Max);
+  MathRange LastIteration{Trips.Min - One, Trips.Max - One};
+  IncludeRange(LastIteration);
+  for (const ExpandedRange &R : Ranges) {
+    for (Value *V : {R.First, R.Step, R.Check->Length})
+      Bits = std::max(Bits, V->getType()->getIntegerBitWidth());
+    MathRange First = MathRange::get(R.First, true, Q);
+    MathRange IndexStep = MathRange::get(R.Step, true, Q);
+    MathRange Product = LastIteration * IndexStep;
+    IncludeRange(First);
+    IncludeRange(IndexStep);
+    IncludeRange(Product);
+    IncludeRange(First + Product);
+  }
+  return Bits <= 32 ? 32 : Bits <= 64 ? 64 : 128;
+}
 
 // Expansion must not turn a conditional or undefined input into an eager
 // guard operand. Restrict the start to bounded, pure modular arithmetic on
@@ -331,15 +447,32 @@ std::optional<VersionPlan> planVersion(Loop *L, ScalarEvolution &SE,
 }
 
 void applyVersion(VersionPlan &Plan, ScalarEvolution &SE, DominatorTree &DT,
-                  LoopInfo &LI) {
+                  LoopInfo &LI, AssumptionCache &AC) {
   Loop *L = Plan.L;
   BasicBlock *CheckBB = L->getLoopPreheader();
   CheckBB->setName(L->getHeader()->getName() + ".affine.check");
   Instruction *At = CheckBB->getTerminator();
-  unsigned Bits = Plan.Step.getBitWidth();
-  for (const RangeCheck &Check : Plan.Checks)
-    Bits = std::max(Bits, Check.Step->getType()->getIntegerBitWidth());
-  IntegerType *Wide = IntegerType::get(At->getContext(), Bits * 2);
+  SCEVExpander Expander(SE, "affine.start");
+  SmallVector<ExpandedRange, 4> Ranges;
+  for (const RangeCheck &Check : Plan.Checks) {
+    if (any_of(Ranges, [&](const ExpandedRange &R) {
+          return R.Check->Start == Check.Start && R.Check->Step == Check.Step &&
+                 R.Check->Length == Check.Length;
+        }))
+      continue;
+    Value *First =
+        Expander.expandCodeFor(Check.Start, Check.Start->getType(), At);
+    Value *Step = Expander.expandCodeFor(Check.Step, Check.Step->getType(), At);
+    Ranges.push_back({&Check, First, Step});
+  }
+  // Expansion uses modular starts. Remove inferred poison flags before range
+  // queries so a successful loop check cannot prove its own entry predicate.
+  for (Instruction *I : Expander.getAllInsertedInstructions())
+    I->dropPoisonGeneratingFlags();
+  SimplifyQuery Q(At->getModule()->getDataLayout(), &DT, &AC, At);
+  bool CheckMin, CheckMax;
+  unsigned Bits = getGuardWidth(Plan, Ranges, Q, CheckMin, CheckMax);
+  IntegerType *Wide = IntegerType::get(At->getContext(), Bits);
   IRBuilder<> B(At);
   bool Signed = !ICmpInst::isUnsigned(Plan.Predicate);
   bool Increasing = !Plan.Step.isNegative();
@@ -347,7 +480,7 @@ void applyVersion(VersionPlan &Plan, ScalarEvolution &SE, DominatorTree &DT,
   Value *Limit = B.CreateIntCast(Plan.Limit, Wide, Signed, "affine.limit");
   Value *Distance =
       Increasing ? B.CreateSub(Limit, Init) : B.CreateSub(Init, Limit);
-  APInt Step = Plan.Step.sext(Wide->getBitWidth());
+  APInt Step = Plan.Step.sextOrTrunc(Bits);
   APInt AbsStep = Increasing ? Step : -Step;
   Value *Stride = ConstantInt::get(Wide, AbsStep);
   Value *Nonnegative = B.CreateSelect(
@@ -361,10 +494,7 @@ void applyVersion(VersionPlan &Plan, ScalarEvolution &SE, DominatorTree &DT,
                                        ConstantInt::get(Wide, 0)));
     Trips = B.CreateUDiv(Nonnegative, Stride);
   } else {
-    bool Inclusive = Plan.Predicate == ICmpInst::ICMP_SLE ||
-                     Plan.Predicate == ICmpInst::ICMP_SGE ||
-                     Plan.Predicate == ICmpInst::ICMP_ULE ||
-                     Plan.Predicate == ICmpInst::ICMP_UGE;
+    bool Inclusive = isInclusive(Plan.Predicate);
     Value *Numerator =
         Inclusive
             ? Nonnegative
@@ -377,44 +507,39 @@ void applyVersion(VersionPlan &Plan, ScalarEvolution &SE, DominatorTree &DT,
     Trips = B.CreateSelect(B.CreateICmpEQ(Trips, ConstantInt::get(Wide, 0)),
                            ConstantInt::get(Wide, 1), Trips);
   }
-  Value *Next = B.CreateAdd(
-      Init, B.CreateMul(Trips, ConstantInt::get(Wide, Step)), "affine.next");
-  unsigned IVBits = Plan.Step.getBitWidth();
-  APInt Min = Signed
-                  ? APInt::getSignedMinValue(IVBits).sext(Wide->getBitWidth())
-                  : APInt(Wide->getBitWidth(), 0);
-  APInt Max = Signed
-                  ? APInt::getSignedMaxValue(IVBits).sext(Wide->getBitWidth())
-                  : APInt::getMaxValue(IVBits).zext(Wide->getBitWidth());
-  Guard = B.CreateAnd(
-      Guard,
-      B.CreateAnd(B.CreateICmpSGE(Next, ConstantInt::get(Wide, Min)),
-                  B.CreateICmpSLE(Next, ConstantInt::get(Wide, Max))),
-      "affine.no_wrap");
+  if (CheckMin || CheckMax) {
+    Value *Next = B.CreateAdd(
+        Init, B.CreateMul(Trips, ConstantInt::get(Wide, Step)), "affine.next");
+    unsigned IVBits = Plan.Step.getBitWidth();
+    if (CheckMin) {
+      APInt Min = Signed ? APInt::getSignedMinValue(IVBits).sextOrTrunc(Bits)
+                         : APInt(Bits, 0);
+      Guard =
+          B.CreateAnd(Guard, B.CreateICmpSGE(Next, ConstantInt::get(Wide, Min)),
+                      "affine.no_wrap");
+    }
+    if (CheckMax) {
+      APInt Max = Signed ? APInt::getSignedMaxValue(IVBits).sextOrTrunc(Bits)
+                         : APInt::getMaxValue(IVBits).zextOrTrunc(Bits);
+      Guard =
+          B.CreateAnd(Guard, B.CreateICmpSLE(Next, ConstantInt::get(Wide, Max)),
+                      "affine.no_wrap");
+    }
+  }
   Value *LastIteration = B.CreateSub(Trips, ConstantInt::get(Wide, 1));
-  SCEVExpander Expander(SE, "affine.start");
-  for (const RangeCheck &Check : Plan.Checks) {
-    Value *First =
-        Expander.expandCodeFor(Check.Start, Check.Start->getType(), At);
-    First = B.CreateSExt(First, Wide, "affine.first");
-    Value *IndexStep =
-        Expander.expandCodeFor(Check.Step, Check.Step->getType(), At);
-    IndexStep = B.CreateSExt(IndexStep, Wide, "affine.step");
+  for (const ExpandedRange &R : Ranges) {
+    Value *First = B.CreateIntCast(R.First, Wide, true, "affine.first");
+    Value *IndexStep = B.CreateIntCast(R.Step, Wide, true, "affine.step");
     Value *Last = B.CreateAdd(First, B.CreateMul(LastIteration, IndexStep),
                               "affine.last");
-    Value *Negative = B.CreateICmpSLT(IndexStep, ConstantInt::get(Wide, 0));
-    Value *Low = B.CreateSelect(Negative, Last, First, "affine.low");
-    Value *High = B.CreateSelect(Negative, First, Last, "affine.high");
-    Value *Length = B.CreateZExt(Check.Length, Wide, "affine.length");
-    Value *Safe = B.CreateAnd(B.CreateICmpSGE(Low, ConstantInt::get(Wide, 0)),
-                              B.CreateICmpULT(High, Length), "affine.range");
+    Value *Length =
+        B.CreateIntCast(R.Check->Length, Wide, false, "affine.length");
+    // Unsigned bounds reject negative endpoints too. With exact arithmetic,
+    // both endpoints in range imply every affine index between them is safe.
+    Value *Safe = B.CreateAnd(B.CreateICmpULT(First, Length),
+                              B.CreateICmpULT(Last, Length), "affine.range");
     Guard = B.CreateAnd(Guard, Safe, "affine.safe");
   }
-  // No-wrap information inferred from successful checks cannot justify the
-  // guard that removes those checks. Expansion uses only modular starts;
-  // controller no-wrap and every endpoint are checked independently above.
-  for (Instruction *I : Expander.getAllInsertedInstructions())
-    I->dropPoisonGeneratingFlags();
 
   BasicBlock *FastPH = SplitBlock(CheckBB, At, &DT, &LI, nullptr,
                                   L->getHeader()->getName() + ".affine.fast");
@@ -484,7 +609,7 @@ PreservedAnalyses AffineCheckVersioning::run(Function &F,
       auto Plan = planVersion(L, SE, DT, AC);
       if (!Plan)
         continue;
-      applyVersion(*Plan, SE, DT, LI);
+      applyVersion(*Plan, SE, DT, LI, AC);
       // All loop/SCEV/MemorySSA caches must be refreshed before planning a
       // different source loop. No analysis from this iteration is read again.
       FAM.invalidate(F, PreservedAnalyses::none());

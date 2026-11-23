@@ -8,8 +8,8 @@ declare void @effect(i32)
 define i32 @scaled(ptr addrspace(1) noundef nonnull %a, i32 noundef %end, i32 noundef %offset, i32 noundef %scale) {
 ; FULL-LABEL: define i32 @scaled(
 ; FULL: %affine.step = sext i32 %scale to i64
-; FULL: %affine.low = select
-; FULL: %affine.high = select
+; FULL: icmp ult i64 {{.*}}, %{{.*}}
+; FULL: icmp ult i64 {{.*}}, %{{.*}}
 ; FULL: br i1 {{.*}}, label %{{.*}}, label %loop.affine.slow.preheader
 ; FULL: %ok.affine.slow = icmp ult
 ; FULL: loop:
@@ -198,8 +198,8 @@ exit:
 define i32 @wide_unsigned_step(i64 noundef %limit, i64 noundef %offset, i64 noundef %scale) {
 ; CHECK-LABEL: define i32 @wide_unsigned_step(
 ; CHECK: %affine.step = sext i64 %scale to i128
-; CHECK: %affine.low = select i1 {{.*}}, i128
-; CHECK: %affine.high = select i1 {{.*}}, i128
+; CHECK: icmp ult i128 {{.*}}, 1000
+; CHECK: icmp ult i128 {{.*}}, 1000
 ; CHECK: affine.fast
 ; CHECK: %ok.affine.slow = icmp ult i64
 ; CHECK: loop:
