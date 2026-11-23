@@ -1480,9 +1480,9 @@ private:
                      CopyElementLoadKeyHash>
       CopyElementLoadCache;
 
-  // Copy sites folded with a VIRTUAL source, as (source, destination) VO id
-  // pairs. commit() consults this after eligibility settles: a fold whose
-  // destination turned ineligible is dropped and its call REVIVES, and the
+  // Memory operations folded with a virtual source, as (source, effect owner)
+  // VO id pairs. commit() consults this after eligibility settles: a fold whose
+  // effect owner turned ineligible is dropped and its call revives, and the
   // revived call reads the source's memory at the call — the source's own
   // materialization may replay the values only after the call (or the
   // source may be proposed for deletion), so commit keeps such a source
@@ -1490,7 +1490,7 @@ private:
   // commit()-time-only state, re-derived on every analysis visit (duplicate
   // pairs are inert — the consumer re-checks eligibility).
   SmallVector<std::pair<jeandle::ObjectID, jeandle::ObjectID>, 4>
-      CopyFoldVirtualSources;
+      MemoryFoldVirtualSources;
 
   // Per-VO record of LLVM pointer-PHIs that processBlockPhis
   // aliased via Case-B (every incoming agrees on the same ObjectID).
@@ -2154,7 +2154,7 @@ private:
   // observed set is insert-only, so the observation survives later kills;
   // it is inert while the fold survives (an observed store's owner still
   // eliminates it) and restores the stores when the source is kept real
-  // (see CopyFoldVirtualSources).
+  // (see MemoryFoldVirtualSources).
   void observeCopyFoldSourceDefs(jeandle::ObjectID SrcID, int64_t Lo,
                                  int64_t Hi);
   // Fold a monitorenter on an eligible virtual receiver into lock-state
@@ -7878,6 +7878,12 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
     // consumer. Eligible virtuals still eliminate these stores normally.
     observeFieldDefinitions(*Left, FieldDefinitions);
     observeFieldDefinitions(*Right, FieldDefinitions);
+    // A revived multi-array reader needs every non-owner operand in memory
+    // before the call, independently of its later materialization point.
+    if (*Left != Owner)
+      MemoryFoldVirtualSources.emplace_back(*Left, Owner);
+    if (*Right != Owner)
+      MemoryFoldVirtualSources.emplace_back(*Right, Owner);
     emitReplaceCall(CB,
                     CB->getType()->isVoidTy()
                         ? nullptr
@@ -7976,6 +7982,9 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
   auto Finish = [&](int32_t V, ObjectID Owner) {
     observeFieldDefinitions(Left, FieldDefinitions);
     observeFieldDefinitions(Right, FieldDefinitions);
+    // The destination owns the call elision. If its fold is cancelled, the
+    // reader must see the source's stores at the call, before any replay.
+    MemoryFoldVirtualSources.emplace_back(Left, Owner);
     emitReplaceCall(CB,
                     CB->getType()->isVoidTy()
                         ? nullptr
@@ -8839,10 +8848,10 @@ bool Analyzer::processCopyCall(CallBase *CB) {
     // CALL: observe the reaching definitions right here — before any later
     // store can kill their entries in the live point-sensitive map — and
     // record the source for commit's keep-real rule
-    // (CopyFoldVirtualSources), which restores the (observed) stores at
+    // (MemoryFoldVirtualSources), which restores the (observed) stores at
     // their original positions when the fold is dropped.
     observeCopyFoldSourceDefs(SrcID, *BaseOff, *PayloadEnd);
-    CopyFoldVirtualSources.emplace_back(SrcID, DestID);
+    MemoryFoldVirtualSources.emplace_back(SrcID, DestID);
     // The full-coverage copy is now the reaching definition of every window
     // slot it wrote or reset to default.
     clearCopyFoldReachingDefs(DestID, *BaseOff, *PayloadEnd);
@@ -9205,12 +9214,13 @@ bool Analyzer::processCopyCall(CallBase *CB) {
       // observe the reaching definitions right here — before any later
       // store can kill their entries in the live point-sensitive map — and
       // record the source for commit's keep-real rule
-      // (CopyFoldVirtualSources), which restores the (observed) stores at
+      // (MemoryFoldVirtualSources), which restores the (observed) stores at
       // their original positions when the fold is dropped.
       if (SrcWinLo && SrcWinHi) {
         observeCopyFoldSourceDefs(SrcIdentity.getObjectID(), *SrcWinLo,
                                   *SrcWinHi);
-        CopyFoldVirtualSources.emplace_back(SrcIdentity.getObjectID(), DestID);
+        MemoryFoldVirtualSources.emplace_back(SrcIdentity.getObjectID(),
+                                              DestID);
       }
     }
     std::optional<int64_t> DestWinLo = checkedArrayElementOffset(
@@ -11349,7 +11359,7 @@ void Analyzer::commit() {
             AnyChange = true;
           }
       }
-      // A dropped copy fold revives a call that READS its virtual source's
+      // A dropped memory fold revives a call that reads its virtual source's
       // memory at the call. The source's own materialization may replay the
       // tracked values only AFTER the call (or the source may have been
       // proposed for deletion), so an eligible source cannot be trusted to
@@ -11359,8 +11369,8 @@ void Analyzer::commit() {
       // runs BEFORE the surviving-use audit below so the audit's FreshRetry
       // (a full re-analysis) is not triggered for a source the plan can
       // already keep real soundly.
-      for (const auto &[SrcID, FoldDestID] : CopyFoldVirtualSources) {
-        if (Eligible.lookup(FoldDestID) || !Eligible.lookup(SrcID))
+      for (const auto &[SrcID, FoldOwnerID] : MemoryFoldVirtualSources) {
+        if (Eligible.lookup(FoldOwnerID) || !Eligible.lookup(SrcID))
           continue;
         markIneligible(SrcID);
         AnyChange = true;

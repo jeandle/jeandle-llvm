@@ -12,8 +12,12 @@
 #define LLVM_TRANSFORMS_JEANDLE_PREPEAALLOCATIONUNROLLHINTS_H
 
 #include "llvm/IR/PassManager.h"
+#include <cstdint>
 
 namespace llvm::jeandle {
+
+inline constexpr uint64_t PrePEAFullUnrollLoopBudget = 1024;
+inline constexpr uint64_t PrePEAFullUnrollFunctionBudget = 4096;
 
 // Shared trip-count cap for allocation hints and the standard full unroller.
 unsigned getPrePEAFullUnrollMaxCount();

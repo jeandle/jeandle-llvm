@@ -9,29 +9,55 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/CharacterIntrinsicSpecialization.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Jeandle/CharacterIntrinsics.h"
 #include "llvm/IR/Jeandle/VMConstants.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
+#include "llvm/Transforms/Jeandle/PartialEscapeIterative.h"
+#include "llvm/Transforms/Jeandle/PrePEAAllocationUnrollHints.h"
 #include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Transforms/Utils/UnrollLoop.h"
 
 using namespace llvm;
 using namespace llvm::jeandle;
 
 namespace {
-void expand(CallInst &Call, CharacterIntrinsic Op, unsigned Count) {
+bool hasLocalArrayOpportunity(Value *Array, const LoopInfo &LI,
+                              unsigned MaxCount) {
+  SmallVector<const Value *, 4> Objects;
+  getUnderlyingObjects(Array, Objects, &LI);
+  if (Objects.empty())
+    return false;
+  for (const Value *Object : Objects) {
+    auto *Allocation = dyn_cast<CallBase>(Object);
+    if (!Allocation)
+      return false;
+    auto *Length = dyn_cast_or_null<ConstantInt>(
+        pea::getJeandleNewArrayLength(Allocation));
+    if (!Length || Length->isNegative() || !Length->getValue().ule(MaxCount))
+      return false;
+  }
+  return true;
+}
+
+void expand(CallInst &Call, CharacterIntrinsic Op, unsigned Count,
+            bool UseLoop) {
   VMConstants Layout = VMConstants::fromModule(*Call.getModule());
   IRBuilder<> B(&Call);
   BasicBlock *Head = Call.getParent();
   BasicBlock *Exit =
       Head->splitBasicBlock(Call.getIterator(), "character.result");
   Head->getTerminator()->eraseFromParent();
-  PHINode *Result = PHINode::Create(B.getInt32Ty(), Count + 1,
+  PHINode *Result = PHINode::Create(B.getInt32Ty(), UseLoop ? 2 : Count + 1,
                                     "character.prefix", Call.getIterator());
   B.SetInsertPoint(Head);
   auto Address = [&](Value *Array, Value *Index, unsigned Width,
@@ -48,8 +74,19 @@ void expand(CallInst &Call, CharacterIntrinsic Op, unsigned Count) {
     L->setAtomic(AtomicOrdering::Unordered);
     return L;
   };
-  for (unsigned I = 0; I != Count; ++I) {
-    Value *Index = B.CreateAdd(Call.getArgOperand(1), B.getInt32(I));
+  BasicBlock *Loop = nullptr;
+  PHINode *LoopIndex = nullptr;
+  if (UseLoop) {
+    Loop = BasicBlock::Create(Call.getContext(), "character.loop",
+                              Call.getFunction(), Exit);
+    B.CreateBr(Loop);
+    B.SetInsertPoint(Loop);
+    LoopIndex = B.CreatePHI(B.getInt32Ty(), 2, "character.index");
+    LoopIndex->addIncoming(B.getInt32(0), Head);
+  }
+  for (unsigned I = 0; I != (UseLoop ? 1 : Count); ++I) {
+    Value *Offset = UseLoop ? static_cast<Value *>(LoopIndex) : B.getInt32(I);
+    Value *Index = B.CreateAdd(Call.getArgOperand(1), Offset);
     Value *P = Address(Call.getArgOperand(0), Index, Op.Scan ? 1 : 2,
                        !Op.Scan && !Op.SourceBytes);
     Value *C;
@@ -73,11 +110,11 @@ void expand(CallInst &Call, CharacterIntrinsic Op, unsigned Count) {
     }
     BasicBlock *Next = BasicBlock::Create(Call.getContext(), "character.valid",
                                           Call.getFunction(), Exit);
-    Result->addIncoming(B.getInt32(I), B.GetInsertBlock());
+    Result->addIncoming(Offset, B.GetInsertBlock());
     B.CreateCondBr(Invalid, Exit, Next);
     B.SetInsertPoint(Next);
     if (!Op.Scan) {
-      Value *DI = B.CreateAdd(Call.getArgOperand(3), B.getInt32(I));
+      Value *DI = B.CreateAdd(Call.getArgOperand(3), Offset);
       Value *DP = Address(Call.getArgOperand(2), DI, 1, false);
       auto *Store =
           B.CreateAlignedStore(B.CreateTrunc(C, B.getInt8Ty()), DP, Align(1));
@@ -85,9 +122,60 @@ void expand(CallInst &Call, CharacterIntrinsic Op, unsigned Count) {
     }
   }
   Result->addIncoming(B.getInt32(Count), B.GetInsertBlock());
-  B.CreateBr(Exit);
+  if (UseLoop) {
+    Value *NextIndex = B.CreateAdd(LoopIndex, B.getInt32(1));
+    LoopIndex->addIncoming(NextIndex, B.GetInsertBlock());
+    B.CreateCondBr(B.CreateICmpULT(NextIndex, B.getInt32(Count)), Loop, Exit);
+  } else {
+    B.CreateBr(Exit);
+  }
   Call.replaceAllUsesWith(Result);
   Call.eraseFromParent();
+}
+
+std::optional<uint64_t> expansionCost(CallBase &Call, CharacterIntrinsic Op,
+                                      unsigned Count, ConstantInt *SourceOffset,
+                                      ConstantInt *DestinationOffset,
+                                      const TargetTransformInfo &TTI) {
+  // Estimate the emitted accesses without changing the caller or its analyses.
+  // Loop control and unsimplified address arithmetic make this conservative
+  // for straight-line expansion, where constant indices fold immediately.
+  Function *Probe =
+      Function::Create(Call.getFunctionType(), GlobalValue::PrivateLinkage,
+                       "jeandle.character.cost", Call.getModule());
+  IRBuilder<> B(BasicBlock::Create(Call.getContext(), "entry", Probe));
+  SmallVector<Value *, 7> Arguments;
+  for (unsigned I = 0; I != Call.arg_size(); ++I) {
+    Value *Argument = Call.getArgOperand(I);
+    Arguments.push_back(isa<Constant>(Argument) ? Argument : Probe->getArg(I));
+  }
+  if (SourceOffset)
+    Arguments[1] = SourceOffset;
+  Arguments[Op.countIndex()] = B.getInt32(Count);
+  if (!Op.Scan && DestinationOffset)
+    Arguments[3] = DestinationOffset;
+  CallInst *Candidate = B.CreateCall(Call.getCalledFunction(), Arguments);
+  Candidate->setCallingConv(Call.getCallingConv());
+  B.CreateRet(Candidate);
+  expand(*Candidate, Op, Count, /*UseLoop=*/true);
+
+  std::optional<uint64_t> Cost;
+  {
+    DominatorTree DT(*Probe);
+    LoopInfo LI(DT);
+    if (LI.getTopLevelLoops().size() == 1) {
+      SmallPtrSet<const Value *, 1> EphemeralValues;
+      UnrollCostEstimator Estimate(*LI.begin(), TTI, EphemeralValues,
+                                   /*BEInsns=*/0);
+      if (Estimate.canUnroll()) {
+        TargetTransformInfo::UnrollingPreferences Preferences{};
+        Preferences.BEInsns = 0;
+        Cost = Estimate.getUnrolledLoopSize(Preferences, Count);
+      }
+    }
+  }
+  Probe->eraseFromParent();
+  return Cost;
 }
 } // namespace
 
@@ -104,6 +192,7 @@ CharacterIntrinsicSpecialization::run(Function &F,
   };
   SmallVector<Plan, 8> Plans;
   LazyValueInfo *LVI = nullptr;
+  uint64_t RemainingCost = PrePEAFullUnrollFunctionBudget;
   for (Instruction &I : instructions(F)) {
     auto *CB = dyn_cast<CallBase>(&I);
     if (!CB || CB->hasOperandBundles() ||
@@ -121,10 +210,24 @@ CharacterIntrinsicSpecialization::run(Function &F,
       return dyn_cast_or_null<ConstantInt>(LVI->getConstant(V, CB));
     };
     ConstantInt *Count = Constant(Op->countIndex());
-    if (!Count || Count->isNegative() ||
-        Count->getZExtValue() > CharacterScalarLimit)
+    if (!Count || Count->isNegative())
       continue;
-    if (Count->getZExtValue() > 8) {
+    if (Count->getZExtValue() > CharacterScalarLimit) {
+      unsigned MaxCount = getPrePEAFullUnrollMaxCount();
+      if (!isPEAEnabled() || Count->getZExtValue() > MaxCount)
+        continue;
+      const LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
+      if (!hasLocalArrayOpportunity(CB->getArgOperand(0), LI, MaxCount) &&
+          (Op->Scan ||
+           !hasLocalArrayOpportunity(CB->getArgOperand(2), LI, MaxCount)))
+        continue;
+      auto Cost = expansionCost(*CB, *Op, Count->getZExtValue(), Constant(1),
+                                Op->Scan ? nullptr : Constant(3),
+                                AM.getResult<TargetIRAnalysis>(F));
+      if (!Cost || *Cost > PrePEAFullUnrollLoopBudget || *Cost > RemainingCost)
+        continue;
+      RemainingCost -= *Cost;
+    } else if (Count->getZExtValue() > 8) {
       const LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
       BatchAAResults AA(AM.getResult<AAManager>(F));
       if (!hasScalarArrayOpportunity(CB->getArgOperand(0), LI, AA) &&
@@ -146,7 +249,7 @@ CharacterIntrinsicSpecialization::run(Function &F,
     CallInst *Call = dyn_cast<CallInst>(P.Call);
     if (!Call)
       Call = changeToCall(cast<InvokeInst>(P.Call));
-    expand(*Call, P.Op, P.Count);
+    expand(*Call, P.Op, P.Count, /*UseLoop=*/false);
   }
   return Plans.empty() ? PreservedAnalyses::all() : PreservedAnalyses::none();
 }
