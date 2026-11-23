@@ -70,6 +70,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Jeandle/HashCodeIntrinsics.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/MemoryBarrier.h"
@@ -1091,6 +1092,11 @@ private:
   // FreshRetry path); distinct from the invalid-deopt sites in that the
   // current attempt is abandoned immediately once this is non-empty.
   SmallVector<CallBase *, 4> RetryVirtualizationAllocationSites;
+  // Hash folds can consume scalar aliases from other virtual objects. If
+  // eligibility is revoked, rebuild the attempt rather than retain arithmetic
+  // whose producing field PHI or replacement effect may be discarded. This
+  // flag deliberately overapproximates folds rewound by a loop retry.
+  bool HasFoldedVectorizedHashCode = false;
   bool hasPendingRetry() const {
     return !RetryVirtualizationAllocationSites.empty() ||
            !InvalidCFGProofKillers.empty();
@@ -2048,9 +2054,11 @@ private:
   bool processJavaOp(CallBase *CB);
   bool foldStringIntrinsic(CallBase *CB);
   bool foldStringGetChar(CallBase *CB);
+  bool foldVectorizedHashCode(CallBase *CB);
   std::optional<jeandle::ObjectID> resolveStringArray(Value *V);
   Value *readStringCell(jeandle::ObjectID ID, int64_t Offset, unsigned Bits,
-                        Instruction *InsertContext = nullptr);
+                        Instruction *InsertContext = nullptr,
+                        bool ValidateOnly = false);
   Value *placeStringInstruction(Instruction *I, Instruction *InsertContext);
   // Known non-escaping LLVM intrinsics (assume, lifetime/invariant
   // markers, debug, annotations, branch hints, ...) are no-ops for PEA;
@@ -7671,7 +7679,8 @@ Value *Analyzer::placeStringInstruction(Instruction *I,
 }
 
 Value *Analyzer::readStringCell(jeandle::ObjectID ID, int64_t Offset,
-                                unsigned Bits, Instruction *InsertContext) {
+                                unsigned Bits, Instruction *InsertContext,
+                                bool ValidateOnly) {
   using namespace jeandle;
   const VirtualObject &VO = *Result.VirtualObjects[ID];
   Type *Ty = Type::getIntNTy(F.getContext(), Bits);
@@ -7714,13 +7723,18 @@ Value *Analyzer::readStringCell(jeandle::ObjectID ID, int64_t Offset,
       if (GroupBits != Bits && Part)
         Part = ConstantFoldCastOperand(Instruction::Trunc, Part, Ty, DL);
       if (Part && !isa<UndefValue>(Part)) {
-        observeFieldDefinition(ID, Field.Offset, FieldDefinitions);
+        if (!ValidateOnly)
+          observeFieldDefinition(ID, Field.Offset, FieldDefinitions);
         return Part;
       }
       return nullptr;
     }
-    if (!InsertContext && (V->getType() != Ty || Shift))
+    if (!InsertContext && !ValidateOnly && (V->getType() != Ty || Shift))
       return nullptr;
+    // Validation returns only a readability witness. It neither observes
+    // reaching definitions nor places packed extraction instructions.
+    if (ValidateOnly)
+      return V;
     observeFieldDefinition(ID, Field.Offset, FieldDefinitions);
     if (V->getType() != GroupTy)
       V = placeStringInstruction(new BitCastInst(V, GroupTy, "string.bits"),
@@ -8076,6 +8090,392 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
   return Finish(Return, *Right);
 }
 
+// Fold a bounded, in-range virtual array hash without materializing its
+// receiver. Cheap hashes combine constant segments into affine updates;
+// expensive hashes use independent weighted vectors and a balanced reduction.
+// Non-positive counts replace the call with the initial value alone, exactly
+// like the kernel's pre-dispatch exit.
+bool Analyzer::foldVectorizedHashCode(CallBase *CB) {
+  using namespace jeandle;
+  using namespace jeandle::pea;
+  auto BasicType = decodeVectorizedHashCode(*CB);
+  if (!BasicType || CB->hasOperandBundles())
+    return false;
+  auto ID = resolveStringArray(CB->getArgOperand(0));
+  if (!ID)
+    return false;
+  auto N = [&](unsigned I) -> std::optional<int64_t> {
+    Value *V = CB->getArgOperand(I);
+    while (Value *Alias = Aliases.getScalarAlias(V))
+      V = Alias;
+    return stringConstantInt(V);
+  };
+  auto Length = N(2);
+  Value *Initial = CB->getArgOperand(3);
+  while (Value *Alias = Aliases.getScalarAlias(Initial))
+    Initial = Alias;
+  // The kernel returns initialValue before dispatching on the basic type
+  // whenever the count is non-positive, so this shortcut reads nothing and
+  // needs no layout match, in-range proof, or constant from index.
+  if (Length && *Length <= 0) {
+    emitReplaceCall(CB, Initial, *ID);
+    HasFoldedVectorizedHashCode = true;
+    return true;
+  }
+  auto From = N(1);
+  if (!From || !Length || *From < 0 || *Length > HashCodeMaxFoldLength)
+    return false;
+
+  const VirtualObject &VO = *Result.VirtualObjects[*ID];
+  const bool ByteLike =
+      VO.ArrayElementType && VO.ArrayElementType->isIntegerTy(8) &&
+      VO.ArrayIndexScale == 1 &&
+      VO.ArrayBaseOffset == VMConsts.arrayBaseOffsetFor(JBasicType::Byte);
+  auto WordLike = [&](JBasicType Kind, unsigned Bits) {
+    return VO.ArrayElementType && VO.ArrayElementType->isIntegerTy(Bits) &&
+           VO.ArrayIndexScale == Bits / 8 &&
+           VO.ArrayBaseOffset == VMConsts.arrayBaseOffsetFor(Kind);
+  };
+  // Interpretation→layout table. T_CHAR accepts either a char[] payload or a
+  // byte[] of native-endian utf16 pairs (StringUTF16 usage). Packed words
+  // are read directly; independent byte cells are composed after validation.
+  enum class Layout { Bytes, Shorts, Chars, Utf16Pairs, Ints } Ly;
+  unsigned CellBits = 0;
+  bool Signed = false;
+  switch (*BasicType) {
+  case 4: // T_BOOLEAN
+    if (!ByteLike)
+      return false;
+    Ly = Layout::Bytes;
+    CellBits = 8;
+    Signed = false;
+    break;
+  case 8: // T_BYTE
+    if (!ByteLike)
+      return false;
+    Ly = Layout::Bytes;
+    CellBits = 8;
+    Signed = true;
+    break;
+  case 9: // T_SHORT
+    if (!WordLike(JBasicType::Short, 16))
+      return false;
+    Ly = Layout::Shorts;
+    CellBits = 16;
+    Signed = true;
+    break;
+  case 5: // T_CHAR
+    if (WordLike(JBasicType::Char, 16)) {
+      Ly = Layout::Chars;
+      CellBits = 16;
+      Signed = false;
+    } else if (ByteLike) {
+      Ly = Layout::Utf16Pairs;
+      CellBits = 8;
+      Signed = false;
+    } else {
+      return false;
+    }
+    break;
+  case 10: // T_INT
+    if (!WordLike(JBasicType::Int, 32))
+      return false;
+    Ly = Layout::Ints;
+    CellBits = 32;
+    break;
+  default:
+    return false;
+  }
+
+  // Element-scaled range check against the virtual array's element count;
+  // utf16 pairs consume two byte cells per hashed code unit.
+  const int64_t CellsPerElement = Ly == Layout::Utf16Pairs ? 2 : 1;
+  const int64_t Scale = VO.ArrayIndexScale;
+  if ((*From + *Length) * CellsPerElement > VO.ArrayLength)
+    return false;
+
+  // Validate every read without placing effects or observing definitions.
+  // In particular, a packed extraction in an early element must not survive
+  // when a later element prevents folding the operation.
+  struct CellRead {
+    int64_t Offset;
+    bool BytePair;
+  };
+  SmallVector<CellRead, 16> Reads;
+  const int64_t ElementScale = Ly == Layout::Utf16Pairs ? 2 : Scale;
+  auto CanRead = [&](int64_t Offset, unsigned Bits) {
+    return readStringCell(*ID, Offset, Bits, nullptr, /*ValidateOnly=*/true);
+  };
+  for (int64_t I = 0; I < *Length; ++I) {
+    auto Offset =
+        checkedArrayElementOffset(VO.ArrayBaseOffset, *From + I, ElementScale);
+    if (!Offset || !isUsableFieldOffset(*Offset))
+      return false;
+    bool BytePair = false;
+    if (Ly == Layout::Utf16Pairs) {
+      if (!CanRead(*Offset, 16)) {
+        if (!CanRead(*Offset, 8) || !CanRead(*Offset + 1, 8))
+          return false;
+        BytePair = true;
+      }
+    } else if (!CanRead(*Offset, CellBits)) {
+      return false;
+    }
+    Reads.push_back({*Offset, BytePair});
+  }
+
+  // All reads have succeeded. From here the fold cannot fail, so placing
+  // packed extraction and arithmetic effects is safe.
+  Type *I32 = Type::getInt32Ty(F.getContext());
+  auto Place = [&](Instruction *I) { return placeStringInstruction(I, CB); };
+  auto Binary = [&](Instruction::BinaryOps Opcode, Value *L, Value *R,
+                    const Twine &Name) -> Value * {
+    if (auto *LC = dyn_cast<Constant>(L))
+      if (auto *RC = dyn_cast<Constant>(R))
+        return ConstantFoldBinaryOpOperands(Opcode, LC, RC, DL);
+    return Place(BinaryOperator::Create(Opcode, L, R, Name));
+  };
+  auto Widen = [&](Value *V) -> Value * {
+    if (V->getType() == I32)
+      return V;
+    auto Opcode = Signed ? Instruction::SExt : Instruction::ZExt;
+    if (auto *C = dyn_cast<Constant>(V))
+      return ConstantFoldCastOperand(Opcode, C, I32, DL);
+    return Place(CastInst::Create(Opcode, V, I32, "vhc.widen"));
+  };
+  SmallVector<Value *, 16> Cells;
+  for (const CellRead &Read : Reads) {
+    if (!Read.BytePair) {
+      unsigned Bits = Ly == Layout::Utf16Pairs ? 16 : CellBits;
+      Value *V = readStringCell(*ID, Read.Offset, Bits, CB);
+      assert(V && "prevalidated hash cell must be readable");
+      Cells.push_back(V);
+      continue;
+    }
+    Value *First = readStringCell(*ID, Read.Offset, 8, CB);
+    Value *Second = readStringCell(*ID, Read.Offset + 1, 8, CB);
+    assert(First && Second && "prevalidated UTF16 pair must be readable");
+    Value *Low = Widen(DL.isLittleEndian() ? First : Second);
+    Value *High = Widen(DL.isLittleEndian() ? Second : First);
+    High = Binary(Instruction::Shl, High, ConstantInt::get(I32, 8), "vhc.high");
+    Cells.push_back(Binary(Instruction::Or, Low, High, "vhc.char"));
+  }
+
+  // This threshold selects the compact serial form, rather than rejecting
+  // virtualization. The length bound limits total work in either form.
+  unsigned ScalarCost = 0;
+  bool ConstantSegment = false;
+  for (Value *V : Cells) {
+    if (isa<ConstantInt>(V)) {
+      ConstantSegment = true;
+      continue;
+    }
+    if (ConstantSegment) {
+      ScalarCost += 2;
+      ConstantSegment = false;
+    }
+    ScalarCost += CellBits == 32 ? 2 : 3;
+  }
+  if (ConstantSegment)
+    ScalarCost += 2;
+
+  // A run of constants is an affine update h = Factor*h + Bias. This also
+  // folds all-constant hashes, including those with a dynamic initial value.
+  auto FoldChain = [&](Value *H, unsigned Start, unsigned Stride,
+                       uint32_t Multiplier) {
+    uint32_t Factor = 1;
+    uint32_t Bias = 0;
+    auto ApplyConstants = [&](uint32_t Mul, uint32_t Add) {
+      if (Mul != 1)
+        H = Binary(Instruction::Mul, H, ConstantInt::get(I32, Mul), "vhc.mul");
+      if (Add != 0)
+        H = Binary(Instruction::Add, H, ConstantInt::get(I32, Add), "vhc.add");
+    };
+    for (unsigned I = Start; I < Cells.size(); I += Stride) {
+      Value *W = Widen(Cells[I]);
+      if (auto *C = dyn_cast<ConstantInt>(W)) {
+        Factor *= Multiplier;
+        Bias = Bias * Multiplier + uint32_t(C->getZExtValue());
+        continue;
+      }
+      ApplyConstants(Factor * Multiplier, Bias * Multiplier);
+      if (auto *C = dyn_cast<ConstantInt>(H); C && C->isZero())
+        H = W;
+      else
+        H = Binary(Instruction::Add, H, W, "vhc.add");
+      Factor = 1;
+      Bias = 0;
+    }
+    ApplyConstants(Factor, Bias);
+    return H;
+  };
+  Value *H;
+  if (ScalarCost <= HashCodeScalarChainCostLimit) {
+    if (!F.getParent()->getTargetTriple().isX86()) {
+      H = FoldChain(Initial, 0, 1, 31);
+    } else {
+      // Compress constant runs before pairing adjacent affine updates. For
+      // (F0, B0) followed by (F1, B1), composition gives
+      // (F1*F0, F1*B0+B1), shortening the dependency chain through the hash.
+      struct AffineSegment {
+        uint32_t Factor;
+        Value *Bias;
+      };
+      SmallVector<AffineSegment, 16> Segments;
+      uint32_t Factor = 1;
+      uint32_t Bias = 0;
+      bool HasConstants = false;
+      auto FlushConstants = [&]() {
+        if (HasConstants)
+          Segments.push_back({Factor, ConstantInt::get(I32, Bias)});
+        Factor = 1;
+        Bias = 0;
+        HasConstants = false;
+      };
+      for (Value *Cell : Cells) {
+        Value *W = Widen(Cell);
+        if (auto *C = dyn_cast<ConstantInt>(W)) {
+          Factor *= 31;
+          Bias = Bias * 31 + uint32_t(C->getZExtValue());
+          HasConstants = true;
+        } else {
+          FlushConstants();
+          Segments.push_back({31, W});
+        }
+      }
+      FlushConstants();
+      H = Initial;
+      for (unsigned I = 0; I < Segments.size(); I += 2) {
+        auto [Mul, Add] = Segments[I];
+        if (I + 1 < Segments.size()) {
+          const auto &Next = Segments[I + 1];
+          Mul *= Next.Factor;
+          if (Next.Factor != 1)
+            Add = Binary(Instruction::Mul, Add,
+                         ConstantInt::get(I32, Next.Factor), "vhc.pair.mul");
+          if (auto *C = dyn_cast<ConstantInt>(Next.Bias); !C || !C->isZero())
+            Add = Binary(Instruction::Add, Add, Next.Bias, "vhc.pair.add");
+        }
+        if (Mul != 1)
+          H = Binary(Instruction::Mul, H, ConstantInt::get(I32, Mul),
+                     "vhc.mul");
+        if (auto *C = dyn_cast<ConstantInt>(H); C && C->isZero())
+          H = Add;
+        else if (auto *C = dyn_cast<ConstantInt>(Add); !C || !C->isZero())
+          H = Binary(Instruction::Add, H, Add, "vhc.add");
+      }
+    }
+  } else {
+    // The bounded, constant length makes every coefficient known. Independent
+    // vector products and a balanced sum avoid a loop-carried multiply chain.
+    // Plain vector IR also exposes constant lanes to the regular optimizers.
+    // All math wraps in i32; no no-overflow flags are valid.
+    constexpr unsigned Lanes = 4;
+    auto *VecTy = FixedVectorType::get(I32, Lanes);
+    SmallVector<Constant *, HashCodeMaxFoldLength> Weights(Cells.size());
+    uint32_t InitialWeight = 1;
+    for (unsigned I = Cells.size(); I != 0; --I) {
+      Weights[I - 1] = ConstantInt::get(I32, InitialWeight);
+      InitialWeight *= 31;
+    }
+    SmallVector<Value *, HashCodeMaxFoldLength / Lanes> Parts;
+    for (unsigned Start = 0; Start < Cells.size(); Start += Lanes) {
+      // Preserve narrow cells through packing so their extension can operate
+      // on the whole vector. UTF16 packed reads and byte-pair reconstruction
+      // may have different widths within a group; widen those cells first.
+      unsigned End = std::min<unsigned>(Start + Lanes, Cells.size());
+      Type *PackElementTy = Cells[Start]->getType();
+      for (unsigned I = Start + 1; I < End; ++I) {
+        if (Cells[I]->getType() != PackElementTy) {
+          PackElementTy = I32;
+          break;
+        }
+      }
+      // Unsigned cells truncated from i32 can be masked after packing their
+      // sources, avoiding scalar masks and a narrow-vector extension.
+      Type *CellTy = PackElementTy;
+      bool MaskPackedSources = !Signed && PackElementTy != I32;
+      for (unsigned I = Start; MaskPackedSources && I < End; ++I) {
+        if (isa<ConstantInt>(Cells[I]))
+          continue;
+        auto *Trunc = dyn_cast<TruncInst>(Cells[I]);
+        MaskPackedSources = Trunc && Trunc->getSrcTy() == I32;
+      }
+      if (MaskPackedSources)
+        PackElementTy = I32;
+      auto *PackTy = FixedVectorType::get(PackElementTy, Lanes);
+      Value *Pack = Constant::getNullValue(PackTy);
+      SmallVector<Constant *, Lanes> Coefficients(Lanes,
+                                                  ConstantInt::get(I32, 0));
+      for (unsigned Lane = 0; Lane < Lanes && Start + Lane < Cells.size();
+           ++Lane) {
+        Value *Cell = Cells[Start + Lane];
+        if (MaskPackedSources && isa<TruncInst>(Cell))
+          Cell = cast<TruncInst>(Cell)->getOperand(0);
+        else if (PackElementTy == I32)
+          Cell = Widen(Cell);
+        auto *Index = ConstantInt::get(I32, Lane);
+        if (auto *PC = dyn_cast<Constant>(Pack)) {
+          if (auto *CC = dyn_cast<Constant>(Cell)) {
+            Pack = ConstantExpr::getInsertElement(PC, CC, Index);
+          } else {
+            Pack =
+                Place(InsertElementInst::Create(Pack, Cell, Index, "vhc.pack"));
+          }
+        } else {
+          Pack =
+              Place(InsertElementInst::Create(Pack, Cell, Index, "vhc.pack"));
+        }
+        Coefficients[Lane] = Weights[Start + Lane];
+      }
+      if (MaskPackedSources) {
+        auto *Mask = ConstantVector::getSplat(
+            ElementCount::getFixed(Lanes),
+            ConstantInt::get(
+                I32, APInt::getLowBitsSet(32, CellTy->getIntegerBitWidth())));
+        Pack = Binary(Instruction::And, Pack, Mask, "vhc.mask");
+      }
+      if (PackTy != VecTy) {
+        auto Opcode = Signed ? Instruction::SExt : Instruction::ZExt;
+        if (auto *C = dyn_cast<Constant>(Pack))
+          Pack = ConstantFoldCastOperand(Opcode, C, VecTy, DL);
+        else
+          Pack = Place(CastInst::Create(Opcode, Pack, VecTy, "vhc.widen"));
+      }
+      Parts.push_back(Binary(Instruction::Mul, Pack,
+                             ConstantVector::get(Coefficients), "vhc.weight"));
+    }
+    while (Parts.size() > 1) {
+      unsigned End = Parts.size();
+      unsigned Out = 0;
+      for (unsigned I = 0; I + 1 < End; I += 2)
+        Parts[Out++] =
+            Binary(Instruction::Add, Parts[I], Parts[I + 1], "vhc.sum");
+      if (End & 1)
+        Parts[Out++] = Parts[End - 1];
+      Parts.resize(Out);
+    }
+    auto Shuffle = [&](Value *V, ArrayRef<int> Mask) {
+      return Place(new ShuffleVectorInst(V, PoisonValue::get(VecTy), Mask,
+                                         "vhc.shuffle"));
+    };
+    Value *Sum = Parts.front();
+    Sum = Binary(Instruction::Add, Sum, Shuffle(Sum, {2, 3, -1, -1}),
+                 "vhc.reduce");
+    Sum = Binary(Instruction::Add, Sum, Shuffle(Sum, {1, -1, -1, -1}),
+                 "vhc.reduce");
+    Value *Reduced = Place(ExtractElementInst::Create(
+        Sum, ConstantInt::get(I32, 0), "vhc.reduced"));
+    Value *Seed = Binary(Instruction::Mul, Initial,
+                         ConstantInt::get(I32, InitialWeight), "vhc.seed");
+    H = Binary(Instruction::Add, Reduced, Seed, "vhc.add");
+  }
+  observeFieldDefinitions(*ID, FieldDefinitions);
+  emitReplaceCall(CB, H, *ID);
+  HasFoldedVectorizedHashCode = true;
+  return true;
+}
+
 // Dispatch a recognized JavaOp on a virtual receiver to its fold. Returns
 // true iff the call was handled — folded to a constant / deleted, or a
 // known-safe non-escaping shape needing no transform; false routes the call
@@ -8085,6 +8485,8 @@ bool Analyzer::processJavaOp(CallBase *CB) {
     return foldStringGetChar(CB);
   if (jeandle::decodeStringIntrinsic(*CB))
     return foldStringIntrinsic(CB);
+  if (jeandle::decodeVectorizedHashCode(*CB))
+    return foldVectorizedHashCode(CB);
   using namespace jeandle::pea;
   if (jeandle::isReplayPublicationBarrier(CB)) {
     auto Owners = jeandle::getReplayPublicationOwners(*CB);
@@ -11081,6 +11483,15 @@ void Analyzer::commit() {
     bool IsEligible = (EIt != Eligible.end()) && EIt->second;
     if (!IsEligible)
       IneligibleIDs.insert(ID);
+  }
+  if (HasFoldedVectorizedHashCode && !IneligibleIDs.empty()) {
+    // A hash can use another fold as its seed or as a stored cell. Rebuilding
+    // from the original IR restores the whole scalar-alias dependency graph;
+    // dropping only the receiver's arithmetic effects would be insufficient.
+    for (jeandle::ObjectID ID : IneligibleIDs)
+      collectRetryVirtualizationSites(ID);
+    if (hasPendingRetry())
+      return;
   }
   dropEffectsForIneligible(IneligibleIDs);
 
