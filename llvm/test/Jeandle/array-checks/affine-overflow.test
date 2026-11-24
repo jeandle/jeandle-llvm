@@ -1,0 +1,3 @@
+; REQUIRES: native
+; RUN: %python %S/Inputs/affine-overflow.py opt lli %t | FileCheck %s
+; CHECK: 3250 differential controller/index overflow cases passed

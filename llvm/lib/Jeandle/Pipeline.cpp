@@ -13,8 +13,10 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Jeandle/ArrayLengthOptimization.h"
 #include "llvm/Transforms/Jeandle/BitShuffleFolding.h"
 #include "llvm/Transforms/Jeandle/CHADevirtualization.h"
+#include "llvm/Transforms/Jeandle/CheckOptimization.h"
 #include "llvm/Transforms/Jeandle/CopySignStoreLowering.h"
 #include "llvm/Transforms/Jeandle/CopySpecialization.h"
 #include "llvm/Transforms/Jeandle/ExpandNarrowOopCast.h"
@@ -41,6 +43,7 @@
 #include "llvm/Transforms/Jeandle/TLSPointerRewrite.h"
 #include "llvm/Transforms/Jeandle/TypeCheckElimination.h"
 #include "llvm/Transforms/Scalar/ADCE.h"
+#include "llvm/Transforms/Scalar/CorrelatedValuePropagation.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Transforms/Scalar/IndVarSimplify.h"
@@ -119,7 +122,7 @@ static void addPreparationForStripMining(ModulePassManager &PM) {
   // IndVarSimplify canonicalizes the IV and strengthens SCEV no-wrap flags (via
   // SimplifyIndVar's getStrengthenedNoWrapFlagsFromBinOp), so the strip-mining
   // no-wrap proofs can rely on SCEV flags instead of hand-derived bounds.
-  LPM.addPass(IndVarSimplifyPass());
+  LPM.addPass(IndVarSimplifyPass(/*WidenIndVars=*/false));
   PM.addPass(createModuleToFunctionPassAdaptor(
       createFunctionToLoopPassAdaptor(std::move(LPM), true)));
 }
@@ -206,6 +209,8 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
       createModuleToFunctionPassAdaptor(StringIntrinsicSpecialization()));
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   // ==== PEA segment ====
+  PM.addPass(createModuleToFunctionPassAdaptor(JavaOpLengthFolding()));
+  PM.addPass(createModuleToFunctionPassAdaptor(ArrayLengthOptimization()));
   // Everything below up to InsertGCBarriers exists to serve PEA: the
   // high-tier loop-optimization cluster that exposes virtualization
   // opportunities, the pre-PEA cleanup that PEA's correctness depends on,
@@ -234,6 +239,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     // estimates body cost; dead bounds-check blocks can otherwise hide a
     // profitable full unroll from the high-tier cluster.
     PrePEAHighTier.addPass(InstCombinePass());
+    PrePEAHighTier.addPass(CheckPreparation());
     PrePEAHighTier.addPass(SimplifyCFGPass());
     // Re-establish the canonical loop form; the inline driver may have
     // introduced loops that are not in simplified form.
@@ -247,7 +253,9 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
       // compute trip counts for, deletion removes side-effect-free loops.
       LoopPassManager CanonicalizeLPM;
       CanonicalizeLPM.addPass(LoopRotatePass());
-      CanonicalizeLPM.addPass(IndVarSimplifyPass());
+      // Keep modular index math narrow until the general O3 pipeline.
+      // Early widening can hide the outer SSA values used by versioning.
+      CanonicalizeLPM.addPass(IndVarSimplifyPass(/*WidenIndVars=*/false));
       CanonicalizeLPM.addPass(LoopDeletionPass());
       PrePEAHighTier.addPass(
           createFunctionToLoopPassAdaptor(std::move(CanonicalizeLPM)));
@@ -268,6 +276,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
         SimpleLoopUnswitchPass(/*NonTrivial=*/true)));
     PrePEAHighTier.addPass(InstCombinePass());
     PrePEAHighTier.addPass(GVNPass());
+    PrePEAHighTier.addPass(CheckPreparation());
     PrePEAHighTier.addPass(SimplifyCFGPass());
     PM.addPass(createModuleToFunctionPassAdaptor(std::move(PrePEAHighTier)));
     // Pre-PEA cleanup. PEA's correctness depends on the CFG containing no
@@ -289,6 +298,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     PM.addPass(createModuleToFunctionPassAdaptor(ADCEPass()));
     PM.addPass(createModuleToFunctionPassAdaptor(SimplifyCFGPass()));
     PM.addPass(createModuleToFunctionPassAdaptor(LoopSimplifyPass()));
+    // Propagate branch facts into nullable selects and their deopt uses before
+    // PEA treats the conditional virtual identity as an observation.
+    PM.addPass(
+        createModuleToFunctionPassAdaptor(CorrelatedValuePropagationPass()));
     PM.addPass(createModuleToFunctionPassAdaptor(InstCombinePass()));
     // Outer fixpoint. PartialEscapeIterative wraps the
     // analyze+transform pair in a bounded loop with InstCombine/SimplifyCFG/
@@ -345,6 +358,9 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));
 
   const bool StripMiningEnabled = isStripMiningEnabled();
+  PM.addPass(createModuleToFunctionPassAdaptor(JavaOpLengthFolding()));
+  PM.addPass(createModuleToFunctionPassAdaptor(ArrayLengthOptimization()));
+  PM.addPass(createModuleToFunctionPassAdaptor(CheckOptimization()));
   const bool DeferEmptyLoopDeletion = (Level == OptimizationLevel::O3);
 
   // The loop adaptor establishes LoopSimplify + LCSSA form before
@@ -357,7 +373,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     addPreparationForStripMining(PM);
   } else {
     LoopPassManager LPM;
-    LPM.addPass(IndVarSimplifyPass());
+    LPM.addPass(IndVarSimplifyPass(/*WidenIndVars=*/false));
     PM.addPass(createModuleToFunctionPassAdaptor(
         createFunctionToLoopPassAdaptor(std::move(LPM))));
   }
@@ -407,6 +423,15 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // FP-computed operands back to llvm.copysign (see CopySignStoreLowering).
   PM.addPass(createModuleToFunctionPassAdaptor(CopySignStoreLoweringPass()));
   PM.addPass(ExpandNarrowOopCast());
+  // GVN PRE can split identical IV truncations between a poll's slow path
+  // and its bypass edge. Hoist them before statepoint rewriting makes the
+  // deopt uses opaque, then fold the resulting single-value PHIs below.
+  PM.addPass(createModuleToFunctionPassAdaptor(GVNHoistPass()));
+  PM.addPass(createModuleToFunctionPassAdaptor(NullCheckElimination()));
+  // Decode null comparisons now refer to the original narrow values. Existing
+  // edge-sensitive PHI reasoning can remove repeated checks before relocation.
+  PM.addPass(createModuleToFunctionPassAdaptor(InstSimplifyPass()));
+  PM.addPass(createModuleToFunctionPassAdaptor(SimplifyCFGPass()));
   PM.addPass(RewriteStatepointsForGC());
   PM.addPass(createModuleToFunctionPassAdaptor(JeandleNarrowOopMarker()));
   // Phase 9 is reserved for JavaOps that must be lowered after O3/RS4GC.

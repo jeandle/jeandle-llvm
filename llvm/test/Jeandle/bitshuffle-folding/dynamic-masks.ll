@@ -1,3 +1,4 @@
+; REQUIRES: x86-registered-target
 ; RUN: opt < %s -passes='bit-shuffle-folding,instcombine' -mtriple=x86_64-unknown-unknown -verify-each -S | FileCheck %s
 ; RUN: opt < %s -passes='bit-shuffle-folding,instcombine,bit-shuffle-folding,instcombine' -mtriple=x86_64-unknown-unknown -verify-each -S | FileCheck %s
 

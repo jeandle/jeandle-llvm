@@ -71,14 +71,13 @@ live:
   ret i32 0
 }
 
-; InstCombine exposes the constant branch at the end of the first sequence.
-; The next round's SimplifyCFG removes the dead successor, so the cap-two
-; result includes that current-round progress but still needs a third PEA
-; probe before it can report a fixpoint.
+; InstCombine exposes the constant branch and the final CFG cleanup removes
+; its dead successor in the first round. The next idle round must confirm a
+; real fixpoint, including when the requested cap would allow a third probe.
 ; CHURN-CAP2-IR-LABEL: define i32 @canonicalization_churn(
 ; CHURN-CAP2-IR-NOT: call void @side_effect
 ; CHURN-CAP2-IR: ret i32 0
-; CHURN-CAP2-SUMMARY: PEA-SUMMARY function canonicalization_churn rounds=2 stop=iteration-cap
-; CHURN-CAP3-SUMMARY: PEA-SUMMARY function canonicalization_churn rounds=3 stop=fixpoint
+; CHURN-CAP2-SUMMARY: PEA-SUMMARY function canonicalization_churn rounds=2 stop=fixpoint
+; CHURN-CAP3-SUMMARY: PEA-SUMMARY function canonicalization_churn rounds=2 stop=fixpoint
 
 !java-method-compilation = !{}
