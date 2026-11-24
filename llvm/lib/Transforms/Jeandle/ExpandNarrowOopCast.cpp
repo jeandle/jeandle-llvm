@@ -120,6 +120,25 @@ PreservedAnalyses ExpandNarrowOopCast::run(Module &M, ModuleAnalysisManager &) {
       continue;
     }
 
+    // A Java narrow-oop decode preserves null even with a nonzero heap base.
+    // Normalize direct null users while that semantic identity is explicit;
+    // after lowering it is hidden inside the decode helper's integer math.
+    if (Callee == Decode) {
+      for (User *U : make_early_inc_range(Cast->users())) {
+        auto *Cmp = dyn_cast<ICmpInst>(U);
+        if (!Cmp || !Cmp->isEquality())
+          continue;
+        Value *Other = Cmp->getOperand(0) == Cast ? Cmp->getOperand(1)
+                                                  : Cmp->getOperand(0);
+        if (!isa<ConstantPointerNull>(Other))
+          continue;
+        Value *Narrow = Cast->getOperand(0);
+        Cmp->setOperand(0, Narrow);
+        Cmp->setOperand(
+            1, ConstantPointerNull::get(cast<PointerType>(Narrow->getType())));
+      }
+    }
+
     IRBuilder<> Builder(Cast);
     CallInst *Call = Builder.CreateCall(Callee, {Cast->getOperand(0)});
     Call->setCallingConv(CallingConv::Hotspot_JIT);

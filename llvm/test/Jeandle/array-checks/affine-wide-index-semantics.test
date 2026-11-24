@@ -1,0 +1,2 @@
+# REQUIRES: native
+# RUN: %python %S/Inputs/affine-wide-index-semantics.py %llvmshlibdir/../bin/opt %llvmshlibdir/../bin/lli %S/affine-wide-index.ll %t

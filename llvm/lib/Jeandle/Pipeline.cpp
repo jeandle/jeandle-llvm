@@ -122,7 +122,7 @@ static void addPreparationForStripMining(ModulePassManager &PM) {
   // IndVarSimplify canonicalizes the IV and strengthens SCEV no-wrap flags (via
   // SimplifyIndVar's getStrengthenedNoWrapFlagsFromBinOp), so the strip-mining
   // no-wrap proofs can rely on SCEV flags instead of hand-derived bounds.
-  LPM.addPass(IndVarSimplifyPass());
+  LPM.addPass(IndVarSimplifyPass(/*WidenIndVars=*/false));
   PM.addPass(createModuleToFunctionPassAdaptor(
       createFunctionToLoopPassAdaptor(std::move(LPM), true)));
 }
@@ -253,7 +253,9 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
       // compute trip counts for, deletion removes side-effect-free loops.
       LoopPassManager CanonicalizeLPM;
       CanonicalizeLPM.addPass(LoopRotatePass());
-      CanonicalizeLPM.addPass(IndVarSimplifyPass());
+      // Keep modular index math narrow until the general O3 pipeline.
+      // Early widening can hide the outer SSA values used by versioning.
+      CanonicalizeLPM.addPass(IndVarSimplifyPass(/*WidenIndVars=*/false));
       CanonicalizeLPM.addPass(LoopDeletionPass());
       PrePEAHighTier.addPass(
           createFunctionToLoopPassAdaptor(std::move(CanonicalizeLPM)));
@@ -371,7 +373,7 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     addPreparationForStripMining(PM);
   } else {
     LoopPassManager LPM;
-    LPM.addPass(IndVarSimplifyPass());
+    LPM.addPass(IndVarSimplifyPass(/*WidenIndVars=*/false));
     PM.addPass(createModuleToFunctionPassAdaptor(
         createFunctionToLoopPassAdaptor(std::move(LPM))));
   }
@@ -421,6 +423,15 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // FP-computed operands back to llvm.copysign (see CopySignStoreLowering).
   PM.addPass(createModuleToFunctionPassAdaptor(CopySignStoreLoweringPass()));
   PM.addPass(ExpandNarrowOopCast());
+  // GVN PRE can split identical IV truncations between a poll's slow path
+  // and its bypass edge. Hoist them before statepoint rewriting makes the
+  // deopt uses opaque, then fold the resulting single-value PHIs below.
+  PM.addPass(createModuleToFunctionPassAdaptor(GVNHoistPass()));
+  PM.addPass(createModuleToFunctionPassAdaptor(NullCheckElimination()));
+  // Decode null comparisons now refer to the original narrow values. Existing
+  // edge-sensitive PHI reasoning can remove repeated checks before relocation.
+  PM.addPass(createModuleToFunctionPassAdaptor(InstSimplifyPass()));
+  PM.addPass(createModuleToFunctionPassAdaptor(SimplifyCFGPass()));
   PM.addPass(RewriteStatepointsForGC());
   PM.addPass(createModuleToFunctionPassAdaptor(JeandleNarrowOopMarker()));
   // Phase 9 is reserved for JavaOps that must be lowered after O3/RS4GC.

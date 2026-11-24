@@ -1,0 +1,1 @@
+; RUN: %python %S/Inputs/affine-graph-budget.py opt %t

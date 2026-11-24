@@ -9,6 +9,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Jeandle/AffineCheckVersioning.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -39,6 +40,10 @@ static cl::opt<bool> EnableAffineVersioning(
     "jeandle-affine-check-versioning", cl::init(true), cl::Hidden,
     cl::desc("Version affine array checks left by standard loop transforms"));
 
+static cl::opt<bool> WidenCheckedIndices(
+    "jeandle-affine-widen-indices", cl::init(true), cl::Hidden,
+    cl::desc("Widen final affine indices under the loop entry guard"));
+
 static cl::opt<unsigned> MinVersionedTripCount(
     "jeandle-affine-min-trip-count", cl::init(10), cl::Hidden,
     cl::desc("Minimum estimated loop trips for affine check versioning"));
@@ -49,6 +54,7 @@ constexpr const char *VersionedMD = "llvm.loop.jeandle.check.versioned";
 
 struct RangeCheck {
   ICmpInst *Condition;
+  Value *Index;
   const SCEV *Start;
   const SCEV *Step;
   Value *Length;
@@ -68,6 +74,7 @@ struct ExitIncoming {
 
 struct VersionPlan {
   Loop *L;
+  PHINode *IV;
   Value *Init;
   Value *Limit;
   APInt Step;
@@ -212,10 +219,91 @@ bool isDefinedAt(Value *V, Instruction *At, AssumptionCache &AC,
                                  At->getModule()->getDataLayout()) == true;
 }
 
+// Charge operands before traversing them, including repeated incoming edges.
+// ValueTracking has its own recursion bound; preflight the operand graph before
+// querying it so a wide PHI cannot bypass this traversal's work/memory limit.
+bool takeGraphOperands(unsigned Count, unsigned &Budget) {
+  if (Count > Budget)
+    return false;
+  Budget -= Count;
+  return true;
+}
+
+bool hasBoundedValueGraph(Value *V, unsigned &Budget) {
+  SmallVector<Value *, 16> Work{V};
+  SmallPtrSet<Value *, 32> Seen;
+  while (!Work.empty()) {
+    Value *Current = Work.pop_back_val();
+    if (!Seen.insert(Current).second)
+      continue;
+    if (Seen.size() > 64)
+      return false;
+    auto *I = dyn_cast<Instruction>(Current);
+    if (!I || isa<FreezeInst>(I))
+      continue;
+    if (auto *Load = dyn_cast<LoadInst>(I))
+      if (Load->hasMetadata(LLVMContext::MD_noundef))
+        continue;
+    if (auto *Call = dyn_cast<CallBase>(I))
+      if (Call->hasRetAttr(Attribute::NoUndef))
+        continue;
+    if (!takeGraphOperands(I->getNumOperands(), Budget))
+      return false;
+    append_range(Work, I->operand_values());
+  }
+  return true;
+}
+
+// Prove the closed graph of integer operations by induction over PHIs. Entry
+// values must be defined. A poison-producing incoming value is only accepted
+// when poison would already make its predecessor's branch undefined. This
+// proves an existing value without speculating its computation in the guard.
+bool isDefinedInvariantAt(Value *V, Instruction *At, AssumptionCache &AC,
+                          DominatorTree &DT, unsigned &Budget) {
+  if (!hasBoundedValueGraph(V, Budget))
+    return false;
+  using Node = std::pair<Value *, unsigned>;
+  SmallVector<Node, 16> Work{{V, false}};
+  SmallDenseSet<Node, 32> Seen;
+  while (!Work.empty()) {
+    auto [Current, NonPoisonEdge] = Work.pop_back_val();
+    if (!Seen.insert({Current, NonPoisonEdge}).second)
+      continue;
+    if (Seen.size() > 64)
+      return false;
+    auto *I = dyn_cast<Instruction>(Current);
+    Instruction *Context = Current == V || !I ? At : I;
+    if (isDefinedAt(Current, Context, AC, DT))
+      continue;
+    // Integer PHIs, arithmetic and casts cannot create undef from defined
+    // operands. Keep all poison-generating annotations unless an edge proves
+    // their result is non-poison; do not infer that fact from SCEV's flags.
+    if (!I || !I->getType()->isIntegerTy() ||
+        !isa<PHINode, BinaryOperator, CastInst>(I) ||
+        (canCreateUndefOrPoison(cast<Operator>(I)) && !NonPoisonEdge))
+      return false;
+    if (auto *Phi = dyn_cast<PHINode>(I)) {
+      for (unsigned N = 0; N != Phi->getNumIncomingValues(); ++N) {
+        Value *Incoming = Phi->getIncomingValue(N);
+        auto *Br =
+            dyn_cast<BranchInst>(Phi->getIncomingBlock(N)->getTerminator());
+        bool NonPoison = Br && Br->isConditional() &&
+                         impliesPoison(Incoming, Br->getCondition());
+        Work.emplace_back(Incoming, NonPoison);
+      }
+    } else {
+      for (Value *Op : I->operand_values())
+        Work.emplace_back(Op, false);
+    }
+  }
+  return true;
+}
+
 bool isDefinedStart(const SCEV *S, Loop *L, Instruction *At,
                     AssumptionCache &AC, DominatorTree &DT) {
   SmallVector<const SCEV *, 8> Work{S};
   SmallPtrSet<const SCEV *, 16> Seen;
+  unsigned Budget = 256;
   while (!Work.empty()) {
     S = Work.pop_back_val();
     if (!Seen.insert(S).second)
@@ -226,18 +314,101 @@ bool isDefinedStart(const SCEV *S, Loop *L, Instruction *At,
       continue;
     if (auto *U = dyn_cast<SCEVUnknown>(S)) {
       Value *V = U->getValue();
-      if (!L->isLoopInvariant(V) || !isDefinedAt(V, At, AC, DT))
+      if (!L->isLoopInvariant(V) ||
+          !isDefinedInvariantAt(V, At, AC, DT, Budget))
         return false;
     } else if (auto *C = dyn_cast<SCEVCastExpr>(S)) {
       Work.push_back(C->getOperand());
     } else if (isa<SCEVAddExpr, SCEVMulExpr>(S)) {
-      append_range(Work, cast<SCEVNAryExpr>(S)->operands());
+      auto *Expr = cast<SCEVNAryExpr>(S);
+      if (!takeGraphOperands(Expr->getNumOperands(), Budget))
+        return false;
+      append_range(Work, Expr->operands());
     } else {
       return false;
     }
   }
   return true;
 }
+
+// Keep enclosing-loop recurrences tied to an existing SSA value. Expanding
+// their mathematical recurrence can otherwise change modular arithmetic or
+// evaluate a computation that is not defined at the inner loop's entry.
+class DefinedStartRewriter : public SCEVRewriteVisitor<DefinedStartRewriter> {
+  DenseMap<const SCEV *, Value *> Available;
+  SmallPtrSet<const SCEV *, 16> Seen;
+  Loop *L;
+  bool Valid = true;
+  unsigned RewriteBudget = 256;
+
+public:
+  DefinedStartRewriter(Value *Index, Loop *L, Instruction *At,
+                       ScalarEvolution &SE, AssumptionCache &AC,
+                       DominatorTree &DT)
+      : SCEVRewriteVisitor(SE), L(L) {
+    if (!L->getParentLoop())
+      return;
+    SmallVector<Value *, 16> Work{Index};
+    SmallPtrSet<Value *, 32> Visited;
+    unsigned Budget = 256;
+    while (!Work.empty()) {
+      Value *V = Work.pop_back_val();
+      if (!Visited.insert(V).second)
+        continue;
+      if (Visited.size() > 64) {
+        Valid = false;
+        return;
+      }
+      if (!V->getType()->isIntegerTy())
+        continue;
+      auto *I = dyn_cast<Instruction>(V);
+      if (I && !takeGraphOperands(I->getNumOperands(), Budget)) {
+        Valid = false;
+        return;
+      }
+      if (L->isLoopInvariant(V) && (!I || DT.dominates(I, At)) &&
+          isDefinedInvariantAt(V, At, AC, DT, Budget))
+        Available.try_emplace(SE.getSCEV(V), V);
+      if (I)
+        for (Value *Op : I->operands())
+          Work.push_back(Op);
+    }
+  }
+
+  const SCEV *visit(const SCEV *S) {
+    if (!Valid)
+      return S;
+    if (Seen.insert(S).second) {
+      unsigned Operands = isa<SCEVCastExpr>(S) ? 1 : 0;
+      if (auto *Expr = dyn_cast<SCEVNAryExpr>(S))
+        Operands = Expr->getNumOperands();
+      if (Seen.size() > 64 || !takeGraphOperands(Operands, RewriteBudget)) {
+        Valid = false;
+        return S;
+      }
+    }
+    // Limit recursive rewriting to the same pure expressions accepted by
+    // isDefinedStart. In particular, do not speculate divisions or min/max.
+    if (!isa<SCEVConstant, SCEVUnknown, SCEVCastExpr, SCEVAddExpr, SCEVMulExpr,
+             SCEVAddRecExpr>(S)) {
+      Valid = false;
+      return S;
+    }
+    return SCEVRewriteVisitor::visit(S);
+  }
+
+  const SCEV *visitAddRecExpr(const SCEVAddRecExpr *AR) {
+    auto It = Available.find(AR);
+    if (AR->getLoop() == L || !AR->getLoop()->contains(L) ||
+        !SE.isLoopInvariant(AR, L) || It == Available.end()) {
+      Valid = false;
+      return AR;
+    }
+    return SE.getUnknown(It->second);
+  }
+
+  bool isValid() const { return Valid; }
+};
 
 Value *getLength(Value *V, Loop *L, DominatorTree &DT, AssumptionCache &AC,
                  Instruction *At) {
@@ -306,13 +477,15 @@ void collectRangeCheck(ICmpInst *Cmp, bool Success, Loop *L,
     const auto *AR = dyn_cast<SCEVAddRecExpr>(SE.getSCEV(V));
     if (!AR || AR->getLoop() != L || !AR->isAffine())
       return;
-    const SCEV *Step = AR->getStepRecurrence(SE);
-    if (!isDefinedStart(AR->getStart(), L, At, AC, DT) ||
+    DefinedStartRewriter Rewriter(V, L, At, SE, AC, DT);
+    const SCEV *Start = Rewriter.visit(AR->getStart());
+    const SCEV *Step = Rewriter.visit(AR->getStepRecurrence(SE));
+    if (!Rewriter.isValid() || !isDefinedStart(Start, L, At, AC, DT) ||
         !isDefinedStart(Step, L, At, AC, DT) ||
-        !Expander.isSafeToExpandAt(AR->getStart(), At) ||
+        !Expander.isSafeToExpandAt(Start, At) ||
         !Expander.isSafeToExpandAt(Step, At))
       return;
-    Ranges.push_back({Cmp, AR->getStart(), Step, Length, Success});
+    Ranges.push_back({Cmp, V, Start, Step, Length, Success});
   }
   // Bound both entry work and the number of conditions removed per version.
   if (Checks.size() + Ranges.size() <= 8)
@@ -413,7 +586,7 @@ std::optional<VersionPlan> planVersion(Loop *L, ScalarEvolution &SE,
       !L->isLoopInvariant(Limit) || Init->getType() != Limit->getType() ||
       !isDefinedAt(Init, At, AC, DT) || !isDefinedAt(Limit, At, AC, DT))
     return std::nullopt;
-  VersionPlan Plan{L, Init, Limit, *Step, Pred, {}, {}, {}};
+  VersionPlan Plan{L, IV, Init, Limit, *Step, Pred, {}, {}, {}};
   SCEVExpander Expander(SE, "affine");
   for (BasicBlock *BB : L->blocks()) {
     auto *Check = dyn_cast<BranchInst>(BB->getTerminator());
@@ -444,6 +617,56 @@ std::optional<VersionPlan> planVersion(Loop *L, ScalarEvolution &SE,
           Plan.Exits.push_back(
               {&Phi, Phi.getIncomingValue(I), Phi.getIncomingBlock(I)});
   return Plan;
+}
+
+void widenCheckedIndexUses(const VersionPlan &Plan,
+                           ArrayRef<ExpandedRange> Ranges,
+                           ScalarEvolution &SE) {
+  Loop *L = Plan.L;
+  // The entry guard bounds each final index, even when its intermediate
+  // arithmetic wraps. Expand its wide recurrence without widening those
+  // intermediate operations or changing Java/deopt uses of the narrow value.
+  SCEVExpander WideIndices(SE, "affine.index");
+  SmallPtrSet<Instruction *, 16> Widened;
+  for (const RangeCheck &Check : Plan.Checks) {
+    // Preserve the controller's extension so standard IndVars can widen
+    // its control and address uses together, without a separate recurrence.
+    if (Check.Index == Plan.IV)
+      continue;
+
+    const ExpandedRange *Range = nullptr;
+    for (const ExpandedRange &R : Ranges)
+      if (R.Check->Start == Check.Start && R.Check->Step == Check.Step &&
+          R.Check->Length == Check.Length) {
+        Range = &R;
+        break;
+      }
+    assert(Range && "checked range must have been expanded");
+    SmallVector<CastInst *, 4> Extensions;
+    for (User *U : Check.Index->users())
+      if (auto *Cast = dyn_cast<CastInst>(U))
+        if (L->contains(Cast) && (isa<ZExtInst>(Cast) || isa<SExtInst>(Cast)) &&
+            Cast->getType()->getIntegerBitWidth() <= 64 &&
+            Widened.insert(Cast).second)
+          Extensions.push_back(Cast);
+    for (CastInst *Cast : Extensions) {
+      Type *Ty = Cast->getType();
+      // Pin available SSA values: deriving an outer recurrence again could
+      // change a modular start that was proved using its existing value.
+      auto Pinned = [&](Value *V) -> const SCEV * {
+        if (auto *C = dyn_cast<ConstantInt>(V))
+          return SE.getConstant(C->getValue());
+        return SE.getUnknown(V);
+      };
+      const SCEV *Start = SE.getZeroExtendExpr(Pinned(Range->First), Ty);
+      const SCEV *Step = SE.getSignExtendExpr(Pinned(Range->Step), Ty);
+      const SCEV *Wide = SE.getAddRecExpr(Start, Step, L, SCEV::FlagAnyWrap);
+      if (!WideIndices.isSafeToExpandAt(Wide, Cast))
+        continue;
+      Value *Replacement = WideIndices.expandCodeFor(Wide, Ty, Cast);
+      Cast->replaceAllUsesWith(Replacement);
+    }
+  }
 }
 
 void applyVersion(VersionPlan &Plan, ScalarEvolution &SE, DominatorTree &DT,
@@ -558,6 +781,8 @@ void applyVersion(VersionPlan &Plan, ScalarEvolution &SE, DominatorTree &DT,
   IRBuilder<> Entry(OldTerm);
   Entry.CreateCondBr(Guard, FastPH, Slow->getLoopPreheader());
   OldTerm->eraseFromParent();
+  if (WidenCheckedIndices)
+    widenCheckedIndexUses(Plan, Ranges, SE);
   for (const CheckCondition &Condition : Plan.Conditions) {
     DenseMap<Value *, Value *> Replacements;
     for (const RangeCheck &Check : Plan.Checks)

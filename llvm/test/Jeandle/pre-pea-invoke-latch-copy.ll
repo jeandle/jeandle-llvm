@@ -1,3 +1,4 @@
+; REQUIRES: x86-registered-target
 ; RUN: opt -S --jeandle --print-pipeline-passes %s 2>&1 | FileCheck %s --check-prefix=PIPELINE
 ; RUN: opt -S -passes='java-op-length-folding,loop-simplify,break-crit-edges,loop(loop-rotate,indvars,loop-deletion),loop-unroll<O3;no-partial;no-runtime;no-upperbound;full-unroll-max=128>,instcombine,simplifycfg,partial-escape-iterative' -jeandle-vm-callback-log=%S/partial-escape/Inputs/773_copy_fold_concrete_src.cblog -verify-each %s | FileCheck %s
 ; RUN: opt -S -passes='java-op-length-folding,loop-simplify,loop(loop-rotate,indvars,loop-deletion),loop-unroll<O3;no-partial;no-runtime;no-upperbound;full-unroll-max=128>,instcombine,simplifycfg,partial-escape-iterative' -jeandle-vm-callback-log=%S/partial-escape/Inputs/773_copy_fold_concrete_src.cblog -verify-each %s | FileCheck %s --check-prefix=UNSPLIT

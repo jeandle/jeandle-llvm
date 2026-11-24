@@ -25,6 +25,11 @@ public:
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM);
 };
 
+class NullCheckElimination : public PassInfoMixin<NullCheckElimination> {
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM);
+};
+
 } // namespace llvm
 
 #endif

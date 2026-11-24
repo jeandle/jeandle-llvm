@@ -1,0 +1,2 @@
+# REQUIRES: native
+# RUN: %python %S/Inputs/affine-outer-semantics.py %llvmshlibdir/../bin/opt %llvmshlibdir/../bin/lli %t
