@@ -286,11 +286,15 @@ u:
   resume i64 %lp
 }
 
-; The raw byte-pair access cost exceeds the budget at 64. Keep the native
-; operation rather than retaining a scalar loop after unsuccessful expansion.
+; The byte-pair expansion cost exceeds the budget at 64. PEA consumes the
+; virtual fields directly, without constructing an encoding loop.
 ; CHECK-LABEL: @utf1664(
-; CHECK: @jeandle.new_array
-; CHECK: call hotspotcc i32 @jeandle.encode_array
+; CHECK-NOT: call
+; CHECK-NOT: invoke
+; CHECK: zext i8 %value to i32
+; CHECK: add {{.*}}i32 {{.*}}, 64
+; CHECK-NOT: call
+; CHECK-NOT: invoke
 ; CHECK: ret i32
 define i32 @utf1664(i8 %value) gc "hotspotgc" personality ptr @personality {
 entry:

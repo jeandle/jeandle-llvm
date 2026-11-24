@@ -5,16 +5,13 @@ declare hotspotcc ptr addrspace(1) @jeandle.new_array(ptr, i32, i32, i32, i32, i
 declare hotspotcc i32 @jeandle.encode_array(ptr addrspace(1), i32, ptr addrspace(1), i32, i32, i1, i1)
 declare i32 @personality(...)
 
-; The first cell can be encoded but the second is symbolic. The attempted
-; virtual transaction must leave both arrays and all reaching stores available
-; to the surviving JavaOp, including the untouched packed destination byte.
+; A symbolic second character is handled without materializing either array.
+; The packed destination retains its second byte when that character fails.
 ; CHECK-LABEL: @symbolic_rollback(
-; CHECK: @jeandle.new_array
-; CHECK: @jeandle.new_array
-; CHECK-DAG: store atomic i16 65
-; CHECK-DAG: store atomic i16 %value
-; CHECK-DAG: store atomic i16 1799
-; CHECK: call hotspotcc i32 @jeandle.encode_array
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.encode_array
+; CHECK: icmp ult i16 %value, 128
+; CHECK: select
 ; CHECK: ret i32
 define i32 @symbolic_rollback(i16 %value) gc "hotspotgc" personality ptr @personality {
 entry:
@@ -39,7 +36,7 @@ u:
 }
 
 ; A material source cannot be folded into a virtual destination by the
-; constant-only consumer. The destination must be available to the call.
+; virtual-field consumer. The destination must be available to the call.
 ; CHECK-LABEL: @mixed(
 ; CHECK: @jeandle.new_array
 ; CHECK: store atomic i8 7

@@ -60,11 +60,13 @@
 #include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
@@ -85,6 +87,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/KnownBits.h"
 
 #include <limits>
 #include <unordered_map>
@@ -7979,75 +7982,82 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
       V = Alias;
     return stringConstantInt(V);
   };
-  auto Finish = [&](int32_t V, ObjectID Owner) {
-    observeFieldDefinitions(Left, FieldDefinitions);
-    observeFieldDefinitions(Right, FieldDefinitions);
-    // The destination owns the call elision. If its fold is cancelled, the
-    // reader must see the source's stores at the call, before any replay.
-    MemoryFoldVirtualSources.emplace_back(Left, Owner);
-    emitReplaceCall(CB,
-                    CB->getType()->isVoidTy()
-                        ? nullptr
-                        : ConstantInt::getSigned(CB->getType(), V),
-                    Owner);
-    return true;
-  };
-  if (!N(1) || !N(3) || !N(4) || *N(4) > StringScalarLimit ||
+  // Encoding consumes virtual fields without introducing per-character CFG.
+  // Its work is bounded by the existing virtual-array limit; the separate
+  // String and control-flow expansion limits remain unchanged.
+  unsigned Limit = PrefixResult ? MaximumEscapeAnalysisArrayLength.getValue()
+                                : StringScalarLimit;
+  if (!N(1) || !N(3) || !N(4) || *N(4) > Limit ||
       !stringArrayRange(Left, *N(1), *N(4), SrcUTF16, SrcChar) ||
       !stringArrayRange(Right, *N(3), *N(4), DstUTF16, DstChar) ||
       Left == Right)
     return false;
-  struct Write {
-    int64_t Offset;
-    ConstantInt *Value;
-  };
-  SmallVector<Write, 32> Writes;
-  auto AddWrite = [&](int64_t Offset, unsigned Bits, unsigned V) {
-    Writes.push_back(
-        {Offset, ConstantInt::get(Type::getIntNTy(F.getContext(), Bits), V)});
-  };
-  int32_t Return = *N(4);
+
+  const VirtualObject &Src = *Result.VirtualObjects[Left];
   const VirtualObject &Dst = *Result.VirtualObjects[Right];
+  struct CellRead {
+    int64_t Offset;
+    bool BytePair;
+  };
+  SmallVector<CellRead, 32> Reads;
+  int64_t WriteCount = *N(4);
+  unsigned SrcBits = SrcUTF16 ? 16 : 8;
   for (int64_t I = 0; I < *N(4); ++I) {
-    auto *C = dyn_cast_or_null<ConstantInt>(
-        readStringElement(Left, *N(1) + I, SrcUTF16, SrcChar));
-    if (!C)
+    int64_t Offset = Src.ArrayBaseOffset + (*N(1) + I) * (SrcUTF16 ? 2 : 1);
+    bool BytePair = false;
+    std::optional<unsigned> ConstantChar;
+    Value *Cell = readStringCell(Left, Offset, SrcBits, nullptr,
+                                 /*ValidateOnly=*/true);
+    if (!Cell) {
+      if (!SrcUTF16 || SrcChar)
+        return false;
+      Value *First = readStringCell(Left, Offset, 8, nullptr, true);
+      Value *Second = readStringCell(Left, Offset + 1, 8, nullptr, true);
+      if (!First || !Second)
+        return false;
+      auto *L = dyn_cast<ConstantInt>(DL.isLittleEndian() ? First : Second);
+      auto *H = dyn_cast<ConstantInt>(DL.isLittleEndian() ? Second : First);
+      if (L && H)
+        ConstantChar = L->getZExtValue() | (H->getZExtValue() << 8);
+      BytePair = true;
+    } else if (auto *C = dyn_cast<ConstantInt>(Cell)) {
+      ConstantChar = C->getZExtValue();
+    }
+    if (!PrefixResult && !ConstantChar)
       return false;
-    unsigned V = C->getZExtValue();
-    if (MaxChar && V > *MaxChar) {
-      Return = PrefixResult ? I : 0;
+    Reads.push_back({Offset, BytePair});
+    // Unread source cells and unwritten destination cells impose no layout
+    // requirements once a constant character ends the conversion.
+    if (MaxChar && ConstantChar && *ConstantChar > *MaxChar) {
+      WriteCount = I;
       break;
     }
-    int64_t Offset = Dst.ArrayBaseOffset + (*N(3) + I) * (DstUTF16 ? 2 : 1);
-    if (!DstUTF16 || DstChar)
-      AddWrite(Offset, DstUTF16 ? 16 : 8, V);
-    else {
-      AddWrite(Offset, 8, DL.isLittleEndian() ? V & 255 : V >> 8);
-      AddWrite(Offset + 1, 8, DL.isLittleEndian() ? V >> 8 : V & 255);
-    }
   }
-  // Build a transaction against the active spans. Each write updates complete
-  // physical elements, while a containing packed group retains its untouched
-  // bits. No abstract state or instruction effects change until validation is
-  // complete, including the prefix written by an unsuccessful compression.
+
+  // Validate the complete transaction before observing definitions or placing
+  // effects. Packed destination groups retain all bits outside written cells,
+  // including cells following a dynamically determined failing character.
   struct GroupWrite {
     int64_t Offset;
     Value *OldValue;
-    APInt Mask;
-    APInt Bits;
+    unsigned Bits;
+  };
+  struct CellWrite {
+    unsigned Group;
+    unsigned Shift;
+    unsigned WriteShift;
   };
   SmallVector<GroupWrite, 32> Groups;
+  SmallVector<CellWrite, 32> Writes;
   DenseMap<int64_t, unsigned> GroupIndices;
   auto Fields = activeFields(Dst, FieldStates[Right], DL);
   unsigned CellBits = Dst.ArrayIndexScale * 8;
   if (!CellBits || !hasPrimitiveArrayGroups(Dst))
     return false;
-  for (const Write &W : Writes) {
-    unsigned WriteBits = W.Value->getBitWidth();
-    if (WriteBits % CellBits)
-      return false;
-    for (unsigned Byte = 0; Byte < WriteBits / 8; Byte += Dst.ArrayIndexScale) {
-      int64_t Offset = W.Offset + Byte;
+  unsigned DstBytes = DstUTF16 ? 2 : 1;
+  for (int64_t I = 0; I < WriteCount; ++I) {
+    for (unsigned Byte = 0; Byte < DstBytes; Byte += Dst.ArrayIndexScale) {
+      int64_t Offset = Dst.ArrayBaseOffset + (*N(3) + I) * DstBytes + Byte;
       int64_t GroupOffset = Offset;
       unsigned GroupBits = CellBits;
       Value *OldValue = nullptr;
@@ -8068,7 +8078,8 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
           OldValue = Alias;
         GroupOffset = Field.Offset;
         GroupBits = Field.ByteSize * 8;
-        if (!CastInst::isBitCastable(
+        if (isa<UndefValue>(OldValue) ||
+            !CastInst::isBitCastable(
                 OldValue->getType(),
                 Type::getIntNTy(F.getContext(), GroupBits)))
           return false;
@@ -8077,59 +8088,93 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
       auto [It, Inserted] =
           GroupIndices.try_emplace(GroupOffset, Groups.size());
       if (Inserted)
-        Groups.push_back(
-            {GroupOffset, OldValue, APInt(GroupBits, 0), APInt(GroupBits, 0)});
-      GroupWrite &G = Groups[It->second];
+        Groups.push_back({GroupOffset, OldValue, GroupBits});
       unsigned Shift = DL.isLittleEndian()
                            ? (Offset - GroupOffset) * 8
                            : GroupBits - (Offset - GroupOffset) * 8 - CellBits;
       unsigned WriteShift =
-          DL.isLittleEndian() ? Byte * 8 : WriteBits - Byte * 8 - CellBits;
-      APInt Mask = APInt::getBitsSet(GroupBits, Shift, Shift + CellBits);
-      APInt Bits = W.Value->getValue()
-                       .extractBits(CellBits, WriteShift)
-                       .zext(GroupBits)
-                       .shl(Shift);
-      G.Mask |= Mask;
-      G.Bits = (G.Bits & ~Mask) | Bits;
+          DL.isLittleEndian() ? Byte * 8 : DstBytes * 8 - Byte * 8 - CellBits;
+      Writes.push_back({It->second, Shift, WriteShift});
     }
   }
-  for (const GroupWrite &G : Groups)
-    if (!G.Mask.isAllOnes() && isa_and_nonnull<UndefValue>(G.OldValue))
-      return false;
 
+  // The preflight succeeded. All generated instructions are deferred effects,
+  // so the analysis never changes the IR it is traversing.
+  IRBuilder<ConstantFolder, IRBuilderCallbackInserter> B(
+      F.getContext(), ConstantFolder(),
+      IRBuilderCallbackInserter(
+          [&](Instruction *I) { placeStringInstruction(I, CB); }));
+  SmallVector<Value *, 32> Values(Groups.size(), nullptr);
+  Value *Active = B.getTrue();
+  Value *Prefix = B.getInt32(*N(4));
   observeFieldDefinitions(Left, FieldDefinitions);
   observeFieldDefinitions(Right, FieldDefinitions);
-  for (const GroupWrite &G : Groups) {
-    Type *Ty = Type::getIntNTy(F.getContext(), G.Mask.getBitWidth());
-    Value *V = ConstantInt::get(Ty, G.Bits);
-    if (!G.Mask.isAllOnes() && G.OldValue) {
-      if (auto *C = dyn_cast<Constant>(G.OldValue)) {
-        Constant *Old =
-            ConstantFoldCastOperand(Instruction::BitCast, C, Ty, DL);
-        Old = ConstantFoldBinaryOpOperands(Instruction::And, Old,
-                                           ConstantInt::get(Ty, ~G.Mask), DL);
-        V = ConstantFoldBinaryOpOperands(Instruction::Or, Old,
-                                         cast<Constant>(V), DL);
-      } else {
-        Value *Old = G.OldValue;
-        if (Old->getType() != Ty)
-          Old = placeStringInstruction(new BitCastInst(Old, Ty, "string.bits"),
-                                       CB);
-        Old = placeStringInstruction(
-            BinaryOperator::CreateAnd(Old, ConstantInt::get(Ty, ~G.Mask),
-                                      "string.keep"),
-            CB);
-        V = placeStringInstruction(
-            BinaryOperator::CreateOr(Old, V, "string.write"), CB);
-      }
+  for (unsigned I = 0; I < Reads.size(); ++I) {
+    const CellRead &Read = Reads[I];
+    Value *C;
+    if (!Read.BytePair) {
+      C = readStringCell(Left, Read.Offset, SrcBits, CB);
+    } else {
+      Value *First = readStringCell(Left, Read.Offset, 8, CB);
+      Value *Second = readStringCell(Left, Read.Offset + 1, 8, CB);
+      Value *Low =
+          B.CreateZExt(DL.isLittleEndian() ? First : Second, B.getInt16Ty());
+      Value *High =
+          B.CreateZExt(DL.isLittleEndian() ? Second : First, B.getInt16Ty());
+      C = B.CreateOr(Low, B.CreateShl(High, 8), "string.word");
     }
-    FieldStates[Right][G.Offset] = FieldValue::scalar(V);
-    // Retaining the JavaOp also retains its reaching destination stores;
-    // together they supply the updated group if virtualization is cancelled.
-    FieldDefinitions[Right][G.Offset].clear();
+    assert(C && "prevalidated conversion cell must be readable");
+    if (MaxChar) {
+      KnownBits Known = computeKnownBits(C, DL);
+      Value *Fits;
+      if (Known.getMaxValue().ule(*MaxChar))
+        Fits = B.getTrue();
+      else if (Known.getMinValue().ugt(*MaxChar))
+        Fits = B.getFalse();
+      else
+        Fits = B.CreateICmpULE(C, ConstantInt::get(C->getType(), *MaxChar),
+                               "string.encodable");
+      Prefix = B.CreateSelect(B.CreateAnd(Active, B.CreateNot(Fits)),
+                              B.getInt32(I), Prefix, "string.prefix");
+      if (auto *K = dyn_cast<ConstantInt>(Fits); K && K->isZero()) {
+        Active = B.getFalse();
+        break;
+      }
+      Active = B.CreateAnd(Active, Fits, "string.active");
+    }
+    C = B.CreateZExtOrTrunc(C, B.getIntNTy(DstBytes * 8));
+    for (unsigned J = 0; J < DstBytes / Dst.ArrayIndexScale; ++J) {
+      const CellWrite &W = Writes[I * (DstBytes / Dst.ArrayIndexScale) + J];
+      const GroupWrite &G = Groups[W.Group];
+      Type *Ty = B.getIntNTy(G.Bits);
+      Value *&Old = Values[W.Group];
+      if (!Old)
+        Old = G.OldValue ? B.CreateBitCast(G.OldValue, Ty)
+                         : ConstantInt::get(Ty, 0);
+      Value *Part = W.WriteShift ? B.CreateLShr(C, W.WriteShift) : C;
+      Part = B.CreateTruncOrBitCast(Part, B.getIntNTy(CellBits));
+      Part = B.CreateZExtOrTrunc(Part, Ty);
+      Part = B.CreateShl(Part, W.Shift);
+      APInt Mask = APInt::getBitsSet(G.Bits, W.Shift, W.Shift + CellBits);
+      Value *Updated = B.CreateOr(B.CreateAnd(Old, ConstantInt::get(Ty, ~Mask)),
+                                  Part, "string.write");
+      Old = B.CreateSelect(Active, Updated, Old, "string.partial");
+    }
   }
-  return Finish(Return, Right);
+  for (unsigned I = 0; I < Groups.size(); ++I) {
+    if (!Values[I])
+      continue;
+    FieldStates[Right][Groups[I].Offset] = FieldValue::scalar(Values[I]);
+    // A retained JavaOp and its reaching stores supply these fields if final
+    // eligibility cancels the fold.
+    FieldDefinitions[Right][Groups[I].Offset].clear();
+  }
+  MemoryFoldVirtualSources.emplace_back(Left, Right);
+  Value *Return =
+      PrefixResult ? Prefix
+                   : B.CreateSelect(Active, B.getInt32(*N(4)), B.getInt32(0));
+  emitReplaceCall(CB, CB->getType()->isVoidTy() ? nullptr : Return, Right);
+  return true;
 }
 
 bool Analyzer::foldCharacterIntrinsic(CallBase *CB) {

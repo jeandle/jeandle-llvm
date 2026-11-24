@@ -180,3 +180,28 @@ u:
 }
 
 !java-method-compilation = !{}
+
+; No character following a known failure is consumed. In particular, a
+; symbolic suffix must not force the source and destination to materialize.
+; CHECK-LABEL: @known_invalid_prefix(
+; CHECK-NOT: @jeandle.new_array
+; CHECK-NOT: @jeandle.string_compress
+; CHECK: ret i32 0
+ define i32 @known_invalid_prefix(i16 %unknown) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+entry:
+ %a = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10002 to ptr), i32 2, i32 24, i32 16, i32 100, i1 false, i1 false) to label %next unwind label %u
+next:
+ %b = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10001 to ptr), i32 2, i32 24, i32 16, i32 100, i1 false, i1 false) to label %work unwind label %u
+work:
+ %p0 = getelementptr i8, ptr addrspace(1) %a, i64 16
+ %p1 = getelementptr i8, ptr addrspace(1) %a, i64 18
+ %bp = getelementptr i8, ptr addrspace(1) %b, i64 16
+ store atomic i16 256, ptr addrspace(1) %p0 unordered, align 2
+ store atomic i16 %unknown, ptr addrspace(1) %p1 unordered, align 2
+ store atomic i8 9, ptr addrspace(1) %bp unordered, align 1
+ %r = call i32 @jeandle.string_compress(ptr addrspace(1) %a, i32 0, ptr addrspace(1) %b, i32 0, i32 2, i1 false)
+ ret i32 %r
+u:
+ %lp = landingpad i64 cleanup
+ resume i64 %lp
+}
