@@ -268,6 +268,9 @@ enum class JeandleInlineReason : int {
   def(GetMirrorKlass, uintptr_t, Uintptr,                                        \
       (int a1), (a1),                                                            \
       (VMCallbackValueType::Int), 1)                                             \
+  def(GetMirrorArrayKlass, uintptr_t, Uintptr,                                   \
+      (int a1), (a1),                                                            \
+      (VMCallbackValueType::Int), 1)                                             \
   def(AreSameClassMirrors, int, Int,                                             \
       (int a1, int a2), (a1, a2),                                                \
       (VMCallbackValueType::Int, VMCallbackValueType::Int), 2)                   \
@@ -489,6 +492,10 @@ enum class JeandleInlineReason : int {
 ///                         mirror represents a primitive type. Returns
 ///                         MirrorKlassUnavailable for a non-mirror or an
 ///                         unavailable value. Pure (id -> represented klass).
+///   GetMirrorArrayKlass — For a constant Class mirror, resolves its array
+///                         Klass using the compiler interface. Returns 0 for
+///                         void and MirrorKlassUnavailable when unavailable.
+///                         Records the Klass in the compiled method metadata.
 ///   AreSameClassMirrors — Returns 1 when two constant Class mirrors are the
 ///                         same object, 0 when they differ, or -1 if either
 ///                         oop id is not a known Class mirror.

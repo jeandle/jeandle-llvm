@@ -346,10 +346,11 @@ bool isJeandleCallNamed(const CallBase *CB, StringRef Name);
 bool isJeandleNewInstance(const CallBase *CB);
 bool isJeandleNewArray(const CallBase *CB);
 bool isJeandleAllocation(const CallBase *CB); // either of the above
-// jeandle.new_array carries (klass, length, size, header, limit) plus two
-// trailing i1 uninitialized/deferred-publication flags; a tightly coupled
-// initializer that overwrites the payload before the array escapes sets
-// them, plain allocations pass false. The length is operand index 1.
+// jeandle.new_array carries (klass, length, size, clear-start, limit) plus two
+// trailing i1 uninitialized/deferred-publication flags. Clear-start normally
+// equals the header size. Post-PEA partial initialization may advance it with
+// uninitialized=false and deferred=true; full initialization may set both
+// flags. Plain allocations pass false for both. The length is operand index 1.
 bool isJeandleNewArrayCall(const CallBase *CB);
 Value *getJeandleNewArrayLength(const CallBase *CB);
 bool isJeandleArrayLength(const CallBase *CB);
