@@ -8134,13 +8134,15 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
       else
         Fits = B.CreateICmpULE(C, ConstantInt::get(C->getType(), *MaxChar),
                                "string.encodable");
-      Prefix = B.CreateSelect(B.CreateAnd(Active, B.CreateNot(Fits)),
-                              B.getInt32(I), Prefix, "string.prefix");
+      // Inactive suffix cells are not observed by the conversion. Mask their
+      // predicates as well as their writes so poison cannot escape the suffix.
+      Value *Failed = B.CreateSelect(Active, B.CreateNot(Fits), B.getFalse());
+      Prefix = B.CreateSelect(Failed, B.getInt32(I), Prefix, "string.prefix");
       if (auto *K = dyn_cast<ConstantInt>(Fits); K && K->isZero()) {
         Active = B.getFalse();
         break;
       }
-      Active = B.CreateAnd(Active, Fits, "string.active");
+      Active = B.CreateSelect(Active, Fits, B.getFalse(), "string.active");
     }
     C = B.CreateZExtOrTrunc(C, B.getIntNTy(DstBytes * 8));
     for (unsigned J = 0; J < DstBytes / Dst.ArrayIndexScale; ++J) {
