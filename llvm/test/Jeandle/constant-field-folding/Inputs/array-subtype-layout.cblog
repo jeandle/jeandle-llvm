@@ -1,0 +1,25 @@
+# Object[] and String[] have the same reference-element layout; their
+# non-exact type information must not replace the actual dynamic Klass.
+IsInterface 201 = false
+GetSecondarySupers 201 = []
+GetKlassConstant 201 = 201000
+GetKlassLayoutHelper 201000 = -2146435070
+IsInterface 202 = false
+GetSecondarySupers 202 = []
+GetKlassConstant 202 = 202000
+GetKlassLayoutHelper 202000 = -2146435070
+# A subtype of this ordinary instance klass may have a different size.
+IsInterface 203 = false
+GetSecondarySupers 203 = []
+GetKlassConstant 203 = 203000
+GetKlassLayoutHelper 203000 = 24
+# Cloneable is an interface implemented by arrays and by ordinary classes.
+IsInterface 204 = true
+GetSecondarySupers 204 = []
+GetKlassConstant 204 = 204000
+GetKlassLayoutHelper 204000 = 0
+# Primitive int[] layout is also stable, with a distinct type-array tag.
+IsInterface 205 = false
+GetSecondarySupers 205 = []
+GetKlassConstant 205 = 205000
+GetKlassLayoutHelper 205000 = -1072693246

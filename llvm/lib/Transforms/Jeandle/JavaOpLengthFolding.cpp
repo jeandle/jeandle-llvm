@@ -47,14 +47,19 @@
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ValueHandle.h"
+#include "llvm/Transforms/Utils/Local.h"
 
 #define DEBUG_TYPE "jeandle-java-op-length-folding"
 
@@ -81,7 +86,8 @@ static constexpr unsigned MaxResolveDepth = 16;
 
 static ResolveResult resolveArrayLength(Value *V, const DataLayout &DL,
                                         unsigned Depth,
-                                        SmallPtrSetImpl<Value *> &Active) {
+                                        SmallPtrSetImpl<Value *> &Active,
+                                        SmallPtrSetImpl<Value *> &Allocations) {
   if (Depth > MaxResolveDepth)
     return {ResolveKind::Conflict, nullptr};
 
@@ -98,8 +104,10 @@ static ResolveResult resolveArrayLength(Value *V, const DataLayout &DL,
     return {ResolveKind::Conflict, nullptr};
 
   if (auto *CB = dyn_cast<CallBase>(Root)) {
-    if (Value *Length = jeandle::pea::getJeandleNewArrayLength(CB))
+    if (Value *Length = jeandle::pea::getJeandleNewArrayLength(CB)) {
+      Allocations.insert(CB);
       return {ResolveKind::Resolved, Length};
+    }
     return {ResolveKind::Conflict, nullptr};
   }
 
@@ -126,7 +134,8 @@ static ResolveResult resolveArrayLength(Value *V, const DataLayout &DL,
   for (Value *Inc : Incomings) {
     if (Inc == Root)
       continue; // self-edge adds no new value
-    ResolveResult R = resolveArrayLength(Inc, DL, Depth + 1, Active);
+    ResolveResult R =
+        resolveArrayLength(Inc, DL, Depth + 1, Active, Allocations);
     if (R.Kind == ResolveKind::Conflict) {
       Acc = R;
       break;
@@ -142,6 +151,86 @@ static ResolveResult resolveArrayLength(Value *V, const DataLayout &DL,
   }
   Active.erase(Root);
   return Acc;
+}
+
+// Dead pointer wrappers can keep an otherwise unused allocation alive after
+// folding. Bound the walk, and leave live merges (including deopt uses) alone.
+static void removeDeadWrappers(CallBase &Allocation) {
+  SmallVector<WeakTrackingVH, 16> Worklist{&Allocation};
+  SmallPtrSet<Value *, 32> Seen;
+  Seen.insert(&Allocation);
+  for (unsigned I = 0; I < Worklist.size() && Worklist.size() < 64; ++I) {
+    Value *V = Worklist[I];
+    for (User *U : V->users()) {
+      auto *Inst = dyn_cast<Instruction>(U);
+      if (Inst && Inst->getType()->isPointerTy() &&
+          (isa<CastInst>(Inst) || isa<GetElementPtrInst>(Inst) ||
+           isa<FreezeInst>(Inst) || isa<PHINode>(Inst) ||
+           isa<SelectInst>(Inst)) &&
+          Seen.insert(Inst).second) {
+        Worklist.push_back(Inst);
+        if (Worklist.size() == 64)
+          break;
+      }
+    }
+  }
+  for (const WeakTrackingVH &H : reverse(Worklist)) {
+    auto *I = dyn_cast_or_null<Instruction>(H);
+    if (I && I != &Allocation && isInstructionTriviallyDead(I))
+      I->eraseFromParent();
+  }
+}
+
+static bool canRemoveUnusedArray(CallBase &CB) {
+  if (!CB.use_empty() || !jeandle::pea::isJeandleNewArrayCall(&CB) ||
+      (!isa<CallInst>(CB) && !isa<InvokeInst>(CB)) ||
+      !CB.getType()->isPointerTy() ||
+      CB.getType()->getPointerAddressSpace() != 1 ||
+      !CB.getArgOperand(0)->getType()->isPointerTy())
+    return false;
+  for (unsigned I = 1; I != 5; ++I)
+    if (!CB.getArgOperand(I)->getType()->isIntegerTy(32))
+      return false;
+  auto *Uninitialized = dyn_cast<ConstantInt>(CB.getArgOperand(5));
+  auto *Deferred = dyn_cast<ConstantInt>(CB.getArgOperand(6));
+  if (!Uninitialized || !Uninitialized->getType()->isIntegerTy(1) ||
+      !Deferred || !Deferred->getType()->isIntegerTy(1) || !Deferred->isZero())
+    return false;
+  auto Element = jeandle::elementTypeForArrayKlass(
+      jeandle::pea::extractAllocationKlass(&CB));
+  return Element != jeandle::JBasicType::Count &&
+         (Uninitialized->isZero() || Element != jeandle::JBasicType::Object);
+}
+
+// Keep the original call, BCI, bundles and exception edge for negative lengths.
+// The new edge bypasses only an allocation whose object has no remaining uses.
+static void bypassUnusedArray(CallBase &CB, bool NonNegative) {
+  if (NonNegative) {
+    if (auto *II = dyn_cast<InvokeInst>(&CB)) {
+      II->getUnwindDest()->removePredecessor(II->getParent());
+      BranchInst::Create(II->getNormalDest(), II->getIterator());
+    }
+    CB.eraseFromParent();
+    return;
+  }
+
+  BasicBlock *Before = CB.getParent();
+  BasicBlock *Slow =
+      Before->splitBasicBlock(CB.getIterator(), "arraylength.negative_length");
+  BasicBlock *Normal;
+  if (auto *II = dyn_cast<InvokeInst>(&CB)) {
+    Normal = II->getNormalDest();
+    for (PHINode &PN : Normal->phis())
+      PN.addIncoming(PN.getIncomingValueForBlock(Slow), Before);
+  } else {
+    Normal = Slow->splitBasicBlock(std::next(CB.getIterator()),
+                                   "arraylength.continue");
+  }
+  IRBuilder<> B(Before->getTerminator());
+  Value *Negative = B.CreateICmpSLT(CB.getArgOperand(1), B.getInt32(0),
+                                    "arraylength.is_negative");
+  B.CreateCondBr(Negative, Slow, Normal);
+  Before->getTerminator()->eraseFromParent();
 }
 
 } // end anonymous namespace
@@ -165,6 +254,8 @@ PreservedAnalyses JavaOpLengthFolding::run(Function &F,
     WeakTrackingVH Len;
   };
   SmallVector<Fold, 8> Folds;
+  SmallVector<WeakTrackingVH, 8> Candidates;
+  SmallPtrSet<Value *, 16> CandidateSet;
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
       auto *CB = dyn_cast<CallBase>(&I);
@@ -176,8 +267,9 @@ PreservedAnalyses JavaOpLengthFolding::run(Function &F,
         continue;
 
       SmallPtrSet<Value *, 8> Active;
-      ResolveResult R =
-          resolveArrayLength(CB->getArgOperand(0), DL, /*Depth=*/0, Active);
+      SmallPtrSet<Value *, 8> Allocations;
+      ResolveResult R = resolveArrayLength(CB->getArgOperand(0), DL,
+                                           /*Depth=*/0, Active, Allocations);
       if (R.Kind != ResolveKind::Resolved)
         continue;
 
@@ -194,6 +286,9 @@ PreservedAnalyses JavaOpLengthFolding::run(Function &F,
           continue;
 
       Folds.push_back({CB, Len});
+      for (Value *Allocation : Allocations)
+        if (CandidateSet.insert(Allocation).second)
+          Candidates.push_back(Allocation);
     }
   }
 
@@ -222,6 +317,33 @@ PreservedAnalyses JavaOpLengthFolding::run(Function &F,
     } else {
       CB->replaceAllUsesWith(Len);
       CB->eraseFromParent();
+    }
+  }
+
+  // Finish all analysis queries before changing the allocation CFG. Length
+  // invokes above may already have removed edges, so refresh dominance first.
+  if (ChangedCFG)
+    DT.recalculate(F);
+  AssumptionCache &AC = FAM.getResult<AssumptionAnalysis>(F);
+  SmallVector<std::pair<WeakTrackingVH, bool>, 8> Unused;
+  for (const WeakTrackingVH &H : Candidates) {
+    auto *CB = dyn_cast_or_null<CallBase>(H);
+    if (!CB)
+      continue;
+    removeDeadWrappers(*CB);
+    if (!canRemoveUnusedArray(*CB))
+      continue;
+    Value *Length = CB->getArgOperand(1);
+    if (auto *C = dyn_cast<ConstantInt>(Length))
+      if (C->isNegative())
+        continue;
+    Unused.push_back(
+        {CB, isKnownNonNegative(Length, SimplifyQuery(DL, &DT, &AC, CB))});
+  }
+  for (auto &[H, NonNegative] : Unused) {
+    if (auto *CB = dyn_cast_or_null<CallBase>(H)) {
+      bypassUnusedArray(*CB, NonNegative);
+      ChangedCFG = true;
     }
   }
 

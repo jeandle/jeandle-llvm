@@ -108,6 +108,7 @@ struct VMConstants {
   bool ReduceBulkZeroing = true;
   // Standalone modules must opt in to the fresh-reference-copy GC policy.
   bool ReduceInitialCardMarks = false;
+  bool FreshArrayCopyRequiresGCBarriers = true;
 
   // Arraycopy optimization thresholds supplied by HotSpot VM flags.
   int64_t ArrayOperationPartialInlineSize = 0;
@@ -147,6 +148,9 @@ struct VMConstants {
   int64_t jvmAccWrittenFlags() const { return JvmAccWrittenFlags; }
   bool reduceBulkZeroing() const { return ReduceBulkZeroing; }
   bool reduceInitialCardMarks() const { return ReduceInitialCardMarks; }
+  bool freshArrayCopyRequiresGCBarriers() const {
+    return FreshArrayCopyRequiresGCBarriers;
+  }
 
   // Returns the array base offset for an element type. Returns -1 if Ty is not
   // a recognised Jeandle element type.
