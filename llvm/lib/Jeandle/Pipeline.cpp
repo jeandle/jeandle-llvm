@@ -25,6 +25,7 @@
 #include "llvm/Transforms/Jeandle/JeandleInliner.h"
 #include "llvm/Transforms/Jeandle/JeandleNarrowOopMarker.h"
 #include "llvm/Transforms/Jeandle/LibmIdentityFolding.h"
+#include "llvm/Transforms/Jeandle/LockCoarsening.h"
 #include "llvm/Transforms/Jeandle/NumericIntrinsicFolding.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeIterative.h"
 #include "llvm/Transforms/Jeandle/PartialEscapeTransform.h"
@@ -394,6 +395,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // Keep round semantic until inlining and high-tier propagation have exposed
   // exact integer inputs; unfold the remaining calls before general O3.
   PM.addPass(createModuleToFunctionPassAdaptor(NumericIntrinsicFoldingPass()));
+  // Monitor JavaOps are still opaque here, after inlining, PEA, and Java-level
+  // cleanup have exposed adjacent regions, but before JavaOperationLower(1)
+  // expands each enter/exit into its fast/slow CFG.
+  PM.addPass(createModuleToFunctionPassAdaptor(LockCoarsening()));
   PM.addPass(JavaOperationLower(1));
   PM.addPass(std::move(PB.buildPerModuleDefaultPipeline(Level)));
   // Second LibmIdentityFolding run: catch dpow exponents the O3 pipeline
