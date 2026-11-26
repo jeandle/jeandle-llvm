@@ -56,6 +56,7 @@
 #include "llvm/Analysis/Jeandle/DeoptPoolBundleLowering.h"
 #include "llvm/Analysis/Jeandle/DeoptPoolPlanner.h"
 #include "llvm/Analysis/Jeandle/JeandleAnalysisUtils.h"
+#include "llvm/Analysis/Jeandle/MonitorAnalysis.h"
 #include "llvm/Analysis/Jeandle/PartialEscape.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
 #include "llvm/Analysis/LazyValueInfo.h"
@@ -307,232 +308,6 @@ struct LockEnter {
 using FieldDefinitionSet = SmallDenseSet<StoreInst *, 2>;
 using FieldDefinitionMap =
     DenseMap<jeandle::ObjectID, DenseMap<int64_t, FieldDefinitionSet>>;
-
-// Function-wide monitor nesting reconstructed from the current LLVM CFG.
-// EnterRelativeDepth records the signed depth immediately before each
-// monitorenter. EntryDepth is normally zero; OSR roots may infer a uniform
-// nonnegative offset for interpreter-held monitors from their real exits.
-struct MonitorDepthInfo {
-  bool Valid = true;
-  DenseMap<CallBase *, int64_t> EnterRelativeDepth;
-  uint32_t EntryDepth = 0;
-};
-
-// True iff BB ends a compilation via deoptimization. A deopt continuation
-// never returns to compiled code, so it is not a "real exit" for monitor
-// depth accounting even when its terminator is a return-like instruction.
-static bool isDeoptContinuation(const BasicBlock *BB) {
-  for (const Instruction &I : *BB)
-    if (const auto *CB = dyn_cast<CallBase>(&I))
-      if (const Function *Fn = CB->getCalledFunction())
-        if (Fn->getIntrinsicID() == Intrinsic::experimental_deoptimize ||
-            Fn->getName() == "__llvm_deoptimize")
-          return true;
-  return false;
-}
-
-// Reconstruct the function-wide monitor nesting from the current LLVM CFG:
-// assign every monitorenter a signed relative lock depth (enters +1, exits
-// -1) by worklist-propagating a per-block incoming depth from the entry
-// block. The model is invalidated (Valid=false) by anything the scalar
-// depth numbering cannot represent:
-//   * a conflicting join (two preds reach a block with different depths) or
-//     two visits that assign the same monitorenter different depths;
-//   * a callbr monitor operation (no well-defined edge numbering);
-//   * a call-form monitor operation that may unwind: a plain call has no
-//     explicit exceptional edge, so its depth transition is meaningful only
-//     when the call cannot throw. An invoke-form monitor operation instead
-//     propagates the adjusted depth on the normal edge and the pre-op depth
-//     on the unwind edge, and stops the linear scan of the block.
-// Real exits (return/resume/unwind-to-caller, excluding deopt continuations)
-// collect their exit depth. For a regular compilation every real exit must
-// observe depth 0 and no negative depth may occur: locks are balanced. For
-// an OSR compilation the interpreter may already hold monitors at entry, so
-// the relative depths are solved for a uniform nonnegative entry offset that
-// makes every real exit observe depth 0; when no real exit exists, the
-// deepest negative excursion bounds the entry offset from below. All offset
-// arithmetic is overflow-checked against the uint32_t wire range of
-// BytecodeDepth; any overflow invalidates the model. Callers treat an
-// invalid model as "no depth information" and fall back conservatively.
-static MonitorDepthInfo computeMonitorDepthInfo(Function &F) {
-  MonitorDepthInfo Info;
-  DenseMap<BasicBlock *, int64_t> IncomingDepth;
-  SmallVector<BasicBlock *, 32> Worklist;
-  SmallVector<int64_t, 8> RealExitDepths;
-  int64_t MinRelativeDepth = 0;
-  int64_t MaxRelativeDepth = 0;
-
-  // Depths are signed and relative to a notional entry depth of 0; the OSR
-  // solving below may later shift them by a uniform entry offset. The min/max
-  // excursion is tracked so the offset's range can be validated afterwards.
-  auto ObserveDepth = [&](int64_t Depth) {
-    MinRelativeDepth = std::min(MinRelativeDepth, Depth);
-    MaxRelativeDepth = std::max(MaxRelativeDepth, Depth);
-  };
-  auto Propagate = [&](BasicBlock *Succ, int64_t Depth) {
-    auto [It, Inserted] = IncomingDepth.try_emplace(Succ, Depth);
-    if (!Inserted) {
-      if (It->second != Depth)
-        Info.Valid = false;
-      return;
-    }
-    Worklist.push_back(Succ);
-  };
-  auto RecordEnter = [&](CallBase *CB, int64_t Depth) {
-    auto [It, Inserted] = Info.EnterRelativeDepth.try_emplace(CB, Depth);
-    if (!Inserted && It->second != Depth)
-      Info.Valid = false;
-  };
-  auto AdjustDepth = [&](int64_t Depth, bool IsEnter, int64_t &Adjusted) {
-    if (IsEnter) {
-      if (Depth == std::numeric_limits<int64_t>::max()) {
-        Info.Valid = false;
-        return;
-      }
-      Adjusted = Depth + 1;
-    } else {
-      if (Depth == std::numeric_limits<int64_t>::min()) {
-        Info.Valid = false;
-        return;
-      }
-      Adjusted = Depth - 1;
-    }
-    ObserveDepth(Adjusted);
-  };
-
-  BasicBlock *Entry = &F.getEntryBlock();
-  IncomingDepth[Entry] = 0;
-  Worklist.push_back(Entry);
-  for (size_t Index = 0; Index != Worklist.size() && Info.Valid; ++Index) {
-    BasicBlock *BB = Worklist[Index];
-    int64_t Depth = IncomingDepth.lookup(BB);
-    ObserveDepth(Depth);
-    bool MonitorInvokeHandled = false;
-
-    for (Instruction &I : *BB) {
-      auto *CB = dyn_cast<CallBase>(&I);
-      if (!CB)
-        continue;
-      bool IsEnter = jeandle::pea::isJeandleMonitorEnter(CB);
-      bool IsExit = jeandle::pea::isJeandleMonitorExit(CB);
-      if (!IsEnter && !IsExit)
-        continue;
-
-      if (isa<CallBrInst>(CB)) {
-        Info.Valid = false;
-        break;
-      }
-      if (IsEnter)
-        RecordEnter(CB, Depth);
-      if (!Info.Valid)
-        break;
-
-      int64_t Adjusted = Depth;
-      AdjustDepth(Depth, IsEnter, Adjusted);
-      if (!Info.Valid)
-        break;
-
-      if (auto *II = dyn_cast<InvokeInst>(CB)) {
-        // The operation has completed only on the normal edge. The unwind
-        // edge observes the depth immediately before the monitor operation.
-        Propagate(II->getNormalDest(), Adjusted);
-        Propagate(II->getUnwindDest(), Depth);
-        MonitorInvokeHandled = true;
-        break;
-      }
-
-      // A call-form monitor operation has no explicit exceptional edge, so
-      // its scalar depth transition is meaningful only when it cannot unwind.
-      Function *DirectCallee = CB->getCalledFunction();
-      if (!CB->doesNotThrow() &&
-          (!DirectCallee || !DirectCallee->doesNotThrow())) {
-        Info.Valid = false;
-        break;
-      }
-      Depth = Adjusted;
-    }
-    if (!Info.Valid || MonitorInvokeHandled)
-      continue;
-
-    Instruction *Term = BB->getTerminator();
-    bool IsRealExit = isa<ReturnInst>(Term) || isa<ResumeInst>(Term);
-    if (auto *CRI = dyn_cast<CleanupReturnInst>(Term))
-      IsRealExit |= CRI->unwindsToCaller();
-    if (auto *CSI = dyn_cast<CatchSwitchInst>(Term))
-      IsRealExit |= CSI->unwindsToCaller();
-    if (IsRealExit && !isDeoptContinuation(BB))
-      RealExitDepths.push_back(Depth);
-    for (BasicBlock *Succ : successors(BB))
-      Propagate(Succ, Depth);
-  }
-
-  if (!Info.Valid)
-    return Info;
-
-  // Entry-offset solving. The relative depths above assume entry depth 0.
-  // A regular compilation must then be lock-balanced: no negative excursion
-  // (a monitorexit without a matching enter) and depth 0 at every real exit.
-  // An OSR compilation replaces that check with an equation: the interpreter
-  // may hold monitors at the OSR entry, so find the uniform entry offset
-  // under which every real exit still observes depth 0. With no real exit
-  // there is nothing to solve; the deepest negative excursion is then the
-  // smallest offset that keeps every depth nonnegative.
-  const bool IsOSR = F.getName().starts_with("__jeandle_osr.");
-  uint64_t EntryOffset = 0;
-  if (!IsOSR) {
-    if (MinRelativeDepth < 0)
-      Info.Valid = false;
-    for (int64_t ExitDepth : RealExitDepths)
-      if (ExitDepth != 0)
-        Info.Valid = false;
-  } else if (!RealExitDepths.empty()) {
-    // Every real exit must agree on the same implied entry offset
-    // (-ExitDepth); a positive exit depth (more enters than exits on some
-    // path) cannot be fixed by any offset and invalidates the model.
-    std::optional<uint64_t> SolvedOffset;
-    for (int64_t ExitDepth : RealExitDepths) {
-      if (ExitDepth > 0 || ExitDepth == std::numeric_limits<int64_t>::min()) {
-        Info.Valid = false;
-        break;
-      }
-      uint64_t Candidate = static_cast<uint64_t>(-ExitDepth);
-      if (!SolvedOffset)
-        SolvedOffset = Candidate;
-      else if (*SolvedOffset != Candidate) {
-        Info.Valid = false;
-        break;
-      }
-    }
-    if (SolvedOffset)
-      EntryOffset = *SolvedOffset;
-  } else if (MinRelativeDepth < 0) {
-    if (MinRelativeDepth == std::numeric_limits<int64_t>::min())
-      Info.Valid = false;
-    else
-      EntryOffset = static_cast<uint64_t>(-MinRelativeDepth);
-  }
-
-  // Range validation: EntryOffset must fit the uint32_t BytecodeDepth wire
-  // type, cover the deepest negative excursion, and leave headroom for the
-  // deepest positive excursion. Each comparison is shaped to avoid signed
-  // overflow before the widening conversion.
-  constexpr uint64_t MaxLockDepth = std::numeric_limits<uint32_t>::max();
-  if (MinRelativeDepth == std::numeric_limits<int64_t>::min())
-    Info.Valid = false;
-  if (EntryOffset > MaxLockDepth)
-    Info.Valid = false;
-  if (Info.Valid) {
-    if (MinRelativeDepth < 0 &&
-        static_cast<uint64_t>(-MinRelativeDepth) > EntryOffset)
-      Info.Valid = false;
-    if (MaxRelativeDepth > 0 &&
-        EntryOffset + static_cast<uint64_t>(MaxRelativeDepth) > MaxLockDepth)
-      Info.Valid = false;
-  }
-  if (Info.Valid)
-    Info.EntryDepth = static_cast<uint32_t>(EntryOffset);
-  return Info;
-}
 
 // Per-block-exit snapshot of the analyzer's per-object state. We record
 // this AFTER processing a block so successors can either inherit directly
@@ -983,7 +758,7 @@ public:
       : F(F), DT(DT), LI(LI), IsNullEdge{LVI},
         DL(F.getParent()->getDataLayout()),
         VMConsts(jeandle::VMConstants::fromModule(*F.getParent())),
-        MonitorDepth(computeMonitorDepthInfo(F)),
+        MonitorDepth(jeandle::computeMonitorDepthInfo(F)),
         StrictLockOrder(StrictLockOrder),
         LockEliminationEnabled(JeandlePEAEliminateLocks),
         SuppressedCFGProofs(SuppressedCFGProofs),
@@ -1053,7 +828,7 @@ private:
   // (see computeMonitorDepthInfo). Backs the strict-lock cascade and the
   // merge-time lock-stack identity comparison. An invalid model disables
   // depth-based reasoning (getLockDepth returns nullopt).
-  const MonitorDepthInfo MonitorDepth;
+  const jeandle::MonitorDepthInfo MonitorDepth;
   // Cached "strict lock order" decision shared by every fresh attempt in this
   // analysis run; see resolveStrictLockOrder() for the precedence rules.
   const bool StrictLockOrder;
@@ -7076,24 +6851,7 @@ bool Analyzer::foldCheckInstanceOf(CallBase *CB) {
 // invalid, the enter was not recorded, or the absolute depth is not
 // representable.
 std::optional<uint32_t> Analyzer::getLockDepth(CallBase *CB) const {
-  if (!MonitorDepth.Valid)
-    return std::nullopt;
-  auto It = MonitorDepth.EnterRelativeDepth.find(CB);
-  if (It == MonitorDepth.EnterRelativeDepth.end())
-    return std::nullopt;
-  int64_t RelativeDepth = It->second;
-  uint64_t AbsoluteDepth = MonitorDepth.EntryDepth;
-  if (RelativeDepth < 0) {
-    if (RelativeDepth == std::numeric_limits<int64_t>::min() ||
-        static_cast<uint64_t>(-RelativeDepth) > AbsoluteDepth)
-      return std::nullopt;
-    AbsoluteDepth -= static_cast<uint64_t>(-RelativeDepth);
-  } else {
-    AbsoluteDepth += static_cast<uint64_t>(RelativeDepth);
-  }
-  if (AbsoluteDepth > std::numeric_limits<uint32_t>::max())
-    return std::nullopt;
-  return static_cast<uint32_t>(AbsoluteDepth);
+  return MonitorDepth.getAbsoluteLockDepth(CB);
 }
 
 // Strict-lock cascade: before a REAL monitorenter whose bytecode depth is D,
@@ -11084,7 +10842,7 @@ void Analyzer::commit() {
     Instruction *Term = Kv.first->getTerminator();
     if (!isa<ReturnInst>(Term) && !isa<ResumeInst>(Term))
       continue;
-    if (isDeoptContinuation(Kv.first))
+    if (jeandle::isDeoptContinuation(Kv.first))
       continue;
     for (auto &LC : Kv.second.LockCounts)
       if (LC.second != 0) {

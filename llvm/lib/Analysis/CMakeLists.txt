@@ -164,6 +164,8 @@ add_llvm_component_library(LLVMAnalysis
   Jeandle/DeoptPoolBundleLowering.cpp
   Jeandle/DeoptPoolPlanner.cpp
   Jeandle/JeandleAnalysisUtils.cpp
+  Jeandle/LockAnalysis.cpp
+  Jeandle/MonitorAnalysis.cpp
   Jeandle/PartialEscape.cpp
   Jeandle/PartialEscapeAnalysis.cpp
   Jeandle/PartialEscapeUtils.cpp

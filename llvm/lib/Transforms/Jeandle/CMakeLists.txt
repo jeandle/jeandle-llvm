@@ -10,6 +10,9 @@ add_llvm_component_library(LLVMJeandleTransforms
   JavaOperationDeletion.cpp
   JavaOperationLower.cpp
   JavaOpLengthFolding.cpp
+  LockCoarsening.cpp
+  LockSlotNormalization.cpp
+  LockStructureVerifier.cpp
   LibmIdentityFolding.cpp
   NumericIntrinsicFolding.cpp
   PartialEscapeIterative.cpp

@@ -44,6 +44,7 @@
 ; CHECK-SAME: insert-gc-barriers
 ; CHECK-SAME: function(lcssa)
 ; CHECK-SAME: safepoint-poll-elimination<loop-deletion-prep>
+; CHECK-SAME: function(lock-coarsening)
 ; CHECK-SAME: java-operation-lower<phase=1>
 ; CHECK-SAME: expand-narrow-oop-cast
 ; CHECK-SAME: rewrite-statepoints-for-gc
@@ -63,6 +64,7 @@
 ; VERIFY-SAME: insert-gc-barriers
 ; VERIFY-SAME: function(lcssa)
 ; VERIFY-SAME: safepoint-poll-elimination<loop-deletion-prep>
+; VERIFY-SAME: function(lock-coarsening)
 ; VERIFY-SAME: java-operation-lower<phase=1>
 ; VERIFY-SAME: expand-narrow-oop-cast
 ; VERIFY-SAME: rewrite-statepoints-for-gc
@@ -80,6 +82,7 @@
 ; NO-INCLUSIVE-SAME: insert-gc-barriers
 ; NO-INCLUSIVE-SAME: function(lcssa)
 ; NO-INCLUSIVE-SAME: safepoint-poll-elimination<loop-deletion-prep>
+; NO-INCLUSIVE-SAME: function(lock-coarsening)
 ; NO-INCLUSIVE-SAME: java-operation-lower<phase=1>
 ; NO-STRIP-NOT:  function(loop-simplify)
 ; NO-STRIP-NOT:  function(lcssa)
@@ -91,6 +94,7 @@
 ; NO-STRIP-SAME: insert-gc-barriers
 ; NO-STRIP-SAME: function(lcssa)
 ; NO-STRIP-SAME: safepoint-poll-elimination<loop-deletion-prep>
+; NO-STRIP-SAME: function(lock-coarsening)
 ; NO-STRIP-SAME: java-operation-lower<phase=1>
 ; O0-NOT: function(loop-simplify)
 ; O0-NOT: function(lcssa)
