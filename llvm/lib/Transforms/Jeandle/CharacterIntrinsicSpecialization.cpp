@@ -31,24 +31,6 @@ using namespace llvm;
 using namespace llvm::jeandle;
 
 namespace {
-bool hasLocalArrayOpportunity(Value *Array, const LoopInfo &LI,
-                              unsigned MaxCount) {
-  SmallVector<const Value *, 4> Objects;
-  getUnderlyingObjects(Array, Objects, &LI);
-  if (Objects.empty())
-    return false;
-  for (const Value *Object : Objects) {
-    auto *Allocation = dyn_cast<CallBase>(Object);
-    if (!Allocation)
-      return false;
-    auto *Length = dyn_cast_or_null<ConstantInt>(
-        pea::getJeandleNewArrayLength(Allocation));
-    if (!Length || Length->isNegative() || !Length->getValue().ule(MaxCount))
-      return false;
-  }
-  return true;
-}
-
 void expand(CallInst &Call, CharacterIntrinsic Op, unsigned Count,
             bool UseLoop) {
   VMConstants Layout = VMConstants::fromModule(*Call.getModule());
@@ -214,12 +196,15 @@ CharacterIntrinsicSpecialization::run(Function &F,
       continue;
     if (Count->getZExtValue() > CharacterScalarLimit) {
       unsigned MaxCount = getPrePEAFullUnrollMaxCount();
-      if (!isPEAEnabled() || Count->getZExtValue() > MaxCount)
+      if (!ExpandLargeArrays || !isPEAEnabled() ||
+          Count->getZExtValue() > MaxCount)
         continue;
       const LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
-      if (!hasLocalArrayOpportunity(CB->getArgOperand(0), LI, MaxCount) &&
+      if (!pea::hasNonEscapingLocalArray(CB->getArgOperand(0), LI, MaxCount,
+                                         PrePEAFullUnrollFunctionBudget) &&
           (Op->Scan ||
-           !hasLocalArrayOpportunity(CB->getArgOperand(2), LI, MaxCount)))
+           !pea::hasNonEscapingLocalArray(CB->getArgOperand(2), LI, MaxCount,
+                                          PrePEAFullUnrollFunctionBudget)))
         continue;
       auto Cost = expansionCost(*CB, *Op, Count->getZExtValue(), Constant(1),
                                 Op->Scan ? nullptr : Constant(3),

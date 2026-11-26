@@ -35,12 +35,12 @@ u:
   resume i64 %lp
 }
 
-; A material source cannot be folded into a virtual destination by the
-; virtual-field consumer. The destination must be available to the call.
+; A concrete source can feed a virtual destination without materialization.
 ; CHECK-LABEL: @mixed(
-; CHECK: @jeandle.new_array
-; CHECK: store atomic i8 7
-; CHECK: call hotspotcc i32 @jeandle.encode_array
+; CHECK-NOT: @jeandle.new_array
+; CHECK: load atomic i16
+; CHECK-NOT: store atomic
+; CHECK-NOT: @jeandle.encode_array
 ; CHECK: ret i32
 define i32 @mixed(ptr addrspace(1) %src) gc "hotspotgc" personality ptr @personality {
 entry:

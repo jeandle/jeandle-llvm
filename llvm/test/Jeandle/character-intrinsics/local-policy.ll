@@ -199,3 +199,67 @@ define i32 @functionBudget(ptr addrspace(1) %dst) {
   %r31 = call hotspotcc i32 @jeandle.encode_array(ptr addrspace(1) %src, i32 0, ptr addrspace(1) %dst, i32 0, i32 17, i1 false, i1 true)
   ret i32 %r31
 }
+
+; A bounded allocation is insufficient if it must remain a real array.
+; CHECK-LABEL: @escapingDestination64(
+; CHECK-NOT: load atomic
+; CHECK: call hotspotcc i32 @jeandle.encode_array
+; CHECK: ret ptr addrspace(1) %local
+
+define ptr addrspace(1) @escapingDestination64(ptr addrspace(1) %external) {
+  %local = call hotspotcc ptr addrspace(1) @jeandle.new_array(ptr null, i32 64, i32 80, i32 16, i32 100, i1 false, i1 false)
+  %r = call hotspotcc i32 @jeandle.encode_array(ptr addrspace(1) %external, i32 0, ptr addrspace(1) %local, i32 0, i32 64, i1 false, i1 true)
+  ret ptr addrspace(1) %local
+}
+
+declare void @opaque(ptr addrspace(1) nocapture)
+
+; A noncapturing observer still needs a physical array.
+; CHECK-LABEL: @observedDestination64(
+; CHECK-NOT: load atomic
+; CHECK: call hotspotcc i32 @jeandle.encode_array
+; CHECK: call void @opaque
+; CHECK: ret i32
+
+define i32 @observedDestination64(ptr addrspace(1) %external) {
+  %local = call hotspotcc ptr addrspace(1) @jeandle.new_array(ptr null, i32 64, i32 80, i32 16, i32 100, i1 false, i1 false)
+  %r = call hotspotcc i32 @jeandle.encode_array(ptr addrspace(1) %external, i32 0, ptr addrspace(1) %local, i32 0, i32 64, i1 false, i1 true)
+  call void @opaque(ptr addrspace(1) %local)
+  ret i32 %r
+}
+
+declare ptr addrspace(1) @llvm.launder.invariant.group.p1(ptr addrspace(1))
+
+; Identity intrinsics preserve pointer escape through their returned alias.
+; CHECK-LABEL: @escapingAlias64(
+; CHECK-NOT: load atomic
+; CHECK: call hotspotcc i32 @jeandle.encode_array
+; CHECK: ret ptr addrspace(1)
+
+define ptr addrspace(1) @escapingAlias64(ptr addrspace(1) %external) {
+  %local = call hotspotcc ptr addrspace(1) @jeandle.new_array(ptr null, i32 64, i32 80, i32 16, i32 100, i1 false, i1 false)
+  %r = call hotspotcc i32 @jeandle.encode_array(ptr addrspace(1) %external, i32 0, ptr addrspace(1) %local, i32 0, i32 64, i1 false, i1 true)
+  %alias = call ptr addrspace(1) @llvm.launder.invariant.group.p1(ptr addrspace(1) %local)
+  ret ptr addrspace(1) %alias
+}
+
+; A dynamic element read outside a loop cannot become a scalar field.
+; Non-capture alone must not justify replacing the vector conversion.
+; CHECK-LABEL: @dynamicDestination64(
+; CHECK-NOT: load atomic i16
+; CHECK: call hotspotcc i32 @jeandle.encode_array
+; CHECK: load atomic i8
+; CHECK: ret i32
+
+define i32 @dynamicDestination64(ptr addrspace(1) %external, i32 %index) {
+  %local = call hotspotcc ptr addrspace(1) @jeandle.new_array(ptr null, i32 64, i32 80, i32 16, i32 100, i1 false, i1 false)
+  %r = call hotspotcc i32 @jeandle.encode_array(ptr addrspace(1) %external, i32 0, ptr addrspace(1) %local, i32 0, i32 64, i1 false, i1 true)
+  %bounded = and i32 %index, 63
+  %wide = zext i32 %bounded to i64
+  %offset = add i64 %wide, 16
+  %p = getelementptr i8, ptr addrspace(1) %local, i64 %offset
+  %b = load atomic i8, ptr addrspace(1) %p unordered, align 1
+  %v = zext i8 %b to i32
+  %result = add i32 %v, %r
+  ret i32 %result
+}

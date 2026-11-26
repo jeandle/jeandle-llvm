@@ -205,8 +205,8 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   PM.addPass(createModuleToFunctionPassAdaptor(CopySignStoreLoweringPass()));
   PM.addPass(
       createModuleToFunctionPassAdaptor(StringIntrinsicSpecialization()));
-  PM.addPass(
-      createModuleToFunctionPassAdaptor(CharacterIntrinsicSpecialization()));
+  PM.addPass(createModuleToFunctionPassAdaptor(
+      CharacterIntrinsicSpecialization(/*ExpandLargeArrays=*/false)));
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   // ==== PEA segment ====
   // Everything below up to InsertGCBarriers exists to serve PEA: the
@@ -233,7 +233,8 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     // a local array and a material operand. Expand them before PEA decides
     // whether the local array escapes.
     PrePEAHighTier.addPass(StringIntrinsicSpecialization());
-    PrePEAHighTier.addPass(CharacterIntrinsicSpecialization());
+    PrePEAHighTier.addPass(
+        CharacterIntrinsicSpecialization(/*ExpandLargeArrays=*/false));
     // Fold the comparisons exposed by known lengths before the unroller
     // estimates body cost; dead bounds-check blocks can otherwise hide a
     // profitable full unroll from the high-tier cluster.
@@ -273,6 +274,10 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
     PrePEAHighTier.addPass(InstCombinePass());
     PrePEAHighTier.addPass(GVNPass());
     PrePEAHighTier.addPass(SimplifyCFGPass());
+    // Decide long character expansion after full unrolling exposes constant
+    // element accesses. A surviving symbolic access requires materialization
+    // and cannot justify replacing the vector operation with scalar accesses.
+    PrePEAHighTier.addPass(CharacterIntrinsicSpecialization());
     PM.addPass(createModuleToFunctionPassAdaptor(std::move(PrePEAHighTier)));
     // Pre-PEA cleanup. PEA's correctness depends on the CFG containing no
     // statically-unreachable edges: a constant-condition branch's dead arm
@@ -344,8 +349,8 @@ ModulePassManager Pipeline::buildJeandlePipeline(PassBuilder &PB,
   // then let the VM-authorized folder consume any newly exposed cells.
   PM.addPass(
       createModuleToFunctionPassAdaptor(StringIntrinsicSpecialization()));
-  PM.addPass(
-      createModuleToFunctionPassAdaptor(CharacterIntrinsicSpecialization()));
+  PM.addPass(createModuleToFunctionPassAdaptor(
+      CharacterIntrinsicSpecialization(/*ExpandLargeArrays=*/false)));
   PM.addPass(createModuleToFunctionPassAdaptor(RepeatedConstantFolding()));
   PM.addPass(createModuleToFunctionPassAdaptor(CopySpecialization()));
   PM.addPass(createModuleToFunctionPassAdaptor(TypeCheckElimination()));

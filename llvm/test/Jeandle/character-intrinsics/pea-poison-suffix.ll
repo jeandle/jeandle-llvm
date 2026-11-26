@@ -2,18 +2,22 @@
 ; RUN: opt -S -passes='function(require<partial-escape-analysis>,partial-escape-transform),always-inline,function(instcombine,simplifycfg)' -jeandle-vm-callback-log=%S/../string-intrinsics/Inputs/layout.cblog -verify-each %s | FileCheck %s --check-prefix=VALUE
 
 ; An inactive source suffix may be poison. Check the PEA result before any
-; canonicalization that might hide an unmasked condition. Both the failure
-; condition and the next active value must ignore Fits after an earlier failure.
+; canonicalization that might hide an unmasked condition. Both the result
+; prefix and each write mask must ignore Fits after an earlier failure.
 ; RAW-LABEL: define i32 @encode_poison_suffix(
 ; RAW-NOT: @jeandle.new_array
 ; RAW-NOT: @jeandle.encode_array
 ; RAW: [[FITS0:%.*]] = icmp ule i16 %first, 255
-; RAW: [[ACTIVE0:%.*]] = select i1 true, i1 [[FITS0]], i1 false
 ; RAW: [[FITS1:%.*]] = icmp ule i16 %later, 255
-; RAW: [[BAD1:%.*]] = xor i1 [[FITS1]], true
-; RAW: [[FAIL1:%.*]] = select i1 [[ACTIVE0]], i1 [[BAD1]], i1 false
-; RAW: select i1 [[FAIL1]], i32 1,
-; RAW: [[ACTIVE1:%.*]] = select i1 [[ACTIVE0]], i1 [[FITS1]], i1 false
+; RAW: [[RIGHTFIT:%.*]] = select i1 [[FITS1]], i1 true, i1 false
+; RAW: [[RIGHT:%.*]] = select i1 [[FITS1]], i32 2, i32 1
+; RAW: [[ALLFIT:%.*]] = select i1 [[FITS0]], i1 [[RIGHTFIT]], i1 false
+; RAW: [[FAILURE:%.*]] = select i1 [[FITS0]], i32 [[RIGHT]], i32 0
+; RAW: [[ACTIVE0:%.*]] = select i1 true, i1 [[FITS0]], i1 false
+; RAW: [[BEFORE1:%.*]] = select i1 true, i1 [[FITS0]], i1 false
+; RAW: [[ACTIVE1:%.*]] = select i1 [[BEFORE1]], i1 [[FITS1]], i1 false
+; RAW: select i1 [[ALLFIT]], i32 3, i32 [[FAILURE]]
+; RAW: select i1 [[ACTIVE0]], i32 {{.*}}, i32
 ; RAW: select i1 [[ACTIVE1]], i32 {{.*}}, i32
 ; RAW: ret i32
 

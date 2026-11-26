@@ -15,7 +15,11 @@
 namespace llvm {
 class CharacterIntrinsicSpecialization
     : public PassInfoMixin<CharacterIntrinsicSpecialization> {
+  bool ExpandLargeArrays;
+
 public:
+  explicit CharacterIntrinsicSpecialization(bool ExpandLargeArrays = true)
+      : ExpandLargeArrays(ExpandLargeArrays) {}
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
 };
 } // namespace llvm

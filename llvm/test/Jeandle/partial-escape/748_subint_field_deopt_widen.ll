@@ -1,4 +1,5 @@
-; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" %s | FileCheck %s
+; RUN: opt -S -passes="require<partial-escape-analysis>,partial-escape-transform" -verify-each %s | FileCheck %s
+; RUN: opt -S -passes=partial-escape-iterative -verify-each %s | FileCheck %s --check-prefix=ITERATIVE
 
 ; Sub-int (i1/i8/i16) VO descriptor field values whose value is NOT a
 ; constant must be widened to i32 before entering the deopt bundle. The
@@ -99,3 +100,145 @@ u:
 ; CHECK-SAME: i64 524300, i32 0) ]
 
 !java-method-compilation = !{}
+
+; One SSA scalar can occur in multiple fields and snapshots. Deduplicate
+; within each snapshot while keeping placement independent between pools.
+; CHECK-LABEL: define void @shared_widen(
+; CHECK: %[[W:.*]] = zext i8 %value to i32
+; CHECK-NOT: zext
+; CHECK: call void @sink
+; CHECK-SAME: i32 %[[W]]
+; CHECK-SAME: i32 %[[W]]
+; CHECK: %[[W2:.*]] = zext i8 %value to i32
+; CHECK-NOT: zext
+; CHECK: call void @sink
+; CHECK-SAME: i32 %[[W2]]
+; CHECK-SAME: i32 %[[W2]]
+; CHECK-NOT: zext
+; CHECK: ret void
+
+; After placement, ordinary dominance permits sharing across snapshots.
+; Keep the iterative pipeline's descriptors compact without sharing the
+; analysis-owned, unparented definitions between snapshot plans.
+; ITERATIVE-LABEL: define void @shared_widen(
+; ITERATIVE-NOT: jeandle.new_instance
+; ITERATIVE: %[[IW:.*]] = zext i8 %value to i32
+; ITERATIVE-NOT: zext
+; ITERATIVE: call void @sink
+; ITERATIVE-SAME: i32 %[[IW]]
+; ITERATIVE-SAME: i32 %[[IW]]
+; ITERATIVE-NOT: zext
+; ITERATIVE: call void @sink
+; ITERATIVE-SAME: i32 %[[IW]]
+; ITERATIVE-SAME: i32 %[[IW]]
+; ITERATIVE-NOT: zext
+; ITERATIVE: ret void
+
+define void @shared_widen(i8 %value) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+entry:
+  %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 74801 to ptr), i32 32, i1 false) to label %body unwind label %u
+body:
+  %p = getelementptr i8, ptr addrspace(1) %o, i64 8
+  %q = getelementptr i8, ptr addrspace(1) %o, i64 16
+  store atomic i8 %value, ptr addrspace(1) %p unordered, align 1
+  store atomic i8 %value, ptr addrspace(1) %q unordered, align 1
+  call void @sink(i8 0, i16 0, i1 false) [ "deopt"(i32 99, i32 99, i64 12, ptr addrspace(1) %o) ]
+  br label %later
+later:
+  call void @sink(i8 0, i16 0, i1 false) [ "deopt"(i32 99, i32 99, i64 12, ptr addrspace(1) %o) ]
+  ret void
+u:
+  %lp = landingpad i64 cleanup
+  resume i64 %lp
+}
+
+; Sibling snapshots cannot share an unparented widening: neither placement
+; dominates the other. The merge also needs its own dominating definition.
+; CHECK-LABEL: define void @sibling_snapshots(
+; CHECK: left:
+; CHECK: %[[L:.*]] = zext i8 %value to i32
+; CHECK: call void @sink
+; CHECK-SAME: i32 %[[L]]
+; CHECK: right:
+; CHECK: %[[R:.*]] = zext i8 %value to i32
+; CHECK: call void @sink
+; CHECK-SAME: i32 %[[R]]
+; CHECK: merge:
+; CHECK: %[[M:.*]] = zext i8 %value to i32
+; CHECK: call void @sink
+; CHECK-SAME: i32 %[[M]]
+
+define void @sibling_snapshots(i8 %value, i1 %cond) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+entry:
+  %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 74801 to ptr), i32 32, i1 false) to label %body unwind label %u
+body:
+  %p = getelementptr i8, ptr addrspace(1) %o, i64 8
+  store atomic i8 %value, ptr addrspace(1) %p unordered, align 1
+  br i1 %cond, label %left, label %right
+left:
+  call void @sink(i8 0, i16 0, i1 false) [ "deopt"(i32 99, i32 99, i64 12, ptr addrspace(1) %o) ]
+  br label %merge
+right:
+  call void @sink(i8 0, i16 0, i1 false) [ "deopt"(i32 99, i32 99, i64 12, ptr addrspace(1) %o) ]
+  br label %merge
+merge:
+  call void @sink(i8 0, i16 0, i1 false) [ "deopt"(i32 99, i32 99, i64 12, ptr addrspace(1) %o) ]
+  ret void
+u:
+  %lp = landingpad i64 cleanup
+  resume i64 %lp
+}
+
+; Loop retries may discard analysis-owned casts. Rebuilt snapshot effects
+; must use the surviving definition and place it before both in-loop pools.
+; CHECK-LABEL: define void @loop_snapshots(
+; CHECK: loop:
+; CHECK: %[[LW:.*]] = zext i8 %value to i32
+; CHECK-NOT: zext
+; CHECK: call void @sink
+; CHECK-SAME: i32 %[[LW]]
+; CHECK: %[[LW2:.*]] = zext i8 %value to i32
+; CHECK-NOT: zext
+; CHECK: call void @sink
+; CHECK-SAME: i32 %[[LW2]]
+; CHECK-NOT: zext
+; CHECK: ret void
+
+define void @loop_snapshots(i8 %value, i32 %count) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+entry:
+  %o = invoke hotspotcc ptr addrspace(1) @jeandle.new_instance(ptr inttoptr (i64 74801 to ptr), i32 32, i1 false) to label %body unwind label %u
+body:
+  %p = getelementptr i8, ptr addrspace(1) %o, i64 8
+  store atomic i8 %value, ptr addrspace(1) %p unordered, align 1
+  br label %loop
+loop:
+  %i = phi i32 [ 0, %body ], [ %next, %loop ]
+  call void @sink(i8 0, i16 0, i1 false) [ "deopt"(i32 99, i32 99, i64 12, ptr addrspace(1) %o) ]
+  call void @sink(i8 0, i16 0, i1 false) [ "deopt"(i32 99, i32 99, i64 12, ptr addrspace(1) %o) ]
+  %next = add i32 %i, 1
+  %more = icmp slt i32 %next, %count
+  br i1 %more, label %loop, label %exit
+exit:
+  ret void
+u:
+  %lp = landingpad i64 cleanup
+  resume i64 %lp
+}
+
+declare void @observe_widen(i32)
+
+; A plain widening remains defined for negative inputs even when the earlier
+; widening promised a nonnegative input. Commoning must intersect flags.
+; ITERATIVE-LABEL: define void @mixed_widen_flags(
+; ITERATIVE: %[[FW:.*]] = zext i8 %value to i32
+; ITERATIVE-NEXT: call void @observe_widen(i32 %[[FW]])
+; ITERATIVE-NEXT: call void @observe_widen(i32 %[[FW]])
+; ITERATIVE-NEXT: ret void
+define void @mixed_widen_flags(i8 %value) {
+entry:
+  %positive = zext nneg i8 %value to i32
+  call void @observe_widen(i32 %positive)
+  %ordinary = zext i8 %value to i32
+  call void @observe_widen(i32 %ordinary)
+  ret void
+}

@@ -33,6 +33,7 @@ class DataLayout;
 class Function;
 class GetElementPtrInst;
 class Instruction;
+class LoopInfo;
 class IntrinsicInst;
 class LLVMContext;
 class Type;
@@ -392,6 +393,14 @@ bool isElementIndexedCopyKind(JeandleCopyPseudoKind Kind);
 // dominating the call proved non-null, array-ness, bounds, and — for oop
 // arrays — source/destination element compatibility on the executed path.
 bool isCopyPseudoValidated(const CallBase *CB);
+
+/// Bounded profitability query for expanding array operations to expose
+/// scalar replacement. Deopt state and character operations do not publish
+/// the allocation; unknown uses conservatively count as escapes. Concrete
+/// sources may disable scalar-access requirements: their memory remains real.
+bool hasNonEscapingLocalArray(Value *Array, const LoopInfo &LI,
+                              unsigned MaxLength, unsigned MaxUsesToExplore,
+                              bool RequireScalarAccesses = true);
 
 // Whether processIntrinsic treats II's ordinary operands and non-deopt operand
 // bundles as non-escaping. Deopt bundles remain executable frame state and

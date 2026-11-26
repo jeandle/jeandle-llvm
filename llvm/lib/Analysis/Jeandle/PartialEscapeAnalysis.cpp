@@ -88,6 +88,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/KnownBits.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <limits>
 #include <unordered_map>
@@ -1101,6 +1102,9 @@ private:
   // whose producing field PHI or replacement effect may be discarded. This
   // flag deliberately overapproximates folds rewound by a loop retry.
   bool HasFoldedVectorizedHashCode = false;
+  // Reviving a concrete-source conversion must also discard scalar aliases
+  // of its result: a second read of mutable source memory can differ.
+  DenseSet<jeandle::ObjectID> ConcreteCharacterFoldDestinations;
   bool hasPendingRetry() const {
     return !RetryVirtualizationAllocationSites.empty() ||
            !InvalidCFGProofKillers.empty();
@@ -1448,6 +1452,12 @@ private:
   };
   std::unordered_map<SemanticOopCastKey, WeakTrackingVH, SemanticOopCastKeyHash>
       SemanticOopCastCache;
+
+  // Deduplicate repeated fields within one snapshot. Each snapshot retains
+  // its own deferred placement, including pools copied into replay invokes.
+  // Weak handles discard casts deleted by analysis rollback.
+  DenseMap<std::pair<Value *, Instruction *>, WeakTrackingVH>
+      DeoptScalarWidenCache;
 
   // Cache the per-element load chains of a concrete-source jeandle.copy fold
   // by (copy site, source byte offset). Loop-fixpoint revisits must reuse
@@ -2062,7 +2072,7 @@ private:
                         bool UTF16, bool CharArray);
   Value *readStringElement(jeandle::ObjectID ID, int64_t Index, bool UTF16,
                            bool CharArray = false);
-  bool foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
+  bool foldArrayConversion(CallBase *CB, std::optional<jeandle::ObjectID> Left,
                            jeandle::ObjectID Right, bool SrcUTF16, bool SrcChar,
                            bool DstUTF16, bool DstChar,
                            std::optional<unsigned> MaxChar, bool PrefixResult);
@@ -3339,12 +3349,17 @@ Value *Analyzer::widenDeoptScalar(Value *V, Instruction *InsertContext) {
   Type *Ty = V->getType();
   if (!Ty->isIntegerTy() || Ty->getIntegerBitWidth() >= 32 || isa<Constant>(V))
     return V;
+  assert(InsertContext && "deopt scalar requires a placement context");
+  auto &Cached = DeoptScalarWidenCache[{V, InsertContext}];
+  auto *Existing = dyn_cast_or_null<Instruction>(Cached);
+  if (Existing && Existing->getOperand(0) == V)
+    return Existing;
   Instruction *ZExt =
       CastInst::Create(Instruction::ZExt, V, Type::getInt32Ty(V->getContext()),
                        "pea.deopt.widen", /*InsertBefore=*/nullptr);
-  if (InsertContext)
-    ZExt->setDebugLoc(InsertContext->getDebugLoc());
+  ZExt->setDebugLoc(InsertContext->getDebugLoc());
   Result.OwnedInsts.emplace_back(ZExt);
+  Cached = ZExt;
   return ZExt;
 }
 
@@ -7981,7 +7996,8 @@ bool Analyzer::foldStringIntrinsic(CallBase *CB) {
       Compress ? std::optional<unsigned>(255) : std::nullopt, false);
 }
 
-bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
+bool Analyzer::foldArrayConversion(CallBase *CB,
+                                   std::optional<jeandle::ObjectID> Left,
                                    jeandle::ObjectID Right, bool SrcUTF16,
                                    bool SrcChar, bool DstUTF16, bool DstChar,
                                    std::optional<unsigned> MaxChar,
@@ -8000,13 +8016,25 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
   unsigned Limit = PrefixResult ? MaximumEscapeAnalysisArrayLength.getValue()
                                 : StringScalarLimit;
   if (!N(1) || !N(3) || !N(4) || *N(4) > Limit ||
-      !stringArrayRange(Left, *N(1), *N(4), SrcUTF16, SrcChar) ||
+      (Left && !stringArrayRange(*Left, *N(1), *N(4), SrcUTF16, SrcChar)) ||
       !stringArrayRange(Right, *N(3), *N(4), DstUTF16, DstChar) ||
       Left == Right)
     return false;
+  // Large concrete reads need a local initialization opportunity. Arbitrary
+  // external contents retain the vector operation instead of becoming a
+  // predicated scalar conversion. UTF16 byte arrays count two physical bytes
+  // per character here without changing the virtualization length limit.
+  if (!Left && *N(4) > CharacterScalarLimit &&
+      !hasNonEscapingLocalArray(
+          CB->getArgOperand(0), LI,
+          SaturatingMultiply(Limit, SrcUTF16 && !SrcChar ? 2u : 1u), 4096,
+          /*RequireScalarAccesses=*/false))
+    return false;
 
-  const VirtualObject &Src = *Result.VirtualObjects[Left];
   const VirtualObject &Dst = *Result.VirtualObjects[Right];
+  int64_t SrcBase = Left ? Result.VirtualObjects[*Left]->ArrayBaseOffset
+                         : VMConsts.arrayBaseOffsetFor(
+                               SrcChar ? JBasicType::Char : JBasicType::Byte);
   struct CellRead {
     int64_t Offset;
     bool BytePair;
@@ -8014,17 +8042,23 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
   SmallVector<CellRead, 32> Reads;
   int64_t WriteCount = *N(4);
   unsigned SrcBits = SrcUTF16 ? 16 : 8;
+  bool MayFail = false;
   for (int64_t I = 0; I < *N(4); ++I) {
-    int64_t Offset = Src.ArrayBaseOffset + (*N(1) + I) * (SrcUTF16 ? 2 : 1);
+    int64_t Offset = SrcBase + (*N(1) + I) * (SrcUTF16 ? 2 : 1);
+    if (!Left) {
+      Reads.push_back({Offset, SrcUTF16 && !SrcChar});
+      MayFail |= MaxChar.has_value();
+      continue;
+    }
     bool BytePair = false;
     std::optional<unsigned> ConstantChar;
-    Value *Cell = readStringCell(Left, Offset, SrcBits, nullptr,
+    Value *Cell = readStringCell(*Left, Offset, SrcBits, nullptr,
                                  /*ValidateOnly=*/true);
     if (!Cell) {
       if (!SrcUTF16 || SrcChar)
         return false;
-      Value *First = readStringCell(Left, Offset, 8, nullptr, true);
-      Value *Second = readStringCell(Left, Offset + 1, 8, nullptr, true);
+      Value *First = readStringCell(*Left, Offset, 8, nullptr, true);
+      Value *Second = readStringCell(*Left, Offset + 1, 8, nullptr, true);
       if (!First || !Second)
         return false;
       auto *L = dyn_cast<ConstantInt>(DL.isLittleEndian() ? First : Second);
@@ -8037,6 +8071,7 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
     }
     if (!PrefixResult && !ConstantChar)
       return false;
+    MayFail |= MaxChar && !ConstantChar;
     Reads.push_back({Offset, BytePair});
     // Unread source cells and unwritten destination cells impose no layout
     // requirements once a constant character ends the conversion.
@@ -8053,6 +8088,7 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
     int64_t Offset;
     Value *OldValue;
     unsigned Bits;
+    APInt Mask;
   };
   struct CellWrite {
     unsigned Group;
@@ -8090,8 +8126,7 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
           OldValue = Alias;
         GroupOffset = Field.Offset;
         GroupBits = Field.ByteSize * 8;
-        if (isa<UndefValue>(OldValue) ||
-            !CastInst::isBitCastable(
+        if (!CastInst::isBitCastable(
                 OldValue->getType(),
                 Type::getIntNTy(F.getContext(), GroupBits)))
           return false;
@@ -8100,15 +8135,24 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
       auto [It, Inserted] =
           GroupIndices.try_emplace(GroupOffset, Groups.size());
       if (Inserted)
-        Groups.push_back({GroupOffset, OldValue, GroupBits});
+        Groups.push_back(
+            {GroupOffset, OldValue, GroupBits, APInt(GroupBits, 0)});
       unsigned Shift = DL.isLittleEndian()
                            ? (Offset - GroupOffset) * 8
                            : GroupBits - (Offset - GroupOffset) * 8 - CellBits;
       unsigned WriteShift =
           DL.isLittleEndian() ? Byte * 8 : DstBytes * 8 - Byte * 8 - CellBits;
       Writes.push_back({It->second, Shift, WriteShift});
+      Groups[It->second].Mask.setBits(Shift, Shift + CellBits);
     }
   }
+
+  // A scalar packed value cannot represent poison in only its untouched
+  // bytes. Keep the memory operation when such bytes might be retained.
+  for (const GroupWrite &G : Groups)
+    if (G.OldValue && G.Bits > CellBits && (MayFail || !G.Mask.isAllOnes()) &&
+        !isGuaranteedNotToBeUndefOrPoison(G.OldValue))
+      return false;
 
   // The preflight succeeded. All generated instructions are deferred effects,
   // so the analysis never changes the IR it is traversing.
@@ -8116,19 +8160,45 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
       F.getContext(), ConstantFolder(),
       IRBuilderCallbackInserter(
           [&](Instruction *I) { placeStringInstruction(I, CB); }));
-  SmallVector<Value *, 32> Values(Groups.size(), nullptr);
-  Value *Active = B.getTrue();
-  Value *Prefix = B.getInt32(*N(4));
-  observeFieldDefinitions(Left, FieldDefinitions);
+  SmallVector<Value *, 32> Values;
+  SmallVector<Value *, 32> OldValues;
+  for (const GroupWrite &G : Groups) {
+    Type *Ty = B.getIntNTy(G.Bits);
+    Value *Old =
+        G.OldValue ? B.CreateBitCast(G.OldValue, Ty) : ConstantInt::get(Ty, 0);
+    OldValues.push_back(Old);
+    // Do not introduce a dependency on the former value of fully written
+    // groups. Even an AND with a zero mask would propagate SSA poison.
+    Values.push_back(G.Mask.isAllOnes()
+                         ? ConstantInt::get(Ty, 0)
+                         : B.CreateAnd(Old, ConstantInt::get(Ty, ~G.Mask)));
+  }
+  Value *Count = B.getInt32(*N(4));
+  Value *Prefix = Count;
+  SmallVector<Value *, 32> Cells;
+  SmallVector<Value *, 32> Predicates;
+  SmallVector<Value *, 32> ActiveCells(Reads.size(), B.getTrue());
+  if (Left)
+    observeFieldDefinitions(*Left, FieldDefinitions);
   observeFieldDefinitions(Right, FieldDefinitions);
   for (unsigned I = 0; I < Reads.size(); ++I) {
     const CellRead &Read = Reads[I];
     Value *C;
-    if (!Read.BytePair) {
-      C = readStringCell(Left, Read.Offset, SrcBits, CB);
+    if (!Left && !Read.BytePair) {
+      C = getOrCreateCopyElementSemanticLoad(
+          CB, CB->getArgOperand(0), B.getIntNTy(SrcBits), Read.Offset, 0);
+    } else if (!Read.BytePair) {
+      C = readStringCell(*Left, Read.Offset, SrcBits, CB);
     } else {
-      Value *First = readStringCell(Left, Read.Offset, 8, CB);
-      Value *Second = readStringCell(Left, Read.Offset + 1, 8, CB);
+      // Match byte stores used to initialize UTF16 arrays so ordinary GVN
+      // can forward their values even when the source itself is concrete.
+      auto Byte = [&](int64_t Offset) {
+        return Left ? readStringCell(*Left, Offset, 8, CB)
+                    : getOrCreateCopyElementSemanticLoad(
+                          CB, CB->getArgOperand(0), B.getInt8Ty(), Offset, 0);
+      };
+      Value *First = Byte(Read.Offset);
+      Value *Second = Byte(Read.Offset + 1);
       Value *Low =
           B.CreateZExt(DL.isLittleEndian() ? First : Second, B.getInt16Ty());
       Value *High =
@@ -8136,6 +8206,7 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
       C = B.CreateOr(Low, B.CreateShl(High, 8), "string.word");
     }
     assert(C && "prevalidated conversion cell must be readable");
+    Cells.push_back(C);
     if (MaxChar) {
       KnownBits Known = computeKnownBits(C, DL);
       Value *Fits;
@@ -8146,33 +8217,70 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
       else
         Fits = B.CreateICmpULE(C, ConstantInt::get(C->getType(), *MaxChar),
                                "string.encodable");
-      // Inactive suffix cells are not observed by the conversion. Mask their
-      // predicates as well as their writes so poison cannot escape the suffix.
-      Value *Failed = B.CreateSelect(Active, B.CreateNot(Fits), B.getFalse());
-      Prefix = B.CreateSelect(Failed, B.getInt32(I), Prefix, "string.prefix");
-      if (auto *K = dyn_cast<ConstantInt>(Fits); K && K->isZero()) {
-        Active = B.getFalse();
-        break;
-      }
-      Active = B.CreateSelect(Active, Fits, B.getFalse(), "string.active");
+      Predicates.push_back(Fits);
     }
-    C = B.CreateZExtOrTrunc(C, B.getIntNTy(DstBytes * 8));
+  }
+  if (!Predicates.empty()) {
+    // Ordered selects mask poison after the first failure. Each write uses
+    // only its own inclusive prefix: later poison cannot affect earlier cells.
+    // The bounded tree keeps both result reduction and prefix scan balanced.
+    struct PrefixNode {
+      unsigned Begin, End, Left, Right;
+      Value *AllFit;
+      Value *FirstFailure;
+    };
+    SmallVector<PrefixNode, 64> Tree;
+    auto Build = [&](auto &&Self, unsigned Begin, unsigned End) -> unsigned {
+      if (End - Begin == 1) {
+        // FirstFailure is observed only when this subtree has a failure.
+        Tree.push_back(
+            {Begin, End, 0, 0, Predicates[Begin], B.getInt32(Begin)});
+      } else {
+        unsigned Middle = Begin + (End - Begin) / 2;
+        unsigned Left = Self(Self, Begin, Middle);
+        unsigned Right = Self(Self, Middle, End);
+        Value *AllFit = B.CreateSelect(Tree[Left].AllFit, Tree[Right].AllFit,
+                                       B.getFalse(), "string.fits");
+        Value *FirstFailure =
+            B.CreateSelect(Tree[Left].AllFit, Tree[Right].FirstFailure,
+                           Tree[Left].FirstFailure, "string.prefix.merge");
+        Tree.push_back({Begin, End, Left, Right, AllFit, FirstFailure});
+      }
+      return Tree.size() - 1;
+    };
+    unsigned Root = Build(Build, 0, Predicates.size());
+    auto Scan = [&](auto &&Self, unsigned Index, Value *Before) -> void {
+      const PrefixNode &Node = Tree[Index];
+      if (Node.End - Node.Begin == 1) {
+        ActiveCells[Node.Begin] =
+            B.CreateSelect(Before, Node.AllFit, B.getFalse(), "string.active");
+      } else {
+        Self(Self, Node.Left, Before);
+        Value *RightBefore = B.CreateSelect(Before, Tree[Node.Left].AllFit,
+                                            B.getFalse(), "string.active");
+        Self(Self, Node.Right, RightBefore);
+      }
+    };
+    Scan(Scan, Root, B.getTrue());
+    Prefix = B.CreateSelect(Tree[Root].AllFit, Count, Tree[Root].FirstFailure,
+                            "string.prefix");
+  }
+  for (unsigned I = 0; I < static_cast<uint64_t>(WriteCount); ++I) {
+    Value *Active = ActiveCells[I];
+    Value *C = B.CreateZExtOrTrunc(Cells[I], B.getIntNTy(DstBytes * 8));
     for (unsigned J = 0; J < DstBytes / Dst.ArrayIndexScale; ++J) {
       const CellWrite &W = Writes[I * (DstBytes / Dst.ArrayIndexScale) + J];
       const GroupWrite &G = Groups[W.Group];
       Type *Ty = B.getIntNTy(G.Bits);
-      Value *&Old = Values[W.Group];
-      if (!Old)
-        Old = G.OldValue ? B.CreateBitCast(G.OldValue, Ty)
-                         : ConstantInt::get(Ty, 0);
       Value *Part = W.WriteShift ? B.CreateLShr(C, W.WriteShift) : C;
       Part = B.CreateTruncOrBitCast(Part, B.getIntNTy(CellBits));
       Part = B.CreateZExtOrTrunc(Part, Ty);
       Part = B.CreateShl(Part, W.Shift);
       APInt Mask = APInt::getBitsSet(G.Bits, W.Shift, W.Shift + CellBits);
-      Value *Updated = B.CreateOr(B.CreateAnd(Old, ConstantInt::get(Ty, ~Mask)),
-                                  Part, "string.write");
-      Old = B.CreateSelect(Active, Updated, Old, "string.partial");
+      Value *Retained =
+          B.CreateAnd(OldValues[W.Group], ConstantInt::get(Ty, Mask));
+      Value *Cell = B.CreateSelect(Active, Part, Retained, "string.partial");
+      Values[W.Group] = B.CreateOr(Values[W.Group], Cell, "string.write");
     }
   }
   for (unsigned I = 0; I < Groups.size(); ++I) {
@@ -8183,10 +8291,13 @@ bool Analyzer::foldArrayConversion(CallBase *CB, jeandle::ObjectID Left,
     // eligibility cancels the fold.
     FieldDefinitions[Right][Groups[I].Offset].clear();
   }
-  MemoryFoldVirtualSources.emplace_back(Left, Right);
-  Value *Return =
-      PrefixResult ? Prefix
-                   : B.CreateSelect(Active, B.getInt32(*N(4)), B.getInt32(0));
+  if (Left)
+    MemoryFoldVirtualSources.emplace_back(*Left, Right);
+  else
+    ConcreteCharacterFoldDestinations.insert(Right);
+  Value *Return = PrefixResult ? Prefix
+                               : B.CreateSelect(B.CreateICmpEQ(Prefix, Count),
+                                                Count, B.getInt32(0));
   emitReplaceCall(CB, CB->getType()->isVoidTy() ? nullptr : Return, Right);
   return true;
 }
@@ -8197,15 +8308,23 @@ bool Analyzer::foldCharacterIntrinsic(CallBase *CB) {
   if (!Op || CB->hasOperandBundles())
     return false;
   auto Left = resolveStringArray(CB->getArgOperand(0));
-  if (!Left)
-    return false;
   if (!Op->Scan) {
     auto Right = resolveStringArray(CB->getArgOperand(2));
     if (!Right)
       return false;
-    return foldArrayConversion(CB, *Left, *Right, true, !Op->SourceBytes, false,
+    if (!Left && (!pea::hasNonEscapingLocalArray(
+                      CB->getArgOperand(2), LI,
+                      MaximumEscapeAnalysisArrayLength, 4096) ||
+                  pea::resolveVirtualRef(CB->getArgOperand(0), CurrentState,
+                                         Aliases, DL) ||
+                  !pea::isProvablyDistinctFromVirtual(
+                      CB->getArgOperand(0), *Right, CurrentState, Aliases, DL)))
+      return false;
+    return foldArrayConversion(CB, Left, *Right, true, !Op->SourceBytes, false,
                                false, Op->ASCII ? 127u : 255u, true);
   }
+  if (!Left)
+    return false;
   auto N = [&](unsigned I) {
     Value *V = CB->getArgOperand(I);
     while (Value *Alias = Aliases.getScalarAlias(V))
@@ -11628,12 +11747,14 @@ void Analyzer::commit() {
     if (!IsEligible)
       IneligibleIDs.insert(ID);
   }
-  if (HasFoldedVectorizedHashCode && !IneligibleIDs.empty()) {
-    // A hash can use another fold as its seed or as a stored cell. Rebuilding
-    // from the original IR restores the whole scalar-alias dependency graph;
-    // dropping only the receiver's arithmetic effects would be insufficient.
+  if (!IneligibleIDs.empty()) {
+    // Folded scalars can reach other objects through seeds or stored cells.
+    // Rebuild their complete alias graph when a concrete read must survive;
+    // dropping only the receiver's effects would leave a second source read.
     for (jeandle::ObjectID ID : IneligibleIDs)
-      collectRetryVirtualizationSites(ID);
+      if (HasFoldedVectorizedHashCode ||
+          ConcreteCharacterFoldDestinations.contains(ID))
+        collectRetryVirtualizationSites(ID);
     if (hasPendingRetry())
       return;
   }
