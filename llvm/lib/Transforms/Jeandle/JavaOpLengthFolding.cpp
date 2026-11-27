@@ -195,7 +195,9 @@ resolveArrayLength(Value *V, const DataLayout &DL, unsigned Depth,
 
 // Dead pointer wrappers can keep an otherwise unused allocation alive after
 // folding. Bound the walk, and leave live merges (including deopt uses) alone.
-static void removeDeadWrappers(CallBase &Allocation) {
+// Returns true iff any wrapper instruction (excluding the allocation call
+// itself) was erased.
+static bool removeDeadWrappers(CallBase &Allocation) {
   SmallVector<WeakTrackingVH, 16> Worklist{&Allocation};
   SmallPtrSet<Value *, 32> Seen;
   Seen.insert(&Allocation);
@@ -214,11 +216,15 @@ static void removeDeadWrappers(CallBase &Allocation) {
       }
     }
   }
+  bool Changed = false;
   for (const WeakTrackingVH &H : reverse(Worklist)) {
     auto *I = dyn_cast_or_null<Instruction>(H);
-    if (I && I != &Allocation && isInstructionTriviallyDead(I))
+    if (I && I != &Allocation && isInstructionTriviallyDead(I)) {
       I->eraseFromParent();
+      Changed = true;
+    }
   }
+  return Changed;
 }
 
 static bool canRemoveUnusedArray(CallBase &CB) {
@@ -368,6 +374,23 @@ PreservedAnalyses JavaOpLengthFolding::run(Function &F,
   if (ChangedCFG)
     DT.recalculate(F);
   AssumptionCache &AC = FAM.getResult<AssumptionAnalysis>(F);
+
+  // Fixpoint: when two candidate allocations share wrapper nodes (e.g. a
+  // select fed by both), one sweep leaves the other allocation's wrappers
+  // alive, so it fails the use_empty check below and stays as a dead
+  // new_array. Repeat the sweep over all candidates until no wrapper is
+  // erased; only then are all dead allocations visible as use_empty.
+  bool WrappersChanged = true;
+  while (WrappersChanged) {
+    WrappersChanged = false;
+    for (const WeakTrackingVH &H : Candidates) {
+      auto *CB = dyn_cast_or_null<CallBase>(H);
+      if (!CB)
+        continue;
+      WrappersChanged |= removeDeadWrappers(*CB);
+    }
+  }
+
   SmallVector<std::pair<WeakTrackingVH, bool>, 8> Unused;
   for (const WeakTrackingVH &H : Candidates) {
     auto *CB = dyn_cast_or_null<CallBase>(H);
@@ -396,3 +419,4 @@ PreservedAnalyses JavaOpLengthFolding::run(Function &F,
   PA.preserveSet<CFGAnalyses>(); // calls erased in place, CFG untouched
   return PA;
 }
+
