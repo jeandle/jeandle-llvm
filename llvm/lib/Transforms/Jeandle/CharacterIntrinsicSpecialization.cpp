@@ -206,12 +206,6 @@ CharacterIntrinsicSpecialization::run(Function &F,
            !pea::hasNonEscapingLocalArray(CB->getArgOperand(2), LI, MaxCount,
                                           PrePEAFullUnrollFunctionBudget)))
         continue;
-      auto Cost = expansionCost(*CB, *Op, Count->getZExtValue(), Constant(1),
-                                Op->Scan ? nullptr : Constant(3),
-                                AM.getResult<TargetIRAnalysis>(F));
-      if (!Cost || *Cost > PrePEAFullUnrollLoopBudget || *Cost > RemainingCost)
-        continue;
-      RemainingCost -= *Cost;
     } else if (Count->getZExtValue() > 8) {
       const LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
       BatchAAResults AA(AM.getResult<AAManager>(F));
@@ -219,6 +213,14 @@ CharacterIntrinsicSpecialization::run(Function &F,
           (Op->Scan ||
            !hasScalarArrayOpportunity(CB->getArgOperand(2), LI, AA)))
         continue;
+    }
+    if (!Count->isZero()) {
+      auto Cost = expansionCost(*CB, *Op, Count->getZExtValue(), Constant(1),
+                                Op->Scan ? nullptr : Constant(3),
+                                AM.getResult<TargetIRAnalysis>(F));
+      if (!Cost || *Cost > PrePEAFullUnrollLoopBudget || *Cost > RemainingCost)
+        continue;
+      RemainingCost -= *Cost;
     }
     Plan P{CB, *Op, static_cast<unsigned>(Count->getZExtValue()), {}};
     for (unsigned Arg : {1u, Op->countIndex(), Op->Scan ? 1u : 3u})
