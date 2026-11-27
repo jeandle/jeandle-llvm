@@ -11,9 +11,11 @@
 
 #include "llvm/Transforms/Jeandle/BitShuffleFolding.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -152,7 +154,10 @@ PreservedAnalyses BitShuffleFoldingPass::run(Function &F,
   bool Changed = false;
 
   // Testing whether any selected bit is set does not require compressing
-  // those bits. Keep a shared PEXT result rather than adding another test.
+  // those bits. For expand with a constant mask M, the deposited bits are
+  // exactly the low popcount(M) bits of the input, so testing against zero
+  // reduces to masking those low bits. Keep a shared shuffle result rather
+  // than adding another test.
   SmallVector<WeakTrackingVH, 4> ZeroTests;
   for (Instruction &I : instructions(F)) {
     auto *Cmp = dyn_cast<ICmpInst>(&I);
@@ -163,22 +168,40 @@ PreservedAnalyses BitShuffleFoldingPass::run(Function &F,
       Input = Cmp->getOperand(1);
     else if (!match(Cmp->getOperand(1), m_Zero()))
       continue;
-    auto *Pext = dyn_cast<IntrinsicInst>(Input);
-    if (Pext && isBitShuffle(*Pext) && Pext->hasOneUse() &&
-        (Pext->getIntrinsicID() == Intrinsic::x86_bmi_pext_32 ||
-         Pext->getIntrinsicID() == Intrinsic::x86_bmi_pext_64))
+    auto *Shuffle = dyn_cast<IntrinsicInst>(Input);
+    if (!Shuffle || !isBitShuffle(*Shuffle) || !Shuffle->hasOneUse())
+      continue;
+    Intrinsic::ID IID = Shuffle->getIntrinsicID();
+    bool IsPext =
+        IID == Intrinsic::x86_bmi_pext_32 || IID == Intrinsic::x86_bmi_pext_64;
+    if (IsPext || isa<ConstantInt>(Shuffle->getArgOperand(1)))
       ZeroTests.push_back(Cmp);
   }
   for (WeakTrackingVH &Handle : ZeroTests) {
     auto *Cmp = dyn_cast_or_null<ICmpInst>(Handle);
     if (!Cmp)
       continue;
-    auto *Pext = dyn_cast<IntrinsicInst>(Cmp->getOperand(0));
-    if (!Pext)
-      Pext = cast<IntrinsicInst>(Cmp->getOperand(1));
+    auto *Shuffle = dyn_cast<IntrinsicInst>(Cmp->getOperand(0));
+    if (!Shuffle)
+      Shuffle = cast<IntrinsicInst>(Cmp->getOperand(1));
+    Intrinsic::ID IID = Shuffle->getIntrinsicID();
+    bool IsPext =
+        IID == Intrinsic::x86_bmi_pext_32 || IID == Intrinsic::x86_bmi_pext_64;
     IRBuilder<> Builder(Cmp);
+    Value *Mask;
+    if (IsPext) {
+      Mask = Shuffle->getArgOperand(1);
+    } else {
+      const APInt &MaskVal =
+          cast<ConstantInt>(Shuffle->getArgOperand(1))->getValue();
+      unsigned Width = Shuffle->getType()->getScalarSizeInBits();
+      unsigned PopCount = MaskVal.popcount();
+      Mask = ConstantInt::get(Shuffle->getType(),
+                              APInt::getLowBitsSet(Width, PopCount));
+    }
     Value *Masked = Builder.CreateAnd(
-        Pext->getArgOperand(0), Pext->getArgOperand(1), "compress.masked");
+        Shuffle->getArgOperand(0), Mask,
+        IsPext ? "compress.masked" : "expand.masked");
     Value *Replacement = Builder.CreateICmp(
         Cmp->getPredicate(), Masked, ConstantInt::get(Masked->getType(), 0));
     Cmp->replaceAllUsesWith(Replacement);

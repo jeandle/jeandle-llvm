@@ -21,3 +21,13 @@ define i64 @ones(i64 %m) {
   %r = call i64 @llvm.x86.bmi.pdep.64(i64 -1, i64 %m)
   ret i64 %r
 }
+
+define i1 @expand_zero_const(i32 %x) {
+; CHECK-LABEL: @expand_zero_const(
+; CHECK: %c = call i32 @llvm.x86.bmi.pdep.32(i32 %x, i32 16843009)
+; CHECK: %r = icmp eq i32 %c, 0
+; CHECK: ret i1 %r
+  %c = call i32 @llvm.x86.bmi.pdep.32(i32 %x, i32 16843009)
+  %r = icmp eq i32 %c, 0
+  ret i1 %r
+}
