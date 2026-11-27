@@ -10,6 +10,7 @@
 
 #include "llvm/Transforms/Jeandle/JavaOperationLower.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/InlineAdvisor.h"
 #include "llvm/Analysis/ProfileSummaryInfo.h"
@@ -18,6 +19,7 @@
 #include "llvm/IR/Jeandle/Attributes.h"
 #include "llvm/IR/Jeandle/MemoryBarrier.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Transforms/Jeandle/JeandleTransformUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -70,11 +72,12 @@ runImpl(Module &M, int Phase, FunctionAnalysisManager *FAM,
         F.getName() == jeandle::ReplayPublicationBarrierName ||
         !F.hasFnAttribute(jeandle::Attribute::LowerPhase))
       return false;
+    StringRef AttrVal =
+        F.getFnAttribute(jeandle::Attribute::LowerPhase).getValueAsString();
     int V = 0;
-    bool Failed = F.getFnAttribute(jeandle::Attribute::LowerPhase)
-                      .getValueAsString()
-                      .getAsInteger(10, V);
-    assert(!Failed && "wrong value of LowerPhase attribute");
+    if (AttrVal.getAsInteger(10, V))
+      report_fatal_error(Twine("invalid lower-phase attribute value '") +
+                         AttrVal + "' on function '" + F.getName() + "'");
     return V == Phase;
   };
 
