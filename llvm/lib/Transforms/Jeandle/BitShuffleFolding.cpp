@@ -199,9 +199,9 @@ PreservedAnalyses BitShuffleFoldingPass::run(Function &F,
       Mask = ConstantInt::get(Shuffle->getType(),
                               APInt::getLowBitsSet(Width, PopCount));
     }
-    Value *Masked = Builder.CreateAnd(
-        Shuffle->getArgOperand(0), Mask,
-        IsPext ? "compress.masked" : "expand.masked");
+    Value *Masked =
+        Builder.CreateAnd(Shuffle->getArgOperand(0), Mask,
+                          IsPext ? "compress.masked" : "expand.masked");
     Value *Replacement = Builder.CreateICmp(
         Cmp->getPredicate(), Masked, ConstantInt::get(Masked->getType(), 0));
     Cmp->replaceAllUsesWith(Replacement);
