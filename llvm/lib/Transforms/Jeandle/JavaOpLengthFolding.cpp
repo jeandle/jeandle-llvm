@@ -45,8 +45,10 @@
 
 #include "llvm/Transforms/Jeandle/JavaOpLengthFolding.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -62,6 +64,11 @@
 #include "llvm/Transforms/Utils/Local.h"
 
 #define DEBUG_TYPE "jeandle-java-op-length-folding"
+
+STATISTIC(NumResolveNodesExpanded,
+          "Number of merge nodes expanded during arraylength resolution");
+STATISTIC(NumResolveCacheHits,
+          "Number of cache hits during arraylength resolution");
 
 using namespace llvm;
 
@@ -80,16 +87,30 @@ struct ResolveResult {
   Value *Length; // valid only when Kind == Resolved
 };
 
+struct ResolveStepResult {
+  ResolveResult Result;
+  // False if the outcome depended on an in-progress cycle back-edge, a
+  // self-edge, or a depth-limit cutoff. Only context-independent completed
+  // results may be memoized within a query.
+  bool Cacheable = true;
+};
+
 // Bound on the recursion depth over PHI/select chains. Pathological merge
 // diamonds give up conservatively instead of burning compile time.
 static constexpr unsigned MaxResolveDepth = 16;
 
-static ResolveResult resolveArrayLength(Value *V, const DataLayout &DL,
-                                        unsigned Depth,
-                                        SmallPtrSetImpl<Value *> &Active,
-                                        SmallPtrSetImpl<Value *> &Allocations) {
+// Cache key pairs the canonicalized merge node (PHI/select after stripping
+// identity wrappers and zero-offset GEPs) with the current recursion depth so
+// cached entries preserve the exact remaining depth budget.
+using ResolveCacheKey = std::pair<Value *, unsigned>;
+using ResolveCache = SmallDenseMap<ResolveCacheKey, ResolveResult, 16>;
+
+static ResolveStepResult
+resolveArrayLength(Value *V, const DataLayout &DL, unsigned Depth,
+                   SmallPtrSetImpl<Value *> &Active,
+                   SmallPtrSetImpl<Value *> &Allocations, ResolveCache &Cache) {
   if (Depth > MaxResolveDepth)
-    return {ResolveKind::Conflict, nullptr};
+    return {{ResolveKind::Conflict, nullptr}, /*Cacheable=*/false};
 
   // Peel identity-preserving wrappers (bitcast, addrspacecast within
   // addrspace(1), freeze) and constant-offset GEPs — the same helper PEA
@@ -101,41 +122,58 @@ static ResolveResult resolveArrayLength(Value *V, const DataLayout &DL,
   Value *Root =
       jeandle::pea::stripPointerCastsAndOffsets(V, DL, &Offset, &NonConstant);
   if (NonConstant || Offset != 0 || !Root)
-    return {ResolveKind::Conflict, nullptr};
+    return {{ResolveKind::Conflict, nullptr}, /*Cacheable=*/true};
 
   if (auto *CB = dyn_cast<CallBase>(Root)) {
     if (Value *Length = jeandle::pea::getJeandleNewArrayLength(CB)) {
       Allocations.insert(CB);
-      return {ResolveKind::Resolved, Length};
+      return {{ResolveKind::Resolved, Length}, /*Cacheable=*/true};
     }
-    return {ResolveKind::Conflict, nullptr};
+    return {{ResolveKind::Conflict, nullptr}, /*Cacheable=*/true};
   }
 
   // PHI and select merge several candidate arrays. All non-cycle incomings
   // must resolve to the SAME length Value (pointer equality; constants are
   // context-uniqued, so equal constants compare equal).
+  if (!isa<PHINode>(Root) && !isa<SelectInst>(Root)) {
+    // Function arguments, loads, other calls, undef/poison, ... — opaque.
+    return {{ResolveKind::Conflict, nullptr}, /*Cacheable=*/true};
+  }
+
+  if (Active.contains(Root))
+    return {{ResolveKind::NoInfo, nullptr},
+            /*Cacheable=*/false}; // cycle back-edge
+
+  ResolveCacheKey Key{Root, Depth};
+  if (auto It = Cache.find(Key); It != Cache.end()) {
+    ++NumResolveCacheHits;
+    return {It->second, /*Cacheable=*/true};
+  }
+
+  Active.insert(Root);
+  ++NumResolveNodesExpanded;
+
   SmallVector<Value *, 4> Incomings;
   if (auto *PN = dyn_cast<PHINode>(Root)) {
-    if (!Active.insert(PN).second)
-      return {ResolveKind::NoInfo, nullptr}; // cycle back-edge
     for (Value *Inc : PN->incoming_values())
       Incomings.push_back(Inc);
-  } else if (auto *SI = dyn_cast<SelectInst>(Root)) {
-    if (!Active.insert(SI).second)
-      return {ResolveKind::NoInfo, nullptr};
+  } else {
+    auto *SI = cast<SelectInst>(Root);
     Incomings.push_back(SI->getTrueValue());
     Incomings.push_back(SI->getFalseValue());
-  } else {
-    // Function arguments, loads, other calls, undef/poison, ... — opaque.
-    return {ResolveKind::Conflict, nullptr};
   }
 
   ResolveResult Acc{ResolveKind::NoInfo, nullptr};
+  bool Cacheable = true;
   for (Value *Inc : Incomings) {
-    if (Inc == Root)
+    if (Inc == Root) {
+      Cacheable = false;
       continue; // self-edge adds no new value
-    ResolveResult R =
-        resolveArrayLength(Inc, DL, Depth + 1, Active, Allocations);
+    }
+    ResolveStepResult Step =
+        resolveArrayLength(Inc, DL, Depth + 1, Active, Allocations, Cache);
+    Cacheable &= Step.Cacheable;
+    ResolveResult R = Step.Result;
     if (R.Kind == ResolveKind::Conflict) {
       Acc = R;
       break;
@@ -150,7 +188,9 @@ static ResolveResult resolveArrayLength(Value *V, const DataLayout &DL,
     }
   }
   Active.erase(Root);
-  return Acc;
+  if (Cacheable && Acc.Kind != ResolveKind::NoInfo)
+    Cache.try_emplace(Key, Acc);
+  return {Acc, Cacheable};
 }
 
 // Dead pointer wrappers can keep an otherwise unused allocation alive after
@@ -268,8 +308,11 @@ PreservedAnalyses JavaOpLengthFolding::run(Function &F,
 
       SmallPtrSet<Value *, 8> Active;
       SmallPtrSet<Value *, 8> Allocations;
-      ResolveResult R = resolveArrayLength(CB->getArgOperand(0), DL,
-                                           /*Depth=*/0, Active, Allocations);
+      ResolveCache Cache;
+      ResolveResult R =
+          resolveArrayLength(CB->getArgOperand(0), DL,
+                             /*Depth=*/0, Active, Allocations, Cache)
+              .Result;
       if (R.Kind != ResolveKind::Resolved)
         continue;
 
