@@ -419,4 +419,3 @@ PreservedAnalyses JavaOpLengthFolding::run(Function &F,
   PA.preserveSet<CFGAnalyses>(); // calls erased in place, CFG untouched
   return PA;
 }
-
