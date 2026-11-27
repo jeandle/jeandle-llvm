@@ -7,12 +7,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 // Outer fixpoint. Re-runs PartialEscapeAnalysis + PartialEscapeTransform,
-// running the standard canonicalization passes (ADCE + SimplifyCFG +
-// LoopSimplify + InstCombine) in every round, until the transform and
-// canonicalized IR both reach a bounded fixpoint.
-// Each MaterializeEffect reuses the allocation call at its original site and
-// emits field/lock replay along the paths that require a materialized value; it
-// never creates or relocates an allocation. PEA can delete fully non-escaping
+// running canonicalization (ADCE + SimplifyCFG +
+// LoopSimplify + scalar widening CSE + InstCombine) in every round, until the
+// transform and canonicalized IR both reach a bounded fixpoint. Each
+// MaterializeEffect reuses the allocation call at its original site and emits
+// field/lock replay along the paths that require a materialized value; it never
+// creates or relocates an allocation. PEA can delete fully non-escaping
 // allocations. A deopt-bundle rewrite may replace an allocation call in place,
 // without adding an allocation or changing its site.
 //
@@ -27,9 +27,14 @@
 
 #include "llvm/Transforms/Jeandle/PartialEscapeIterative.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DepthFirstIterator.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeAnalysis.h"
 #include "llvm/Analysis/Jeandle/PartialEscapeUtils.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Jeandle/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -108,6 +113,32 @@ static std::string printFunctionIR(const Function &F) {
   return IR;
 }
 
+// Snapshot-local widening is placed before it can be shared. Common only
+// scalar casts here: eliminating memory replays would make the next analysis
+// recreate them and prevent the outer fixpoint from becoming idle.
+// Cache keys have sub-int types, so deleting an i32 result cannot erase a key.
+static bool commonSubIntWidenings(DominatorTree &DT) {
+  DenseMap<Value *, ZExtInst *> Available;
+  bool Changed = false;
+  for (DomTreeNode *Node : depth_first(DT.getRootNode())) {
+    for (Instruction &I : make_early_inc_range(*Node->getBlock())) {
+      auto *Cast = dyn_cast<ZExtInst>(&I);
+      if (!Cast || !Cast->getType()->isIntegerTy(32))
+        continue;
+      auto &Existing = Available[Cast->getOperand(0)];
+      if (Existing && DT.dominates(Existing, Cast)) {
+        Existing->andIRFlags(Cast);
+        Cast->replaceAllUsesWith(Existing);
+        Cast->eraseFromParent();
+        Changed = true;
+      } else {
+        Existing = Cast;
+      }
+    }
+  }
+  return Changed;
+}
+
 PreservedAnalyses PartialEscapeIterative::run(Function &F,
                                               FunctionAnalysisManager &FAM) {
   // Gate on jeandle.java_method_compilation. Mirrors the gating in
@@ -171,7 +202,7 @@ PreservedAnalyses PartialEscapeIterative::run(Function &F,
 
     // Canonicalization is part of every executed round, including the last
     // round allowed by the cap. Order: ADCE → SimplifyCFG → LoopSimplify →
-    // InstCombine. Compare the complete sequence's deterministic printed IR;
+    // scalar widening CSE → InstCombine. Compare the complete sequence's IR;
     // individual passes may conservatively invalidate analyses, and adjacent
     // passes may make offsetting structural changes.
     const std::string BeforeCanonicalization = printFunctionIR(F);
@@ -188,6 +219,12 @@ PreservedAnalyses PartialEscapeIterative::run(Function &F,
     AnyCanonMutated |= !runAndInvalidate(Dc).areAllPreserved();
     AnyCanonMutated |= !runAndInvalidate(Sc).areAllPreserved();
     AnyCanonMutated |= !runAndInvalidate(Ls).areAllPreserved();
+    if (commonSubIntWidenings(FAM.getResult<DominatorTreeAnalysis>(F))) {
+      PreservedAnalyses CastPA;
+      CastPA.preserveSet<CFGAnalyses>();
+      FAM.invalidate(F, CastPA);
+      AnyCanonMutated = true;
+    }
     AnyCanonMutated |= !runAndInvalidate(Ic).areAllPreserved();
     const bool CanonChanged =
         AnyCanonMutated && BeforeCanonicalization != printFunctionIR(F);

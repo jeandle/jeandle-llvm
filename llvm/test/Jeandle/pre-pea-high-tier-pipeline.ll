@@ -8,11 +8,12 @@
 ; target-specific passes can be inserted between the semantic stages.
 ; PEA-ON: {{.*jeandle-inline-driver,}}
 ; PEA-ON: function(safepoint-poll-normalization,simplifycfg
-; PEA-ON: function(java-op-length-folding,string-intrinsic-specialization,instcombine
+; PEA-ON: function(java-op-length-folding,string-intrinsic-specialization,character-intrinsic-specialization,instcombine
 ; PEA-ON: simplifycfg
 ; PEA-ON: loop-simplify,break-crit-edges,
 ; PEA-ON: {{.*loop\(loop-rotate.*indvars,loop-deletion\),}}
 ; PEA-ON: pre-pea-allocation-unroll-hints,loop-unroll<no-partial;no-runtime;no-upperbound;full-unroll-max=128;O3>,
+; PEA-ON: character-intrinsic-specialization
 ; PEA-ON: {{.*function\(partial-escape-iterative\),}}
 ; PEA-ON: function(instsimplify),
 ; PEA-ON: function(recover-type-info),

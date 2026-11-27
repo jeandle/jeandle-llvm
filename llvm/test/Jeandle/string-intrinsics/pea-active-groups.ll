@@ -123,7 +123,7 @@ unwind:
 ; BE: and i32 %bits, -65536
 ; CHECK: or{{( disjoint)?}} i32
 ; CHECK: ret i32
-define i32 @symbolic_packed_tail(i32 %bits) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
+define i32 @symbolic_packed_tail(i32 noundef %bits) gc "hotspotgc" personality ptr @__gxx_personality_v0 {
 entry:
   %source = invoke hotspotcc ptr addrspace(1) @jeandle.new_array(ptr inttoptr (i64 10002 to ptr), i32 1, i32 24, i32 16, i32 100, i1 false, i1 false) to label %allocate unwind label %unwind
 allocate:

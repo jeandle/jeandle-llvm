@@ -46,8 +46,7 @@ unsigned getPrePEAFullUnrollMaxCount() {
 // The standard unroller retains ownership of legality and transformation.
 PreservedAnalyses
 PrePEAAllocationUnrollHints::run(Function &F, FunctionAnalysisManager &FAM) {
-  constexpr uint64_t MaxLoopCost = 1024;
-  uint64_t RemainingCost = 4096;
+  uint64_t RemainingCost = PrePEAFullUnrollFunctionBudget;
   auto &LI = FAM.getResult<LoopAnalysis>(F);
   auto &SE = FAM.getResult<ScalarEvolutionAnalysis>(F);
   auto &TTI = FAM.getResult<TargetIRAnalysis>(F);
@@ -107,7 +106,8 @@ PrePEAAllocationUnrollHints::run(Function &F, FunctionAnalysisManager &FAM) {
         Cost.NumInlineCandidates || Cost.getRolledLoopSize() < UP.BEInsns)
       continue;
     uint64_t UnrolledCost = Cost.getUnrolledLoopSize(UP, Count);
-    if (UnrolledCost <= UP.Threshold || UnrolledCost > MaxLoopCost ||
+    if (UnrolledCost <= UP.Threshold ||
+        UnrolledCost > PrePEAFullUnrollLoopBudget ||
         UnrolledCost > RemainingCost)
       continue;
     SmallVector<llvm::Metadata *, 8> LoopMetadata(1);

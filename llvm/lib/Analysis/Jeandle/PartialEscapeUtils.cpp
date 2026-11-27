@@ -19,6 +19,8 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/CaptureTracking.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
@@ -28,9 +30,11 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Jeandle/Attributes.h"
+#include "llvm/IR/Jeandle/CharacterIntrinsics.h"
 #include "llvm/IR/Jeandle/JavaType.h"
 #include "llvm/IR/Jeandle/JeandleUtils.h"
 #include "llvm/IR/Jeandle/Metadata.h"
+#include "llvm/IR/Jeandle/StringIntrinsics.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/CheckedArithmetic.h"
@@ -41,6 +45,88 @@
 using namespace llvm;
 
 namespace llvm::jeandle::pea {
+
+bool hasNonEscapingLocalArray(Value *Array, const LoopInfo &LI,
+                              unsigned MaxLength, unsigned MaxUsesToExplore,
+                              bool RequireScalarAccesses) {
+  struct ArrayCaptureTracker : CaptureTracker {
+    const DataLayout &DL;
+    bool RequireScalarAccesses;
+    bool Captured = false;
+    ArrayCaptureTracker(const DataLayout &DL, bool RequireScalarAccesses)
+        : DL(DL), RequireScalarAccesses(RequireScalarAccesses) {}
+    void tooManyUses() override { Captured = true; }
+    bool shouldExplore(const Use *U) override {
+      // PEA resolves allocation identity comparisons without observing the
+      // contents. LLVM capture tracking also counts their address bits.
+      if (auto *Cmp = dyn_cast<ICmpInst>(U->getUser()))
+        if (Cmp->isEquality())
+          return false;
+      Value *Pointer = nullptr;
+      if (auto *Load = dyn_cast<LoadInst>(U->getUser()))
+        Pointer = Load->getPointerOperand();
+      else if (auto *Store = dyn_cast<StoreInst>(U->getUser()))
+        if (U->getOperandNo() == StoreInst::getPointerOperandIndex())
+          Pointer = Store->getPointerOperand();
+      if (RequireScalarAccesses && Pointer &&
+          !resolveFieldOffset(Pointer, DL)) {
+        // A remaining symbolic element access needs a physical array.
+        Captured = true;
+        return false;
+      }
+      auto *CB = dyn_cast<CallBase>(U->getUser());
+      if (!CB)
+        return true;
+      if (CB->isBundleOperand(U) &&
+          CB->getOperandBundleForOperand(U->getOperandNo())
+              .isDeoptOperandBundle())
+        return false;
+      if (auto Op = jeandle::decodeCharacterIntrinsic(*CB))
+        if (CB->isArgOperand(U) && (CB->getArgOperandNo(U) == 0 ||
+                                    (!Op->Scan && CB->getArgOperandNo(U) == 2)))
+          return false;
+      if (!RequireScalarAccesses && jeandle::isStringGetChar(*CB) &&
+          CB->isArgOperand(U) && CB->getArgOperandNo(U) == 0)
+        return false;
+      if (isJeandleArrayLength(CB) && CB->isArgOperand(U) &&
+          CB->getArgOperandNo(U) == 0)
+        return false;
+      if (auto *II = dyn_cast<IntrinsicInst>(CB))
+        if (isPEAHandledNonEscapingIntrinsic(II))
+          return true;
+      // Even a nocapture callee can observe the array's memory and force
+      // materialization. Non-capture alone does not promise scalar removal.
+      Captured = true;
+      return false;
+    }
+    Action captured(const Use *, UseCaptureInfo CI) override {
+      if (capturesAnything(CI.UseCC)) {
+        Captured = true;
+        return Stop;
+      }
+      return Continue;
+    }
+  };
+  SmallVector<const Value *, 4> Objects;
+  getUnderlyingObjects(Array, Objects, &LI);
+  if (Objects.empty())
+    return false;
+  for (const Value *Object : Objects) {
+    auto *Allocation = dyn_cast<CallBase>(Object);
+    auto *Length = Allocation
+                       ? dyn_cast_or_null<ConstantInt>(
+                             jeandle::pea::getJeandleNewArrayLength(Allocation))
+                       : nullptr;
+    if (!Length || Length->isNegative() || !Length->getValue().ule(MaxLength))
+      return false;
+    ArrayCaptureTracker Tracker(Allocation->getModule()->getDataLayout(),
+                                RequireScalarAccesses);
+    PointerMayBeCaptured(Object, &Tracker, MaxUsesToExplore);
+    if (Tracker.Captured)
+      return false;
+  }
+  return true;
+}
 
 bool matchesFunctionNameFilter(StringRef FunctionName, StringRef Filter) {
   if (FunctionName == Filter)
